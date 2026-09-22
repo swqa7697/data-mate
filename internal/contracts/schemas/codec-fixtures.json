@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "bool",
+              "int2",
+              "int4",
+              "int8",
+              "numeric",
+              "float4",
+              "float8",
+              "text",
+              "varchar",
+              "bpchar",
+              "uuid",
+              "date",
+              "time",
+              "timestamp",
+              "timestamptz",
+              "bytea",
+              "json",
+              "jsonb"
+            ]
+          },
+          "wire_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "json": {},
+          "encoding": {
+            "type": "string",
+            "enum": [
+              "base64"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "wire_text",
+          "json"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "version",
+    "cases"
+  ],
+  "additionalProperties": false
+}

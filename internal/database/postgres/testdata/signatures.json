@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "purpose": "contract-examples",
+  "cases": [
+    {
+      "name": "int4-add-16",
+      "postgres_major": "16",
+      "kind": "operator",
+      "namespace": "pg_catalog",
+      "identity": "+",
+      "arguments": [
+        "int4",
+        "int4"
+      ],
+      "result": "int4",
+      "implementation": "int4pl"
+    },
+    {
+      "name": "int4-add-18",
+      "postgres_major": "18",
+      "kind": "operator",
+      "namespace": "pg_catalog",
+      "identity": "+",
+      "arguments": [
+        "int4",
+        "int4"
+      ],
+      "result": "int4",
+      "implementation": "int4pl"
+    }
+  ]
+}

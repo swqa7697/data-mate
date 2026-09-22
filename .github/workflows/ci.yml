@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Record native toolchain
+        run: |
+          uname -m
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+          xcrun clang --version
+          xcrun --show-sdk-path
+      - name: Install pinned dependencies and build
+        run: make install
+      - name: Check formatting
+        run: make format-check
+      - name: Lint
+        run: make lint
+      - name: Unit and regression tests
+        run: make test
+      - name: Race tests
+        run: make test-race
+      - name: Build
+        run: make build

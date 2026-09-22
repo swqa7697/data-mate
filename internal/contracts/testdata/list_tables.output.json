@@ -1,0 +1,12 @@
+{
+  "connection": "analytics",
+  "tables": [
+    {
+      "schema": "public",
+      "name": "orders",
+      "kind": "table",
+      "supported": true
+    }
+  ],
+  "next_cursor": null
+}

@@ -1,0 +1,22 @@
+{
+  "connection": "analytics",
+  "columns": [
+    {
+      "name": "n",
+      "type": "int8"
+    },
+    {
+      "name": "n",
+      "type": "numeric"
+    }
+  ],
+  "rows": [
+    [
+      "9223372036854775807",
+      "12345678901234567890.001"
+    ]
+  ],
+  "row_count": 1,
+  "truncated": false,
+  "elapsed_ms": 8
+}

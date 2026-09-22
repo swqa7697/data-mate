@@ -195,9 +195,24 @@ The development binary resolves its root from its installed location, independen
 }
 ```
 
-`credential_ref` addresses an encrypted credential bundle, never an OS credential item. It may be omitted for an explicitly passwordless connection. Unknown versions, unknown security-related fields, duplicate IDs/aliases, invalid ports, and embedded secret fields are validation errors. The decoder rejects duplicate JSON keys. Driver-specific connection fields are decoded by the selected driver; no unrestricted DSN or option-string passthrough exists.
+`credential_ref` addresses an encrypted credential bundle, never an OS credential item. It may be omitted for an explicitly passwordless connection. Version 1 rejects every unknown field, unknown versions, duplicate IDs/aliases/credential references, invalid ports, and embedded secret fields. The decoder rejects duplicate JSON keys recursively, trailing JSON values, invalid UTF-8, inputs over 1 MiB, and more than 128 profiles. Aliases match `^[a-z][a-z0-9_-]{0,62}$`. UUID identity comparisons are case-insensitive; scope names retain case. Driver-specific connection fields are decoded by the selected driver; no unrestricted DSN or option-string passthrough exists.
 
 Profiles may be edited manually using the documented schema. A valid manual profile is equivalent to a CLI-created profile; it requires no hidden activation record. Referencing a nonexistent credential bundle produces `CREDENTIAL_MISSING`. The CLI can attach credentials through `db edit`. File configuration alone cannot create a secret.
+
+P0 freezes the executable profile contract in
+`internal/contracts/schemas/profiles.json`. TLS is
+`{mode:"disabled"|"verify-full",ca_file?:absolute-path}`; SSH is
+`{host,port,user,auth:"password"|"key"}`; SOCKS5 is
+`{kind:"socks5",host,port,username?}`. CA files require verified TLS; SSH and
+SOCKS5 are mutually exclusive. Authentication material is never stored in these
+objects. A missing scope is invalid; profile creation explicitly defaults to all.
+
+Optional `limits` members are `query_timeout_ms` (1..30000, default 10000),
+`max_rows` (1..5000, default 500), and `max_result_bytes` (1024..1048576, default
+1048576). Omitted members take their individual defaults; zero is not omission.
+A revision is SHA-256 over validated canonical JSON, with normalized UUIDs,
+explicit defaults, and sorted profiles/scope selections. Formatting and selection
+ordering do not change revisions; settings and limits do.
 
 ### 5.3 Writes, reloads, and interruption
 
@@ -364,6 +379,22 @@ Example query result, carried as MCP structured content:
 Rows use arrays aligned with column metadata to preserve duplicate column names. Encode int8 and exact decimal values as strings, timestamps in ISO 8601, binary values as base64 with type metadata, SQL NULL as JSON null, and JSON values as structured JSON. Preserve timezone meaning and avoid lossy conversion through floating-point numbers. The codec specification must cover each accepted PostgreSQL type.
 
 Tool failures use `isError` and a stable code such as `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `SCOPE_DENIED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, or `RESOURCE_LIMIT`. Include a concise safe message and retry guidance. Protocol errors remain JSON-RPC errors. Never return raw DSNs, SQL parameter values, PostgreSQL error detail/hints, or decrypted data in diagnostics.
+
+P0 freezes strict input/output schemas and examples under
+`internal/contracts/schemas` and `internal/contracts/testdata`; tool objects reject
+additional fields. Inputs are exactly the four tools above. Query parameters use
+ordered `{type,value}` objects (at most 256), canonical PostgreSQL scalar names,
+and the codec representations, including null. Parameters, SQL semantic checks,
+and per-profile caps require downstream runtime validation; schemas alone do not
+authorize execution. Central errors also include `POLICY_UNSAFE`, `STALE_CURSOR`,
+`INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`.
+
+CLI list/test/status schemas use a `version:1` envelope with `connections`,
+`results`, or `state`/`agents`, respectively. These schemas define future output;
+P0's unfinished commands return nonzero and emit no success object. Versioned
+PostgreSQL codec/signature fixture formats live under
+`internal/database/postgres/testdata`; native codec execution and catalog-verified
+compiler signatures remain P4/P5 gates.
 
 Treat database comments and text values as untrusted data. Return them as data, never as operational instructions. Scope can prevent retrieval of unauthorized objects; it cannot make permitted text immune to prompt injection in the consuming agent.
 

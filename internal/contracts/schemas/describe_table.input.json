@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "schema": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "table": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    }
+  },
+  "required": [
+    "connection",
+    "schema",
+    "table"
+  ],
+  "additionalProperties": false
+}

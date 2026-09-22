@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "connections": [
+    {
+      "id": "936e3468-5b48-4ef2-9a89-964449f06d98",
+      "alias": "analytics",
+      "driver": "postgres",
+      "connection": {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "analytics",
+        "username": "reader"
+      },
+      "transport": {
+        "tls": {
+          "mode": "disabled"
+        }
+      },
+      "scope": {
+        "mode": "all"
+      }
+    }
+  ]
+}

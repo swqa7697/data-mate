@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "schema": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "table": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "table",
+        "partitioned_table",
+        "view",
+        "materialized_view",
+        "foreign_table",
+        "other"
+      ]
+    },
+    "supported": {
+      "type": "boolean"
+    },
+    "columns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$"
+          },
+          "nullable": {
+            "type": "boolean"
+          },
+          "supported": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "nullable",
+          "supported"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "keys": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "unique"
+            ]
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\x00]+$",
+              "maxLength": 63
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "kind",
+          "columns"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\x00]+$",
+              "maxLength": 63
+            },
+            "minItems": 1
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 63
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 63
+              }
+            },
+            "required": [
+              "schema",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          "target_columns": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\x00]+$",
+              "maxLength": 63
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "columns",
+          "target",
+          "target_columns"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "connection",
+    "schema",
+    "table",
+    "kind",
+    "supported",
+    "columns",
+    "keys",
+    "relationships"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,5 @@
+{
+  "connection": "analytics",
+  "sql": "SELECT count(*) FROM public.orders",
+  "parameters": []
+}

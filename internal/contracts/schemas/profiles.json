@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "connections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "alias": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          },
+          "driver": {
+            "const": "postgres"
+          },
+          "connection": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "database": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
+              },
+              "username": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
+              }
+            },
+            "required": [
+              "host",
+              "port",
+              "database",
+              "username"
+            ],
+            "additionalProperties": false
+          },
+          "credential_ref": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "transport": {
+            "type": "object",
+            "properties": {
+              "tls": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "const": "disabled"
+                      }
+                    },
+                    "required": [
+                      "mode"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "const": "verify-full"
+                      },
+                      "ca_file": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^/[^\\x00]*$"
+                      }
+                    },
+                    "required": [
+                      "mode"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "ssh": {
+                "type": "object",
+                "properties": {
+                  "host": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$"
+                  },
+                  "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "user": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$"
+                  },
+                  "auth": {
+                    "type": "string",
+                    "enum": [
+                      "password",
+                      "key"
+                    ]
+                  }
+                },
+                "required": [
+                  "host",
+                  "port",
+                  "user",
+                  "auth"
+                ],
+                "additionalProperties": false
+              },
+              "proxy": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "socks5"
+                  },
+                  "host": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$"
+                  },
+                  "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "username": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "host",
+                  "port"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "tls"
+            ],
+            "additionalProperties": false,
+            "not": {
+              "required": [
+                "ssh",
+                "proxy"
+              ]
+            }
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "all"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "selected"
+                  },
+                  "schemas": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\x00]+$",
+                      "maxLength": 63
+                    },
+                    "uniqueItems": true
+                  },
+                  "tables": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "schema": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[^\\x00]+$",
+                          "maxLength": 63
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[^\\x00]+$",
+                          "maxLength": 63
+                        }
+                      },
+                      "required": [
+                        "schema",
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "query_timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30000
+              },
+              "max_rows": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5000
+              },
+              "max_result_bytes": {
+                "type": "integer",
+                "minimum": 1024,
+                "maximum": 1048576
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "alias",
+          "driver",
+          "connection",
+          "transport",
+          "scope"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 128
+    }
+  },
+  "required": [
+    "version",
+    "connections"
+  ],
+  "additionalProperties": false
+}

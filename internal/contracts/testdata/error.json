@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "SERVICE_UNAVAILABLE",
+    "message": "Database operations are not ready.",
+    "retryable": false
+  }
+}

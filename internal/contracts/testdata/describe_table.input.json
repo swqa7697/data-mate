@@ -1,0 +1,5 @@
+{
+  "connection": "analytics",
+  "schema": "public",
+  "table": "orders"
+}

@@ -1,0 +1,12 @@
+{
+  "connections": [
+    {
+      "alias": "analytics",
+      "driver": "postgres",
+      "database": "analytics",
+      "scope": {
+        "mode": "all"
+      }
+    }
+  ]
+}

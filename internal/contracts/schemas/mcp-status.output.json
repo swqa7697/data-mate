@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "state": {
+      "enum": [
+        "stopped",
+        "starting",
+        "running",
+        "degraded",
+        "stale"
+      ]
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "state": {
+            "enum": [
+              "unavailable",
+              "pending",
+              "ready",
+              "conflict",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "state"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "state",
+    "agents"
+  ],
+  "additionalProperties": false
+}

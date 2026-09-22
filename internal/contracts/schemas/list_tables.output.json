@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "table",
+              "partitioned_table",
+              "view",
+              "materialized_view",
+              "foreign_table",
+              "other"
+            ]
+          },
+          "supported": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$"
+          }
+        },
+        "required": [
+          "schema",
+          "name",
+          "kind",
+          "supported"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 500
+    },
+    "next_cursor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2048
+    }
+  },
+  "required": [
+    "connection",
+    "tables",
+    "next_cursor"
+  ],
+  "additionalProperties": false
+}

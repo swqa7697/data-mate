@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "purpose": {
+      "const": "contract-examples"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$"
+          },
+          "postgres_major": {
+            "type": "string",
+            "enum": [
+              "16",
+              "18"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "function",
+              "aggregate",
+              "cast"
+            ]
+          },
+          "namespace": {
+            "const": "pg_catalog"
+          },
+          "identity": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$"
+          },
+          "arguments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bool",
+                "int2",
+                "int4",
+                "int8",
+                "numeric",
+                "float4",
+                "float8",
+                "text",
+                "varchar",
+                "bpchar",
+                "uuid",
+                "date",
+                "time",
+                "timestamp",
+                "timestamptz",
+                "bytea",
+                "json",
+                "jsonb"
+              ]
+            }
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "bool",
+              "int2",
+              "int4",
+              "int8",
+              "numeric",
+              "float4",
+              "float8",
+              "text",
+              "varchar",
+              "bpchar",
+              "uuid",
+              "date",
+              "time",
+              "timestamp",
+              "timestamptz",
+              "bytea",
+              "json",
+              "jsonb"
+            ]
+          },
+          "implementation": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$"
+          }
+        },
+        "required": [
+          "name",
+          "postgres_major",
+          "kind",
+          "namespace",
+          "identity",
+          "arguments",
+          "result",
+          "implementation"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "version",
+    "purpose",
+    "cases"
+  ],
+  "additionalProperties": false
+}

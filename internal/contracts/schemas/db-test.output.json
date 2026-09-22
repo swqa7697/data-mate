@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "stage": {
+            "enum": [
+              "config",
+              "vault",
+              "dial",
+              "authentication",
+              "version",
+              "policy"
+            ]
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "CONFIG_INVALID",
+                  "CONNECTION_NOT_FOUND",
+                  "CREDENTIAL_MISSING",
+                  "VAULT_UNAVAILABLE",
+                  "CONNECT_FAILED",
+                  "SCOPE_DENIED",
+                  "QUERY_UNSUPPORTED",
+                  "QUERY_TIMEOUT",
+                  "RESOURCE_LIMIT",
+                  "POLICY_UNSAFE",
+                  "STALE_CURSOR",
+                  "INVALID_ARGUMENT",
+                  "SERVICE_UNAVAILABLE",
+                  "CANCELLED"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "alias",
+          "ok",
+          "stage"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "results"
+  ],
+  "additionalProperties": false
+}
