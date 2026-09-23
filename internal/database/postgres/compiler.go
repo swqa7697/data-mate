@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -13,7 +15,7 @@ import (
 
 // Compile validates SQL through the same admission, role and catalog boundary as
 // metadata. It never prepares, plans or executes agent SQL. The resulting plan is
-// not a lease: P5 must acquire relation locks and recheck identity before execution.
+// not a lease: Query independently compiles, locks and rechecks before execution.
 func (d *Driver) Compile(ctx context.Context, a database.Access, sql string, parameters []sqlpolicy.Parameter) (sqlpolicy.Compiled, error) {
 	parsed, err := sqlpolicy.Parse(sql)
 	if err != nil {
@@ -31,14 +33,18 @@ func (d *Driver) Compile(ctx context.Context, a database.Access, sql string, par
 	return out, nil
 }
 func compileSQL(ctx context.Context, tx pgx.Tx, scope config.Scope, version int, p *sqlpolicy.Parsed, parameters []sqlpolicy.Parameter) (sqlpolicy.Compiled, error) {
-	var actual string
-	if err := tx.QueryRow(ctx, sqlpolicy.CatalogSQL).Scan(&actual); err != nil {
-		return sqlpolicy.Compiled{}, err
-	}
-	if err := sqlpolicy.VerifyCatalog(version/10000, []byte(actual)); err != nil {
+	if err := verifyCatalog(ctx, tx, version); err != nil {
 		return sqlpolicy.Compiled{}, err
 	}
 	return p.Compile(ctx, version/10000, &compilerCatalog{tx: tx, scope: scope}, parameters)
+}
+
+func verifyCatalog(ctx context.Context, tx pgx.Tx, version int) error {
+	var actual string
+	if err := tx.QueryRow(ctx, sqlpolicy.CatalogSQL).Scan(&actual); err != nil {
+		return err
+	}
+	return sqlpolicy.VerifyCatalog(version/10000, []byte(actual))
 }
 
 type compilerCatalog struct {
@@ -131,6 +137,26 @@ func (c *compilerCatalog) Resolve(ctx context.Context, schema, name string, only
 		}
 		out.Scans = append(out.Scans, sqlpolicy.Identity{OID: n.id, Schema: n.schema, Name: n.name})
 	}
+	// Capture structural facts separately from semantic built-in signatures.
+	// Include child column layouts and exact edges, not just the closure's OIDs.
+	ids := make([]uint32, 0, len(out.Dependencies))
+	for _, dep := range out.Dependencies {
+		ids = append(ids, dep.OID)
+	}
+	var state string
+	err = c.tx.QueryRow(ctx, `SELECT pg_catalog.json_agg(s ORDER BY s.oid)::text FROM (
+ SELECT r.oid,r.relkind,r.relrowsecurity,r.relforcerowsecurity,r.relam,r.relpersistence,
+ (SELECT pg_catalog.json_agg(a ORDER BY a.attnum) FROM (
+ SELECT attnum,attname,atttypid,atttypmod,attcollation,attnotnull,attisdropped,attgenerated
+ FROM pg_catalog.pg_attribute WHERE attrelid=r.oid AND attnum>0) a) AS columns,
+ (SELECT pg_catalog.json_agg(i ORDER BY i.inhparent,i.inhseqno) FROM (
+ SELECT inhparent,inhseqno,inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid=r.oid) i) AS parents
+ FROM pg_catalog.pg_class r WHERE r.oid=ANY($1::oid[])) s`, ids).Scan(&state)
+	if err != nil {
+		return out, err
+	}
+	digest := sha256.Sum256([]byte(state))
+	out.State = hex.EncodeToString(digest[:])
 	return out, nil
 }
 func (c *compilerCatalog) columns(ctx context.Context, oid uint32) ([]sqlpolicy.Column, error) {

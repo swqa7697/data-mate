@@ -3,7 +3,7 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P4 typed SQL policy compiler.**
+**Current implementation: P5 bounded read-only PostgreSQL executor.**
 `db add`, `db edit`,
 `db remove`/`rm`, and `db list`/`ls` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
@@ -11,8 +11,8 @@ encryption accounting, and one native Keychain item per installation are
 implemented. The internal PostgreSQL driver supports direct/verified TLS,
 read-only role checks, scoped catalog pages and table descriptions. The internal
 compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
-signatures and emits parameterized SQL. Query
-execution, CLI `db test`/`db scope`, MCP service and agent registration remain
+signatures and executes only emitted, parameterized SQL after relation locking
+and fresh authorization checks. CLI `db test`/`db scope`, MCP service and agent registration remain
 later packages; their commands fail explicitly.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
@@ -153,11 +153,15 @@ supported built-in types; views, foreign/materialized relations, custom types,
 generated columns and unverified relation features are reported as unsupported.
 Partition roots include their tree across schemas; ordinary inheritance requires
 all descendants in scope. RLS with inheritance/partitioning is unsupported;
-ordinary noninherited RLS remains supported. P4 compiles captured physical scans
-with ONLY/UNION ALL and verifies stable-fixture semantics on both PostgreSQL
-majors. P5 still owns locking, identity/hierarchy rechecks, DDL races, result
-limits and execution acceptance. Catalog support status alone does not authorize
-a query.
+ordinary noninherited RLS remains supported. The compiler freezes physical scans
+with ONLY/UNION ALL. Execution locks captured relations in OID order, then checks
+names/OIDs, all column layouts, hierarchy edges, scope and privileges again in a
+read-only READ COMMITTED transaction. A changed capture fails with retry guidance;
+queries are never automatically replayed. A partition attached after the final
+check enters only subsequent requests. Even a childless ordinary table uses
+ONLY, so a newly inherited child cannot enter an authorized scan. PostgreSQL
+16/18 fixtures exercise these DDL boundaries. Catalog support status alone does
+not authorize a query.
 
 The [SQL compiler contract](internal/database/postgres/sqlpolicy/README.md) lists
 accepted forms and conservative exclusions. It supports joins, filters, grouping,
@@ -168,9 +172,42 @@ submitted SQL is never prepared during compilation. Catalog signatures are
 pinned separately for PostgreSQL 16 and 18; other majors remain unavailable for
 compilation until audited. Verification ignores incidental catalog row IDs and
 numeric planner estimates while retaining implementation and safety properties.
-Only embedded policy is cached; live metadata is checked on every compilation.
+Only embedded policy is cached; live metadata is checked during compilation
+and again after locking, including queries without base relations.
 The compiler contract documents candidate export through the owned integration
-harness. No query command becomes available in P4.
+harness. The executor is an internal driver API; CLI and MCP query delivery are
+not exposed in this package.
+
+Queries use extended-protocol text results with explicit built-in OIDs. The
+compiler lowers the top-level LIMIT to the row cap plus one lookahead row while
+preserving smaller and nested limits. Results preserve duplicate column labels
+and contain complete rows only. Byte accounting includes JSON escaping, base64,
+column metadata, envelope fields and a duplicated compatibility text block.
+Oversized rows are omitted with `truncated:true`; metadata that cannot fit and
+protocol bodies over 2 MiB fail with `RESOURCE_LIMIT`. Byte truncation terminates
+the connection instead of draining remaining rows. Completed reads roll back;
+timeout/cancellation returns no partial result, and uncertain connections are
+discarded. Results are fully prepared before driver admission/state access ends.
+
+| PostgreSQL types | Result representation |
+| --- | --- |
+| bool, int2/int4 | JSON boolean or integer |
+| int8/numeric | Exact decimal strings; numeric special values remain strings |
+| float4/float8 | Finite JSON numbers; `NaN`, `Infinity`, `-Infinity` as strings |
+| text/varchar/bpchar/uuid | Strings; bpchar padding is preserved |
+| date/time/timestamp | ISO local strings; timestamps have no invented timezone |
+| timestamptz | UTC ISO strings ending in `Z` |
+| bytea | Base64 strings with the column encoding marker `base64` |
+| json/jsonb | Structured JSON with exact numbers; bounded to 1 MiB and depth 64 |
+| SQL NULL | JSON null for every type |
+
+Temporal infinity and BC values remain explicit strings, for example
+`infinity` and `0001-01-01T00:00:00Z BC`. Typed parameters use these JSON
+representations and canonical type names, with at most 256 parameters, 64 KiB
+per value and 256 KiB total; converted wire values obey the compiler's same byte
+limits. Temporal parameters require ISO forms; timestamptz may carry an explicit
+ISO offset. PostgreSQL validates calendar/range constraints through audited
+built-in input functions. Errors never include SQL or parameter values.
 
 Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
 with eight active operations, thirty-two waiters and a five-second queue deadline
@@ -217,8 +254,8 @@ duplicate keys/identities/references, malformed scopes, unsupported transports,
 and excess limits. No plaintext secret field belongs in a profile. Selected
 empty scopes expose nothing; missing scope is invalid. New profiles explicitly
 choose all. PostgreSQL codec/signature fixture formats are
-under `internal/database/postgres/testdata`. Codec execution remains P5; the
-compiler's reviewed per-major semantic manifests live under
+under `internal/database/postgres/testdata` and execute in offline and PostgreSQL
+16/18 regressions. The compiler's reviewed per-major semantic manifests live under
 `internal/database/postgres/sqlpolicy`.
 
 See [PRD](specs/PRD.md) and [technical design](specs/DESIGN.md) for intended product

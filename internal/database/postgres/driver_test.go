@@ -60,7 +60,7 @@ func TestConnectionBoundary(t *testing.T) {
 			peer <- errors.New("unexpected startup")
 			return
 		}
-		for k, want := range map[string]string{"user": "reader", "database": "fixture", "application_name": "data-mate", "search_path": "pg_catalog", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "default_transaction_read_only": "on"} {
+		for k, want := range map[string]string{"user": "reader", "database": "fixture", "application_name": "data-mate", "search_path": "pg_catalog", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "bytea_output": "hex", "extra_float_digits": "3", "client_encoding": "UTF8", "default_transaction_read_only": "on"} {
 			if start.Parameters[k] != want {
 				peer <- errors.New("unsafe startup parameter: " + k)
 				return
@@ -131,7 +131,7 @@ func TestConnectionBoundary(t *testing.T) {
 	}
 	p.Transport.SSH = &config.SSH{Host: "jump", Port: 22, User: "user", Auth: "password"}
 	requireCode(t, d.Validate(database.NewAccess(p, "")), contracts.QueryUnsupported)
-	_, err = d.Query(t.Context(), database.NewAccess(profile(), ""), "SELECT 1")
+	_, err = d.Query(t.Context(), database.NewAccess(profile(), ""), database.QueryRequest{SQL: "DELETE FROM app.items"})
 	requireCode(t, err, contracts.QueryUnsupported)
 	t.Setenv("PGPASSWORD", "unexpected-after-startup")
 	requireCode(t, d.Validate(database.NewAccess(profile(), "")), contracts.ConfigInvalid)

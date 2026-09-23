@@ -355,13 +355,15 @@ SSH host-key enrollment happens only during an interactive connection operation 
 
 Use `pgx` with driver-owned pools for PostgreSQL access. Pools open lazily, start with zero idle connections, and hold at most two connections per profile. A global semaphore caps active database work at eight operations, with a bounded waiting queue of 32 and a five-second queue deadline. Evict idle pools after five minutes and cap open pools at 16. No idle polling of every database is required. See the [pgx driver documentation](https://pkg.go.dev/github.com/jackc/pgx/v5).
 
-Implemented P3 boundary: `database.Driver` provides Validate/Test/ListTables/
+Implemented P3–P5 boundary: `database.Driver` provides Validate/Test/ListTables/
 DescribeTable/Query/Invalidate/Close with private in-memory credential access.
-Query explicitly fails until P5. One shared PostgreSQL driver owns admission
-and pools; callers must retain the profile state lease through driver cleanup.
+Query accepts SQL, typed JSON parameters and a lower optional row cap. One shared
+PostgreSQL driver owns admission and pools; callers must retain the profile state lease through driver cleanup.
 Each request begins a read-only READ COMMITTED transaction and rechecks role
 readiness. Rollback has a separate two-second budget; uncertain connections are
-discarded and cleanup failure cannot produce success. Profile changes retire
+discarded and cleanup failure cannot produce success. Deliberate byte truncation
+terminates the connection before returning its bounded result instead of draining
+unread rows; that connection is never reused. Profile changes retire
 pools; explicit invalidation cancels active work and invalidates cursors. There is
 no cached catalog/grant result. P8 still owns service-level lease integration.
 
@@ -381,8 +383,8 @@ at most 2 KiB. Pages are capped at 500, columns at 1600, and hierarchy/constrain
 materialization at 4096 entries, additionally bounded by operation time and
 conservative encoded-payload accounting. Default expressions, full definitions,
 and hidden foreign-key endpoints are omitted. Metadata may label unsupported
-relation kinds/types, but cannot authorize application execution. P4/P5 must
-recheck relation identity, grants and hierarchy after locking.
+relation kinds/types, but cannot authorize application execution. The compiler
+and executor recheck relation identity, grants and hierarchy after locking.
 
 `db test` exercises profile validation, vault access, network/TLS/SSH/proxy setup, authentication, server version, and policy readiness using the same driver. It does not query application rows or change the database. Report each stage separately, continue through all selected profiles, and redact sensitive upstream messages.
 
@@ -432,7 +434,7 @@ field exceptions and owned-fixture regeneration procedure.
 Compiled plans preserve duplicate result labels through unique internal column
 bindings and bind literal values separately with explicit OIDs. The internal
 compile operation uses trusted catalog SQL only. Differential PG16/18 fixtures
-exercise emitted results; the public Query operation remains unavailable until P5.
+exercise emitted results and the bounded public driver Query operation.
 
 The compiler requires contextual types for unknown literals and rejects ambiguous
 or unaudited coercions. Numeric casts and int2-to-int4-to-int8-to-numeric widening
@@ -444,8 +446,10 @@ Default/C/POSIX collations and plain audited built-in btree indexes are supporte
 custom, expression, partial and other index methods fail closed.
 
 Captured hierarchy scans use ONLY/UNION ALL, including typed empty partition
-roots. Stable-fixture semantic equivalence is a P4 gate; deterministic locking,
-post-lock identity/hierarchy validation and attach/detach races remain P5 gates.
+roots. PostgreSQL 16/18 acceptance covers stable-fixture equivalence, deterministic
+locking, post-lock identity/hierarchy validation and DDL races. New attachments
+after the final check cannot enter frozen physical scans; subsequent requests
+rediscover them. RLS hierarchies remain unsupported.
 A returned compiled plan is not authorization to execute outside those checks.
 
 ### 9.3 Execution sequence and bounds
@@ -455,13 +459,32 @@ For each query:
 1. Validate tool input and load the current profile, scope, and credential reference under the shared state lock.
 2. Parse and validate the supported SQL structure; acquire a bounded pool connection.
 3. Begin a read-only transaction with local statement and lock timeouts.
-4. Resolve allowed relation identities, take deterministic relation locks, and recheck identities, privileges, scope, and supported types before executing. Serialize against relevant DDL; do not cache an unchecked authorization decision across requests.
+4. Resolve allowed relation identities, lock captured names with ONLY/ACCESS SHARE in OID order, and recheck identities, all column layouts, hierarchy edges, privileges and scope using fresh READ COMMITTED snapshots. Fetch and verify semantic catalog definitions again after locking, even without base relations. Changed captures fail with retry guidance; do not cache live authorization across requests.
 5. Bind parameters separately and execute one validated statement through the extended query protocol.
 6. Consume rows incrementally within row and encoded-byte budgets, cancel excess work, and roll back the transaction before releasing the connection and state lock.
 
 Default limits are 10 seconds per query, 1 second waiting on relation locks, 500 returned rows, 1 MiB per result, and 64 KiB SQL input. The maximum configurable query timeout is 30 seconds; the hard result cap is 5,000 rows. A caller may request smaller limits but cannot raise profile or service caps. Use driver protocol message limits as well as response limits so a single oversized value cannot cause an unbounded allocation. Limit parser depth and input size before recursive processing.
 
 Fetch at most one extra row to detect row truncation. When bytes or rows exceed the budget, return a complete bounded result with `truncated: true`, never broken JSON. Query timeout/cancellation returns a structured failure; partial results are not presented as complete. If cleanup or cancellation leaves connection state uncertain, discard the connection. Do not automatically retry an executing query.
+
+The compiler applies the row cap plus one lookahead row to the top-level LIMIT,
+preserving smaller user limits and nested pagination. The executor consumes raw
+text-format values with explicit OIDs, checks result metadata against the plan,
+and never uses dynamic `Rows.Values()` conversion. Byte accounting includes
+columns, JSON escaping, base64 expansion, numeric envelope fields and both
+structured content and a compact JSON compatibility text block. It reserves the
+maximum elapsed/count field widths. `QueryPayloadSize` defines the shared tool
+envelope for P9; JSON-RPC frames have a separate cap.
+
+Exact int8/numeric values are strings; finite floats are numbers and special
+floats are strings. Local timestamps use `T` without a timezone; timestamptz is
+normalized to UTC with `Z`. Infinity/BC remain explicit strings. Bytea columns
+always carry `encoding:base64`, including NULL. JSON stays structured with exact
+number and duplicate-member preservation, bounded to 1 MiB and depth 64.
+Parameters use canonical type names and JSON codec representations, bounded to
+256 values, 64 KiB each and 256 KiB total before and after wire conversion.
+Temporal parameters require ISO forms (explicit zones for timestamptz);
+PostgreSQL validates calendar/range constraints through audited input functions.
 
 This policy is intentionally narrower than all PostgreSQL SELECT syntax. The safety gate is the tested accepted subset; unsupported queries receive a specific explanation and a suggested supported form when possible.
 
@@ -510,7 +533,8 @@ CLI list/test/status schemas use a `version:1` envelope with `connections`,
 `results`, or `state`/`agents`, respectively. These schemas define future output;
 P0's unfinished commands return nonzero and emit no success object. Versioned
 PostgreSQL codec/signature fixture formats live under
-`internal/database/postgres/testdata`; native codec execution remains a P5 gate. P4 embeds and verifies complete
+`internal/database/postgres/testdata`; offline and PostgreSQL 16/18 execution verify
+these codecs. P4 embeds and verifies complete
 per-major catalog signatures under `internal/database/postgres/sqlpolicy`.
 
 Treat database comments and text values as untrusted data. Return them as data, never as operational instructions. Scope can prevent retrieval of unauthorized objects; it cannot make permitted text immune to prompt injection in the consuming agent.

@@ -11,6 +11,8 @@ import (
 )
 
 type compiler struct {
+	root         *pg.SelectStmt
+	returnCap    int
 	ctx          context.Context
 	resolved     map[relationName]Relation
 	signatures   signatures
@@ -48,6 +50,20 @@ type expression struct {
 // Compile resolves lexical scopes and types, and emits only validated constructs.
 // The Catalog implementation is a trusted driver seam, never an agent input.
 func (p *Parsed) Compile(ctx context.Context, major int, catalog Catalog, parameters []Parameter) (Compiled, error) {
+	return p.compile(ctx, major, catalog, parameters, 0)
+}
+
+// CompileBounded applies a server-side return cap to the validated top-level
+// SELECT, preserving a smaller user LIMIT and every nested query's semantics.
+// The executor includes one lookahead row in returnCap.
+func (p *Parsed) CompileBounded(ctx context.Context, major int, catalog Catalog, parameters []Parameter, returnCap int) (Compiled, error) {
+	if returnCap < 1 || returnCap > 5001 {
+		return Compiled{}, resource()
+	}
+	return p.compile(ctx, major, catalog, parameters, returnCap)
+}
+
+func (p *Parsed) compile(ctx context.Context, major int, catalog Catalog, parameters []Parameter, returnCap int) (Compiled, error) {
 	if p == nil || p.stmt == nil || catalog == nil || len(parameters) > 256 {
 		return Compiled{}, unsupported()
 	}
@@ -55,7 +71,7 @@ func (p *Parsed) Compile(ctx context.Context, major int, catalog Catalog, parame
 	if err != nil {
 		return Compiled{}, err
 	}
-	c := compiler{ctx: ctx, resolved: map[relationName]Relation{}, signatures: sig, used: map[int]bool{}}
+	c := compiler{ctx: ctx, root: p.stmt, returnCap: returnCap, resolved: map[relationName]Relation{}, signatures: sig, used: map[int]bool{}}
 	parameterBytes := 0
 	for _, p := range parameters {
 		if p.Value != nil {
@@ -356,14 +372,22 @@ func (c *compiler) selectQuery(s *pg.SelectStmt, outer map[string]query) (query,
 		n  *pg.Node
 		kw string
 	}{{s.LimitCount, " LIMIT "}, {s.LimitOffset, " OFFSET "}} {
-		if v.n == nil {
+		capLimit := s == c.root && c.returnCap > 0 && v.kw == " LIMIT "
+		if v.n == nil && !capLimit {
 			continue
 		}
-		a := v.n.GetAConst()
-		if a == nil || a.GetIval() == nil || a.GetIval().Ival < 0 {
-			return query{}, unsupported()
+		n := c.returnCap
+		if v.n != nil {
+			a := v.n.GetAConst()
+			if a == nil || a.GetIval() == nil || a.GetIval().Ival < 0 {
+				return query{}, unsupported()
+			}
+			n = int(a.GetIval().Ival)
+			if capLimit {
+				n = min(n, c.returnCap)
+			}
 		}
-		value := strconv.Itoa(int(a.GetIval().Ival))
+		value := strconv.Itoa(n)
 		bound, err := c.concrete(expression{typ: 20, literal: &Parameter{Value: &value}}, 20)
 		if err != nil {
 			return query{}, err

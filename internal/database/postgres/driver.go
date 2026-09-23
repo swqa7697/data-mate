@@ -266,6 +266,7 @@ func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Con
 		return err
 	}
 	healthy := false
+	discarded := false
 	defer func() {
 		if exceeded(c) {
 			result = database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
@@ -277,6 +278,10 @@ func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Con
 		return safeError(err)
 	}
 	defer func() {
+		if discarded && c.IsClosed() {
+			// Truncation terminated this connection instead of draining rows.
+			return
+		}
 		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := tx.Rollback(cleanup); err == nil {
@@ -293,7 +298,9 @@ func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Con
 	if err != nil {
 		return err
 	}
-	if err = fn(ctx, tx, version); err != nil {
+	if err = fn(ctx, tx, version); errors.Is(err, errResultDiscarded) && c.IsClosed() {
+		discarded = true
+	} else if err != nil {
 		return safeError(err)
 	}
 	if ctx.Err() != nil {
@@ -336,6 +343,10 @@ func safeError(err error) error {
 			return database.Fail(contracts.QueryTimeout, "database operation timed out", true)
 		case "42501":
 			return database.Fail(contracts.PolicyUnsafe, "database privileges changed or are insufficient", false)
+		case "25006":
+			return database.Fail(contracts.PolicyUnsafe, "server policy attempted a write in a read-only query", false)
+		case "22003", "22007", "22008", "22012", "22023", "22P02":
+			return database.Fail(contracts.InvalidArgument, "query value or arithmetic operation is invalid", false)
 		}
 	}
 	return database.Fail(contracts.ConnectFailed, "PostgreSQL operation failed; check endpoint, TLS and credentials", true)

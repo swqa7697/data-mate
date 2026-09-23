@@ -3,6 +3,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
@@ -101,7 +102,21 @@ type ResultColumn struct {
 	Encoding string `json:"encoding,omitempty"`
 }
 
-// QueryResult defines the eventual bounded P5 result; P3 cannot produce rows.
+// QueryParameter uses the public codec representation, preserving exact JSON numbers.
+type QueryParameter struct {
+	Type  string          `json:"type"`
+	Value json.RawMessage `json:"value"`
+}
+
+// QueryRequest can lower the profile's row cap, never its authorization or limits.
+// Zero RowLimit uses the profile cap. SQL and parameters must never be logged.
+type QueryRequest struct {
+	SQL        string
+	Parameters []QueryParameter
+	RowLimit   int
+}
+
+// QueryResult is prepared within the state lease and includes only complete rows.
 type QueryResult struct {
 	Connection string         `json:"connection"`
 	Columns    []ResultColumn `json:"columns"`
@@ -117,7 +132,7 @@ type Driver interface {
 	Test(context.Context, Access) (Readiness, error)
 	ListTables(context.Context, Access, PageRequest) (TablePage, error)
 	DescribeTable(context.Context, Access, config.Table) (Description, error)
-	Query(context.Context, Access, string) (QueryResult, error)
+	Query(context.Context, Access, QueryRequest) (QueryResult, error)
 	Invalidate(string)
 	Close()
 }

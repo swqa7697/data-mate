@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -75,7 +74,7 @@ func connectionConfig(a database.Access) (*pgx.ConnConfig, error) {
 	c.Fallbacks = nil
 	c.DialFunc = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	c.ConnectTimeout = 10 * time.Second
-	c.RuntimeParams = map[string]string{"application_name": "data-mate", "search_path": "pg_catalog", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "default_transaction_read_only": "on", "statement_timeout": "10000", "lock_timeout": "1000"}
+	c.RuntimeParams = map[string]string{"application_name": "data-mate", "search_path": "pg_catalog", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "bytea_output": "hex", "client_encoding": "UTF8", "extra_float_digits": "3", "default_transaction_read_only": "on", "statement_timeout": "10000", "lock_timeout": "1000"}
 	c.MaxProtocolMessageBodyLen = 2 << 20
 	trackWire(c)
 	c.DefaultQueryExecMode = pgx.QueryExecModeExec
@@ -92,9 +91,4 @@ func (d *Driver) Validate(a database.Access) error {
 	}
 	_, err = connectionConfig(a)
 	return err
-}
-
-// Query remains unavailable until the compiler and executor acceptance gates.
-func (d *Driver) Query(context.Context, database.Access, string) (database.QueryResult, error) {
-	return database.QueryResult{}, database.Fail(contracts.QueryUnsupported, "query execution is not ready", false)
 }

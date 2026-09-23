@@ -233,7 +233,7 @@ func inspect(ctx context.Context, tx pgx.Tx, oid uint32, scope config.Scope) (re
 		out.reason = "unsupported column type or generated column"
 	}
 	// UNION deduplicates DAG paths and bounds the client materialization. Pending
-	// detach edges are surfaced; P4/P5 will lock, recheck and freeze physical scans.
+	// detach edges are surfaced; Query separately locks and rechecks frozen scans.
 	rows, err := tx.Query(ctx, `WITH RECURSIVE tree(oid) AS (SELECT $1::oid UNION SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent=t.oid)
  SELECT c.oid,n.nspname,c.relname,c.relkind::text,c.relrowsecurity,c.relpersistence::text,am.amname,
  pg_catalog.has_schema_privilege(n.oid,'USAGE') AND pg_catalog.has_table_privilege(c.oid,'SELECT'),

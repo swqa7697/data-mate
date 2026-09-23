@@ -287,8 +287,8 @@ func TestPostgresIntegration(t *testing.T) {
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "app", Name: "items"})
 	requireCode(t, err, contracts.ScopeDenied)
 	sql("GRANT SELECT ON app.items TO reader")
-	if _, err = d.Query(t.Context(), access, "SELECT * FROM app.rls"); err == nil {
-		t.Fatal("unfinished query accepted")
+	if _, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "DELETE FROM app.rls"}); err == nil {
+		t.Fatal("write query accepted")
 	}
 	var count int
 	if err = admin.QueryRow(t.Context(), "SELECT n FROM hidden.audit").Scan(&count); err != nil || count != 0 {
@@ -296,11 +296,12 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	compilerAcceptance(t, d, access, sql)
 	catalogCompatibilityAcceptance(t, d, access, admin)
+	executorAcceptance(t, d, access, admin, sql)
 	// Independent concurrent requests share at most two connections per profile.
 	var wg sync.WaitGroup
 	for range 12 {
 		wg.Go(func() {
-			if _, err := d.Test(t.Context(), access); err != nil {
+			if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT id FROM app.items"}); err != nil {
 				t.Error(err)
 			}
 		})

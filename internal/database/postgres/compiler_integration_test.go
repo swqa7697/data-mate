@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -140,6 +141,54 @@ func compilerAcceptance(t *testing.T, d *Driver, access database.Access, sql fun
 		if err != nil {
 			t.Fatalf("compiler case %s: %v", test.name, err)
 		}
+		request := database.QueryRequest{SQL: test.sql}
+		for _, p := range test.params {
+			var raw []byte
+			if p.Value != nil {
+				raw = []byte(*p.Value)
+			}
+			value, e := decodeValue(p.Type, raw)
+			if e != nil {
+				t.Fatal(e)
+			}
+			b, _ := json.Marshal(value)
+			request.Parameters = append(request.Parameters, database.QueryParameter{Type: p.Type.Name(), Value: b})
+		}
+		result, e := d.Query(t.Context(), access, request)
+		if e != nil {
+			t.Fatalf("executor corpus %s: %v", test.name, e)
+		}
+		encoded, _ := json.Marshal(result)
+		if e = contracts.Validate("query.output", encoded); e != nil {
+			t.Fatalf("executor schema %s: %v", test.name, e)
+		}
+		// Compare decoded driver values with the original query oracle.
+		e = d.run(t.Context(), access, func(ctx context.Context, tx pgx.Tx, _ int) error {
+			oracle, e := fixtureQuery(ctx, tx, test.sql, test.params)
+			if e != nil {
+				return e
+			}
+			want := make([][]any, 0, len(oracle.Rows))
+			for _, row := range oracle.Rows {
+				values := make([]any, len(row))
+				for i, b := range row {
+					values[i], e = decodeValue(sqlpolicy.Type(oracle.Types[i]), b)
+					if e != nil {
+						return e
+					}
+				}
+				want = append(want, values)
+			}
+			a, _ := json.Marshal(result.Rows)
+			b, _ := json.Marshal(want)
+			if string(a) != string(b) {
+				t.Fatalf("executor semantics %s: %s != %s", test.name, a, b)
+			}
+			return nil
+		})
+		if e != nil {
+			t.Fatal(e)
+		}
 	}
 	negative := []string{
 		"SELECT * FROM hidden.target", "SELECT * FROM app.parent", "SELECT * FROM app.expr_index", "SELECT * FROM app.partial_index", "SELECT * FROM app.generated", "SELECT * FROM app.custom_index", "SELECT * FROM app.custom_collation_table", "SELECT * FROM app.a_view", "SELECT * FROM app.custom_type", "SELECT * FROM app.rls_parts",
@@ -149,6 +198,9 @@ func compilerAcceptance(t *testing.T, d *Driver, access database.Access, sql fun
 		"SELECT pg_catalog.pg_read_file('synthetic-secret')", "SELECT * FROM app.items FOR SHARE", "WITH x AS (DELETE FROM app.items RETURNING *) SELECT * FROM x",
 	}
 	for _, q := range negative {
+		if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: q}); err == nil {
+			t.Fatalf("executor accepted rejected form: %s", q)
+		}
 		err := d.run(t.Context(), access, func(ctx context.Context, tx pgx.Tx, version int) error {
 			spy := &compileSpy{Tx: tx}
 			p, err := sqlpolicy.Parse(q)
@@ -217,8 +269,7 @@ func fixtureQuery(ctx context.Context, tx pgx.Tx, sql string, params []sqlpolicy
 		values = append(values, v)
 		oids = append(oids, uint32(p.Type))
 	}
-	// Only this owned-fixture oracle executes SQL in P4. Production Query remains
-	// unavailable; no result-codec or concurrency-safety claim is made here.
+	// The owned-fixture oracle alone executes original SQL for differential checks.
 	result := tx.Conn().PgConn().ExecParams(ctx, sql, values, oids, nil, []int16{0}).Read()
 	if result.Err != nil {
 		return fixtureResult{}, result.Err
@@ -255,7 +306,7 @@ func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Acc
 	if _, err := admin.Exec(t.Context(), fmt.Sprintf("ALTER FUNCTION pg_catalog.int4pl(int4,int4) COST %g", cost+1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Compile(t.Context(), access, "SELECT 1", nil); err != nil {
+	if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 		t.Fatal("planner estimate rejected", err)
 	}
 	mode := "RETURNS NULL ON NULL INPUT"
@@ -265,10 +316,10 @@ func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Acc
 	if _, err := admin.Exec(t.Context(), "ALTER FUNCTION pg_catalog.int4pl(int4,int4) "+mode); err != nil {
 		t.Fatal(err)
 	}
-	_, err := d.Compile(t.Context(), access, "SELECT 1", nil)
+	_, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"})
 	requireCode(t, err, contracts.QueryUnsupported)
 	restoreFunction()
-	if _, err := d.Compile(t.Context(), access, "SELECT 1", nil); err != nil {
+	if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 		t.Fatal("restored definition rejected", err)
 	}
 	// No external database can reach this helper. These are catalog row identities,
@@ -296,7 +347,7 @@ func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Acc
 			if _, err := admin.Exec(t.Context(), "UPDATE pg_catalog."+target.table+" SET oid=$1 WHERE "+target.where, uint32(9000000+i)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := d.Compile(t.Context(), access, "SELECT 1", nil); err != nil {
+			if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 				t.Fatalf("incidental %s identity rejected: %v", target.table, err)
 			}
 		}()

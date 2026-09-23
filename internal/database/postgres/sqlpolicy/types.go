@@ -46,6 +46,9 @@ type Relation struct {
 	OID                 uint32
 	Columns             []Column
 	Only                bool
+	// State fingerprints columns and hierarchy edges, including physical children.
+	// The driver compares fresh state under locks before executing this plan.
+	State string
 }
 
 // Catalog must enforce scope, privileges, storage/index/type support and provide
@@ -61,8 +64,8 @@ type Parameter struct {
 	Value *string
 }
 
-// Compiled is a catalog-bound plan, not execution permission. P5 must lock and
-// recheck Relations and the catalog signatures before sending SQL to the server.
+// Compiled is a catalog-bound plan, not execution permission. The executor must
+// lock and recheck Relations and live catalog signatures before sending SQL.
 type Compiled struct {
 	SQL        string
 	Parameters []Parameter

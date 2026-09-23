@@ -4,6 +4,8 @@
 PostgreSQL parser, then checks every populated protobuf field and AST budget.
 `Parsed.Compile` resolves names through lexical scopes, obtains physical relation
 facts through the driver's catalog adapter, checks exact types, and emits SQL.
+`CompileBounded` additionally caps the top-level return count inside the emitter,
+preserving smaller user limits and all nested limits without wrapping raw SQL.
 Original SQL is never passed to the catalog adapter or retained in a plan.
 
 The compiler supports one SELECT, explicit schema-qualified tables, aliases and
@@ -105,12 +107,23 @@ partition-root selection includes its partitions. Hierarchies with RLS are
 rejected; ordinary noninherited RLS remains inside the documented trusted-server
 boundary. Stable-fixture equivalence is exercised on both majors.
 
-A compiled plan is not execution authorization. P5 must acquire locks, recheck
-names/OIDs/columns/hierarchy and built-in identities, enforce result bounds,
-execute using explicit parameter OIDs, and test DDL races. Production `Query`
-continues to return an explicit failure. Only the owned integration oracle
-executes emitted statements in P4, comparing raw text rows, types and labels to
-fixture queries. No agent SQL is prepared or executed during compilation.
+A compiled plan is not execution authorization. The driver's `Query` compiles a
+new plan within a read-only READ COMMITTED transaction, locks captured relations
+in deterministic OID order with `LOCK TABLE ONLY ... IN ACCESS SHARE MODE`, then
+rechecks names/OIDs, all physical column layouts, hierarchy edges/pending detach,
+scope and privileges. The structural fingerprint is separate from semantic
+manifest identity exceptions. Fresh `CatalogSQL`/`VerifyCatalog` runs after the
+locks for every request, including relation-free queries. A failed check prevents
+preparation/execution. Table locks do not freeze administrator changes to server
+execution code; that remains the documented trusted-server boundary.
+
+Only emitted SQL reaches extended-protocol execution, with explicit parameter
+OIDs and text-format result metadata checked against the plan. Result bounds,
+codecs and cancellation are owned by the executor. The PostgreSQL 16/18 scenario
+compares original fixture SQL against both compiled text and decoded driver
+results, mutates catalog safety properties after locks, and exercises DDL races.
+Only the fixture oracle executes original SQL. No agent SQL is prepared or
+executed during compilation.
 
 References: [PostgreSQL operator resolution](https://www.postgresql.org/docs/16/typeconv-oper.html)
 and [the pinned parser's typed API](https://github.com/pganalyze/pg_query_go/tree/v6.2.2).
