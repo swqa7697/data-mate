@@ -13,6 +13,7 @@ import (
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/vault"
 )
 
 // New owning scenario (regression ladder 3): P7 had no service controller or
@@ -233,6 +234,161 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	if e = os.Remove(socketDir(c.Root)); e != nil {
 		t.Fatal(e)
 	}
+	// Extend the lifecycle scenario: cleanup must stop the live job before waiting
+	// for old state readers, preserve credentials, and fail closed on key denial.
+	f.noReady = false
+	if _, e = c.Start(t.Context()); e != nil {
+		t.Fatal(e)
+	}
+	reader, e := s.ReadLease(t.Context())
+	if e != nil {
+		t.Fatal(e)
+	}
+	bounded, cancel := context.WithTimeout(t.Context(), 60*time.Millisecond)
+	if e = c.Uninstall(bounded, false, noKeys{}); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatal("cleanup bypassed reader", e)
+	}
+	cancel()
+	reader.Release()
+	if f.job.Present {
+		t.Fatal("cleanup did not stop service before waiting")
+	}
+	files := []string{"config/connections.json", "state/vault.json", "state/vault-usage.json", "config/known_hosts", "unrelated", "state/unrelated"}
+	for _, path := range files {
+		if e = os.WriteFile(filepath.Join(c.Root.Path, path), []byte("sentinel"), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e = c.Uninstall(t.Context(), false, noKeys{}); e != nil {
+		t.Fatal("default uninstall", e)
+	}
+	for _, path := range files {
+		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
+		if err != nil || string(b) != "sentinel" {
+			t.Fatal("preserved data changed", path, err)
+		}
+	}
+	if _, e = os.Lstat(filepath.Join(c.Root.Path, "bin/data-mate")); !os.IsNotExist(e) {
+		t.Fatal("binary not removed", e)
+	}
+	if e = c.Uninstall(t.Context(), false, noKeys{}); e != nil {
+		t.Fatal("repeat uninstall", e)
+	}
+	// Interrupted startup can leave an owned runtime marker without a record.
+	life, e = s.Lifecycle(t.Context())
+	if e != nil {
+		t.Fatal(e)
+	}
+	runtime, e := openRuntime(c.Root, installation(c.Root, life.Identity()), true)
+	life.Release()
+	if e != nil {
+		t.Fatal(e)
+	}
+	runtime.file.Close()
+	runtimeSentinel := filepath.Join(socketDir(c.Root), "unrelated")
+	if e = os.WriteFile(runtimeSentinel, []byte("keep"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Uninstall(t.Context(), false, noKeys{}); !errors.Is(e, ErrConflict) {
+		t.Fatal("unowned runtime entries lost retry authority", e)
+	}
+	if b, err := os.ReadFile(runtimeSentinel); err != nil || string(b) != "keep" {
+		t.Fatal("runtime sentinel changed", err)
+	}
+	if e = os.Remove(runtimeSentinel); e != nil {
+		t.Fatal(e)
+	}
+	// Put back a private executable to prove external failures retain it.
+	if e = os.Mkdir(filepath.Join(c.Root.Path, "bin"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(c.Root.Path, "bin/data-mate"), []byte("retry executable"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	registration := filepath.Join(c.Root.Path, "state/registrations.json")
+	if e = os.WriteFile(registration, []byte("broken ownership"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Uninstall(t.Context(), true, noKeys{}); e == nil {
+		t.Fatal("invalid registration ownership accepted")
+	}
+	if _, e = os.Stat(filepath.Join(c.Root.Path, "bin/data-mate")); e != nil {
+		t.Fatal("registration failure removed executable", e)
+	}
+	if e = os.Remove(registration); e != nil {
+		t.Fatal(e)
+	}
+	keys := &cleanupKeys{err: vault.ErrDenied}
+	if e = c.Uninstall(t.Context(), true, keys); !errors.Is(e, vault.ErrDenied) {
+		t.Fatal("key denial", e)
+	}
+	if l, err := s.ReadLease(t.Context()); !errors.Is(err, config.ErrPurging) {
+		if l != nil {
+			l.Release()
+		}
+		t.Fatal("purge failed to revoke admission", err)
+	}
+	for _, path := range files {
+		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
+		if err != nil || string(b) != "sentinel" {
+			t.Fatal("key denial lost retry data", path, err)
+		}
+	}
+	if _, e = os.Stat(filepath.Join(c.Root.Path, "bin/data-mate")); e != nil {
+		t.Fatal("key denial removed executable", e)
+	}
+	if _, e = os.Lstat(socketDir(c.Root)); !os.IsNotExist(e) {
+		t.Fatal("orphan runtime remains", e)
+	}
+	if e = c.Uninstall(t.Context(), false, noKeys{}); !errors.Is(e, config.ErrPurging) {
+		t.Fatal("default uninstall bypassed pending purge", e)
+	}
+	// An unsafe owned path blocks local deletion after key removal and retains
+	// the tombstone. A repaired path lets the same exact-key operation retry.
+	hostPath := filepath.Join(c.Root.Path, "config/known_hosts")
+	if e = os.Remove(hostPath); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Symlink(filepath.Join(c.Root.Path, "unrelated"), hostPath); e != nil {
+		t.Fatal(e)
+	}
+	keys.err = nil
+	if e = c.Uninstall(t.Context(), true, keys); !errors.Is(e, config.ErrOwnership) {
+		t.Fatal("purge followed symlink", e)
+	}
+	if e = os.Remove(hostPath); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Uninstall(t.Context(), true, keys); e != nil {
+		t.Fatal("purge retry", e)
+	}
+	for _, digest := range keys.digests {
+		if digest != c.Root.Digest {
+			t.Fatal("foreign key deleted")
+		}
+	}
+	for _, path := range []string{"unrelated", "state/unrelated"} {
+		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
+		if err != nil || string(b) != "sentinel" {
+			t.Fatal("purge lost unrelated file", path, err)
+		}
+	}
+	if _, e = os.Lstat(filepath.Join(c.Root.Path, "state/installation.json")); !os.IsNotExist(e) {
+		t.Fatal("purge identity retained", e)
+	}
+
+	// Missing identity cannot disguise an orphaned vault as a completed purge.
+	orphan := filepath.Join(c.Root.Path, "state/vault.json")
+	if e = os.WriteFile(orphan, []byte("orphan sentinel"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Uninstall(t.Context(), true, noKeys{}); !errors.Is(e, ErrState) {
+		t.Fatal("orphaned installation reported success", e)
+	}
+	if b, err := os.ReadFile(orphan); err != nil || string(b) != "orphan sentinel" {
+		t.Fatal("unowned vault changed", err)
+	}
+
 }
 
 // Service work, unlike driver-only scenarios, must acquire state after queue

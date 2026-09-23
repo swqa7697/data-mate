@@ -179,6 +179,7 @@ func (s *Store) verifyLock(path string, f *os.File) error {
 // only for purge, before admission and state. Ordinary mutations need only Write.
 type Lease struct {
 	store                        *Store
+	parent                       *Lease
 	lifecycle, gate, state       *os.File
 	unlockState, unlockLifecycle func()
 	write, purge, released       bool
@@ -252,6 +253,11 @@ func (l *Lease) Release() {
 	}
 }
 func (l *Lease) check() error {
+	if l.parent != nil {
+		if err := l.parent.check(); err != nil {
+			return err
+		}
+	}
 	if l.released {
 		return ErrStale
 	}
@@ -301,7 +307,7 @@ func (l *Lease) Replace(path string, b []byte) error {
 	return l.store.replace(path, b)
 }
 
-// Remove is restricted to owned data files; stable lock/identity removal is P11.
+// Remove is restricted to owned data files; FinishPurge owns terminal cleanup.
 func (l *Lease) Remove(path string) error {
 	base := strings.TrimSuffix(path, ".tmp")
 	if !l.write || (base != "config/connections.json" && base != "state/vault.json" && base != "state/vault-usage.json" && base != "config/known_hosts") {
@@ -309,6 +315,9 @@ func (l *Lease) Remove(path string) error {
 	}
 	if err := l.check(); err != nil {
 		return err
+	}
+	if l.purge {
+		return l.store.removeOptionalDirectoryFile(path)
 	}
 	return l.store.remove(path)
 }
@@ -328,5 +337,9 @@ func (l *Lease) BeginPurge() error {
 	if err != nil {
 		return err
 	}
-	return l.store.replace("state/installation.json", b)
+	if err = l.store.replace("state/installation.json", b); err != nil {
+		return err
+	}
+	l.store.identity = id
+	return nil
 }

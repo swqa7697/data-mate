@@ -63,6 +63,8 @@ var ownedPaths = []string{
 	"state/service.json", "state/service.json.tmp",
 	"state/service.plist", "state/service.plist.tmp",
 	"state/registrations.json", "state/registrations.json.tmp",
+	"bin/data-mate",
+	"state/purge.json", "state/purge.json.tmp",
 }
 
 // Fault is an optional test seam called before/after durability boundaries. It
@@ -77,6 +79,7 @@ type Store struct {
 	identity Identity
 	local    *localLocks
 	fault    Fault
+	terminal bool // Final purge receipt supplies authority after identity removal.
 }
 
 // OpenExisting pins initialized state without creating files or migrating an
@@ -90,6 +93,24 @@ func OpenExisting(ctx context.Context, root Root) (*Store, error) {
 // Ordinary state leases still reject the tombstone. It creates no files.
 func OpenLifecycle(ctx context.Context, root Root) (*Store, error) {
 	return openExisting(ctx, root, true)
+}
+
+// readIdentity recognizes only an authenticated-by-ownership terminal receipt.
+// It permits cleanup retry after identity/lock removal, never ordinary startup.
+func (s *Store) readIdentity() ([]byte, bool, error) {
+	b, err := s.read("state/installation.json", 8192)
+	if !errors.Is(err, os.ErrNotExist) {
+		return b, false, err
+	}
+	b, err = s.read("state/purge.json", 8192)
+	if err != nil {
+		return nil, false, err
+	}
+	var id Identity
+	if decodeIdentity(b, s.root, &id) != nil || !id.Purging {
+		return nil, false, ErrOwnership
+	}
+	return b, true, nil
 }
 
 func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err error) {
@@ -117,7 +138,8 @@ func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err e
 	if e := unix.Fstatat(fd, "state", &state, unix.AT_SYMLINK_NOFOLLOW); errors.Is(e, unix.ENOENT) {
 		return nil, os.ErrNotExist
 	}
-	raw, err := s.read("state/installation.json", 8192)
+	raw, terminal, err := s.readIdentity()
+	s.terminal = terminal
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +202,12 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 		return nil, err
 	}
 	defer releaseFile(lifecycle)
+	// A final purge receipt blocks initialization even after identity removal.
+	if _, e := s.read("state/purge.json", 8192); e == nil {
+		return nil, ErrPurging
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return nil, e
+	}
 	raw, err := s.read("state/installation.json", 8192)
 	if errors.Is(err, os.ErrNotExist) {
 		// Existing secret state without identity must never receive a new namespace.
@@ -252,7 +280,7 @@ func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
 		return ErrOwnership
 	}
-	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:11]) && !slices.Equal(id.Owned, ownedPaths[:13]) && !slices.Equal(id.Owned, ownedPaths[:17])) {
+	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:11]) && !slices.Equal(id.Owned, ownedPaths[:13]) && !slices.Equal(id.Owned, ownedPaths[:17]) && !slices.Equal(id.Owned, ownedPaths[:19])) {
 		return ErrOwnership
 	}
 	return nil
@@ -335,6 +363,18 @@ func checkFD(fd int, directory bool) error {
 	}
 	return nil
 }
+
+// The executable has a distinct mode but the same no-link ownership contract.
+func checkOwnedFD(fd int, path string) error {
+	if path != "bin/data-mate" {
+		return checkFD(fd, false)
+	}
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&07777 != 0700 || st.Nlink != 1 {
+		return ErrOwnership
+	}
+	return nil
+}
 func sameNamed(parent int, name string, file *os.File) bool {
 	var opened, named unix.Stat_t
 	return unix.Fstat(int(file.Fd()), &opened) == nil && unix.Fstatat(parent, name, &named, unix.AT_SYMLINK_NOFOLLOW) == nil && opened.Dev == named.Dev && opened.Ino == named.Ino
@@ -346,7 +386,7 @@ func (s *Store) validRoot() error {
 	return nil
 }
 func (s *Store) directory(name string) (*os.File, error) {
-	if name != "state" && name != "config" {
+	if name != "state" && name != "config" && name != "bin" {
 		return nil, ErrOwnership
 	}
 	if err := s.validRoot(); err != nil {
@@ -388,7 +428,7 @@ func (s *Store) openFile(path string, flags int, mode uint32) (*os.File, error) 
 		return nil, ErrOwnership
 	}
 	f := os.NewFile(uintptr(fd), name)
-	if checkFD(fd, false) != nil || !sameNamed(int(dir.Fd()), name, f) {
+	if checkOwnedFD(fd, path) != nil || !sameNamed(int(dir.Fd()), name, f) {
 		f.Close()
 		return nil, ErrOwnership
 	}
@@ -543,7 +583,7 @@ func (s *Store) remove(path string) error {
 }
 
 func (s *Store) verifyIdentity() error {
-	b, err := s.read("state/installation.json", 8192)
+	b, _, err := s.readIdentity()
 	if err != nil {
 		return ErrStale
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -168,7 +169,36 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		}
 		return nil
 	}}
-	return []*cobra.Command{daemon, install}
+	uninstall := &cobra.Command{Use: "__uninstall", Hidden: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		c, err := serviceController(*override, build)
+		if err != nil {
+			return err
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return failure("cannot locate cleanup helper")
+		}
+		rel, err := filepath.Rel(c.Root.Path, exe)
+		if err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+			return invalid("cleanup must run from a helper outside the installation")
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+		defer cancel()
+		c.Agents = agent.New(c.Root)
+		if err = c.Uninstall(ctx, flag(cmd, "purge"), keys); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			var cleanup *service.CleanupError
+			if errors.As(err, &cleanup) {
+				return failure(fmt.Sprintf("cleanup incomplete at %s; remaining owned artifacts: %s; retry make uninstall with the same PURGE value after resolving access or ownership conflicts", cleanup.Stage, strings.Join(cleanup.Remaining, ", ")))
+			}
+			return failure("cleanup incomplete; installation preserved; resolve service or file ownership and retry make uninstall with the same PURGE value")
+		}
+		return nil
+	}}
+	uninstall.Flags().Bool("purge", false, "Remove owned profiles and credentials")
+	return []*cobra.Command{daemon, install, uninstall}
 }
 
 type bridgeWriter struct{ io.Writer }

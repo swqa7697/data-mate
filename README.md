@@ -3,7 +3,7 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P10 automatic agent registration.**
+**Local PostgreSQL profiles, read-only MCP, and owned cleanup are implemented.**
 `db add`, `db edit`,
 `db remove`/`rm`, `db list`/`ls`, `db scope`, and `db test` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
@@ -17,7 +17,8 @@ and fresh authorization checks. `mcp start`, `mcp stop` and `mcp status` manage
 the background service. The stdio bridge exposes four read-only MCP tools through
 the shared driver. Start also registers the bridge with installed Codex and
 Claude Code clients; new sessions can discover it from other working directories.
-Complete uninstall and final acceptance remain P11 work.
+`make uninstall` removes the service, owned registrations and executable while
+preserving profiles and credentials; `PURGE=1` explicitly removes those too.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -175,6 +176,9 @@ Both input modes require `--yes` and complete fields and cannot share stdin with
 forms. Add requires an explicit password choice; omitted edit secrets remain
 unchanged. No password argument or credential-bearing URL is accepted.
 
+New connections use direct plaintext PostgreSQL transport by default. Enable
+`--tls` to require hostname-verified TLS; SSH and SOCKS5 are opt-in routes.
+
 Advanced settings use `--tls`, `--tls-ca /absolute/path`,
 `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`,
 `--proxy socks5://host:port`, and `--proxy-user`. SSH and proxy are mutually
@@ -257,14 +261,15 @@ agents.
 | `make install` | Download pinned dependencies/tools and build the local binary |
 | `make build` | Rebuild and atomically replace the local binary |
 | `make dev ARGS="..."` | Run that binary with the checkout's absolute root |
-| `make clean` | Alias for uninstall with purge disabled; not ready until P11, fails without changing files |
+| `make clean` | Uninstall with purge disabled, even when `PURGE=1` is supplied |
 | `make format`, `make tidy` | Format Go and shell sources |
 | `make format-check` | Check formatting without changing files |
 | `make lint` | Run go vet and pinned staticcheck |
 | `make test` | Run isolated unit/regression tests |
 | `make test-race` | Run the suite with race detection |
 | `make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16` | Run the owned PostgreSQL 16 Docker fixture; use `postgres:18` for 18 or omit `DB_IMAGE` for both; excluded from CI |
-| `make uninstall`, `make uninstall PURGE=1` | Not ready until P11; fail without changing files |
+| `make uninstall` | Stop service; remove owned registrations and binary; preserve profiles, vault and key |
+| `make uninstall PURGE=1` | Additionally delete the exact Keychain item and owned profiles, vault, pins and state |
 
 CI runs `make setup` in each job before its checks; installation is exercised by
 the regression suite and the Test and build job ends with `make build`.
@@ -319,6 +324,10 @@ submitted SQL is never prepared during compilation. Catalog signatures are
 pinned separately for PostgreSQL 16 and 18; other majors remain unavailable for
 compilation until audited. Verification ignores incidental catalog row IDs and
 numeric planner estimates while retaining implementation and safety properties.
+The explicit allowances are cast/opclass/family-member/support-entry row OIDs,
+function `procost`/`prorows`, and aggregate `aggtransspace`/`aggmtransspace`.
+Stable built-in identities, implementation callbacks and safety flags remain
+verified; owner/ACL fields are covered by separate role/privilege checks.
 Only embedded policy is cached; live metadata is checked during compilation
 and again after locking, including queries without base relations.
 The compiler contract documents candidate export through the owned integration
@@ -398,8 +407,9 @@ sealing. Failed publication consumes its reservation. Profile edits publish a
 fresh encrypted bundle before its reference; deletion publishes profiles before
 credential cleanup and reports partial completion if cleanup fails. The internal
 purge coordinator removes the exact key before its accounting, retains retry
-identity, and blocks ordinary access once purge begins. Full `uninstall`/`clean`
-integration remains P11. Do not restore old vault/accounting backups or move
+identity, and blocks ordinary access once purge begins. Uninstall holds lifecycle
+through service shutdown, registration cleanup and exclusive state access.
+Do not restore old vault/accounting backups or move
 Keychain items between stores; recovery is nonsecret profile import and credential
 re-entry in a fresh installation namespace.
 
@@ -409,6 +419,43 @@ checkout paths, target settings, dependency checks, and directory validation.
 The `clean` target delegates to `uninstall` with `PURGE=0`, overriding any supplied
 `PURGE` value. Use `make uninstall PURGE=1` to explicitly request purge.
 `dev` invokes the binary directly and `test-race` adds `-race` to `test.sh`.
+
+Uninstall builds a temporary helper under `/tmp` using the same Go/C toolchain and
+installed modules. It works after the installed executable has been removed and
+from a checkout containing spaces. Success removes the helper; failure retains
+it and prints the exact retry command, cleanup stage and remaining owned files.
+Use the same `CODEX_HOME`/`CLAUDE_CONFIG_DIR` as when starting the service. If an
+owned agent entry was edited or its client is unavailable, cleanup preserves the
+entry and executable for repair/retry; it never overwrites client settings.
+Unexpected files in the private runtime socket directory also stop cleanup so
+its ownership marker remains available; move those files aside before retrying.
+
+Default uninstall keeps the installation identity, profiles, encrypted vault,
+usage ledger, SSH pins and Keychain item. `make install` restores the executable;
+`mcp start` validates the retained credentials and restores registrations. Native
+approval may be required after a rebuild. Purge first stops the service and
+removes verified registrations, then marks a durable tombstone and deletes the
+exact key before its vault/accounting. A pending purge must be retried with
+`PURGE=1`; rebuilding cannot reactivate it. A final nonsecret receipt supports
+retry across identity/lock removal. Only inventoried files and empty directories
+are removed. Unrelated `.dev` files, external certificates and imported key
+source files remain intact. No persistent service logs or SQL manifest sidecars
+are created. Go's shared caches and unrelated build files are not installation
+artifacts and are preserved.
+
+The complete [profile JSON schema](internal/contracts/schemas/profiles.json) and
+[example profile](internal/config/testdata/profiles.json) define manual editing:
+
+| Field | Contract |
+| --- | --- |
+| Document | `version:1`, `connections` array; maximum 1 MiB |
+| Profile | UUID `id`, unique lowercase `alias`, `driver:"postgres"`, `connection`, `transport`, `scope`; optional vault `credential_ref` and `limits` |
+| `connection` | Nonempty `host`, `database`, `username`; integer `port` 1–65535 |
+| `transport.tls` | `mode:"disabled"` or `"verify-full"`; optional absolute `ca_file` for verified TLS |
+| `transport.ssh` | Optional `host`, `port`, `user`, `auth:"password"` or `"key"`; secret key material stays in the vault |
+| `transport.proxy` | Optional `kind:"socks5"`, `host`, `port`, optional `username`; mutually exclusive with SSH |
+| `scope` | `mode:"all"`, or `"selected"` with optional `schemas` and `tables:[{"schema":"public","name":"example"}]`; empty selection exposes nothing |
+| `limits` | Optional `query_timeout_ms` (1–30000), `max_rows` (1–5000), `max_result_bytes` (1024–1048576); omitted values default to 10000, 500, 1048576 |
 
 Profile and MCP contracts are embedded in `internal/contracts/schemas`, with
 examples in `internal/contracts/testdata` and a decoder fixture in

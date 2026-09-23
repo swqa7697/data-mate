@@ -233,16 +233,21 @@ func reconcile(bundles map[string]bundle, p config.Profiles) bool {
 	return changed
 }
 
-// PurgeCredentials is the resumable inner coordinator, not an uninstall command.
-// P11 must stop the owned service/remove registrations before invoking it, then
-// remove runtime/identity/locks last under the outer lifecycle protocol. On any
-// failure this leaves identity and a runnable retry path; it never deletes bin.
+// PurgeCredentials takes its own lifecycle/state leases for isolated vault cleanup.
+// Integrated uninstall uses PurgeLocked while retaining its outer lifecycle lease.
 func (r *Repository) PurgeCredentials(ctx context.Context) error {
 	l, err := r.store.PurgeLease(ctx)
 	if err != nil {
 		return err
 	}
 	defer l.Release()
+	return r.PurgeLocked(ctx, l)
+}
+
+// PurgeLocked revokes admission and removes the exact key before its accounting.
+// The caller retains a cleanup state lease until terminal installation cleanup.
+func (r *Repository) PurgeLocked(ctx context.Context, l *config.Lease) error {
+	var err error
 	if err = ctx.Err(); err != nil {
 		return err
 	}

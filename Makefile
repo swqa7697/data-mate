@@ -20,10 +20,10 @@ build: ## Atomically rebuild .dev/bin/data-mate
 dev: ## Run the installed binary (ARGS="help")
 	@"$(CURDIR)/.dev/bin/data-mate" --root "$(CURDIR)/.dev" $(ARGS)
 
-uninstall: ## Not ready until P11; PURGE=1 will opt into credential cleanup
+uninstall: ## Remove this installation; PURGE=1 also removes profiles and credentials
 	@./scripts/uninstall.sh
 
-clean: ## Alias for uninstall without purge (not ready until P11)
+clean: ## Alias for uninstall without purge
 	@$(MAKE) uninstall PURGE=0
 
 format: ## Format Go and shell source using pinned tooling

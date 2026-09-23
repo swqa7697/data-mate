@@ -89,16 +89,21 @@ func TestInstallIsolationAndClean(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	run(t, root, false, "make", "clean")
+	run(t, root, true, "make", "clean", "PURGE=1")
 	for _, name := range []string{".dev/config/connections.json", ".dev/state/vault.json", ".dev/unrelated", ".misc/evidence"} {
 		b, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil || string(b) != "sentinel" {
 			t.Fatal("clean changed retained data", name)
 		}
 	}
+	if _, err = os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatal("clean retained binary", err)
+	}
+	run(t, root, true, "make", "uninstall")
+	run(t, root, true, "make", "build")
 	after, err = os.ReadFile(bin)
 	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("clean changed installed binary")
+		t.Fatal("reinstall failed", err)
 	}
 	// Integration preflight must fail before creating Docker resources.
 	for _, args := range [][]string{
@@ -110,14 +115,12 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	} {
 		run(t, root, false, args...)
 	}
-	run(t, root, false, "make", "uninstall")
-	run(t, root, false, "make", "uninstall", "PURGE=1")
-	after, err = os.ReadFile(bin)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("not-ready uninstall mutated binary")
+	// Default uninstall works with malformed saved profiles/vault and never loads keys.
+	run(t, root, true, "make", "uninstall")
+	if _, err = os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatal("uninstall retained binary", err)
 	}
-	// Clean must delegate failure and suppress an explicit purge request. The
-	// current uninstall stub cannot otherwise expose which mode it received.
+	// Clean delegates failure and suppresses an explicit purge request.
 	uninstall := filepath.Join(root, "scripts", "uninstall.sh")
 	if err := os.WriteFile(uninstall, []byte("#!/bin/bash\nset -euo pipefail\nprintf '%s' \"${PURGE:-unset}\" > clean-purge\nexit 1\n"), 0700); err != nil {
 		t.Fatal(err)

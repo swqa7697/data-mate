@@ -11,7 +11,10 @@ import (
 
 // LifecycleLease serializes process lifecycle and binary publication without
 // holding state access while a child process is starting or shutting down.
-type LifecycleLease struct{ lease *Lease }
+type LifecycleLease struct {
+	lease    *Lease
+	identity Identity
+}
 
 // Lifecycle acquires only lifecycle. State leases, if needed, must follow it.
 // Purging installations remain inspectable/stoppable for cleanup retries.
@@ -26,21 +29,35 @@ func (s *Store) Lifecycle(ctx context.Context) (_ *LifecycleLease, err error) {
 	if err != nil {
 		return nil, err
 	}
-	l.lifecycle, err = s.lock(ctx, "state/lifecycle.lock", true, false)
+	l.lifecycle, err = s.lock(ctx, "state/lifecycle.lock", true, s.terminal)
 	if err != nil {
 		return nil, err
 	}
 	if err = l.check(); err != nil {
 		return nil, err
 	}
-	return &LifecycleLease{l}, nil
+	// OpenLifecycle may have read identity before another process began purge.
+	// Capture current flags only after acquiring the lifecycle lock.
+	raw, _, err := s.readIdentity()
+	if err != nil {
+		return nil, err
+	}
+	var current Identity
+	if decodeIdentity(raw, s.root, &current) != nil || current.ID != s.identity.ID {
+		return nil, ErrStale
+	}
+	return &LifecycleLease{lease: l, identity: current}, nil
 }
 
 // Release ends lifecycle access and is idempotent.
 func (l *LifecycleLease) Release() { l.lease.Release() }
 
 // Identity returns the installation binding held by the lease.
-func (l *LifecycleLease) Identity() Identity { return l.lease.Identity() }
+func (l *LifecycleLease) Identity() Identity {
+	id := l.identity
+	id.Owned = append([]string(nil), id.Owned...)
+	return id
+}
 
 // Read reads a bounded owned document without following links.
 func (l *LifecycleLease) Read(path string, limit int) ([]byte, error) {

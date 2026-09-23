@@ -323,7 +323,7 @@ ordering do not change revisions; settings and limits do.
 
 Use an OS file lock shared by CLI writers and the service, atomic same-directory replacement, file sync, and parent-directory sync. Do not lock a replaceable data file's inode. All changes validate before publication.
 
-Database requests hold a shared state lock from configuration validation through execution and response preparation. CLI changes take the exclusive lock; bounded queries limit the wait. Once a change command succeeds, no operation using the previous configuration remains active. A separate lifecycle lock serializes start, stop and executable publication in P8; P11 will integrate the outer uninstall coordinator. P1 initialization and its internal purge coordinator already use lifecycle locking. Lock order is lifecycle, admission gate, then state. Readers briefly hold the exclusive admission gate while acquiring a shared state lease; writers retain it through exclusive state access. A process-local writer-preferring queue supplements independently opened OS flock descriptors. Acquisition is context-bounded, and each acquired lease rechecks lock inode and installation identity; a stale waiter cannot mutate a recreated installation.
+Database requests hold a shared state lock from configuration validation through execution and response preparation. CLI changes take the exclusive lock; bounded queries limit the wait. Once a change command succeeds, no operation using the previous configuration remains active. A separate lifecycle lock serializes start, stop, executable publication and the complete uninstall coordinator. Initialization and the internal purge coordinator use the same lifecycle protocol. Lock order is lifecycle, admission gate, then state. Readers briefly hold the exclusive admission gate while acquiring a shared state lease; writers retain it through exclusive state access. A process-local writer-preferring queue supplements independently opened OS flock descriptors. Acquisition is context-bounded, and each acquired lease rechecks lock inode and installation identity; a stale waiter cannot mutate a recreated installation.
 
 Configuration and vault are separate files, so writes must remain safe across partial completion:
 
@@ -755,7 +755,30 @@ renames it under lifecycle locking. Purge tombstones block publication.
 
 Rebuilding an active service does not hot-swap its executable image. Report that `mcp stop` followed by `mcp start` is needed to run the new version. A stopped bridge reports the ordinary service-not-running diagnostic.
 
-All cleanup uses the installation inventory and verified ownership. Preserve unrelated `.dev` contents and remove the root directory only if empty. P1 implements only the inner credential purge coordinator: mark a durable purge tombstone, delete the exact native item, then remove owned profiles/vault/usage files and their publication siblings. Identity and stable locks remain for retry; ordinary state access is rejected once purge starts. P11 integrates service/registration/binary cleanup and removes identity/locks last. A purge failure reports remaining owned artifacts and can be retried; it must not claim success if the vault or OS key remains. Keep enough ownership metadata to retry a partially completed purge. Preserve external agent settings, imported key source files, and user-managed certificates.
+All cleanup uses the installation inventory and verified ownership. Default uninstall
+stops the verified service and runtime, removes unchanged owned agent registrations,
+then drains state readers and removes the executable. It preserves profiles,
+vault, usage ledger, Keychain item, SSH pins, identity and stable locks for reinstall.
+The outer lifecycle lease spans the entire operation. The Make wrapper builds a
+private helper under `/tmp`, so cleanup and retry remain runnable after binary
+removal without publishing into an installation being purged.
+
+Explicit purge marks a durable tombstone before exact-key deletion, then removes
+profiles, encrypted vault, usage accounting, known_hosts and owned publication
+siblings. External cleanup failure preserves the binary and ownership metadata.
+A terminal `state/purge.json` receipt retains the installation/root identity
+across final identity and lock removal; startup/publication refuses this receipt,
+and only cleanup may recreate missing terminal locks. Receipt deletion commits
+terminal cleanup. All lock waiters recheck named inodes and identity, including
+installers. Exact historical inventories migrate under lifecycle before cleanup;
+no SQL manifest sidecar is installed or inventoried.
+
+Failures report a safe stage, remaining owned paths and a retained helper retry
+command. Never remove unrelated `.dev` contents; remove directories only when
+empty. External agent settings, imported key source files and user-managed
+certificates remain untouched. No persistent logs are currently created, and
+unrecognized logs/build files and Go's shared caches are preserved. Cleanup does
+not infer ownership from a filename prefix.
 
 Use `.misc` for retained implementation plans, test evidence, and status reports. `.tmp` remains developer-managed. CI and local tests use isolated roots and fake key providers unless a native test explicitly opts in.
 

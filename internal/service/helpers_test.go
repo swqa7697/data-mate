@@ -17,6 +17,18 @@ import (
 
 type noKeys struct{}
 
+// cleanupKeys observes exact deletion without ever loading real credentials.
+type cleanupKeys struct {
+	noKeys
+	err     error
+	digests []string
+}
+
+func (k *cleanupKeys) Delete(_ context.Context, digest string) error {
+	k.digests = append(k.digests, digest)
+	return k.err
+}
+
 func (noKeys) Load(context.Context, string) ([]byte, error) {
 	return nil, errors.New("unexpected key load")
 }

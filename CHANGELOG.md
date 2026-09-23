@@ -5,7 +5,7 @@
 ### Added
 
 - Add a checkout-local macOS Apple Silicon CLI with help, build-version reporting, executable-relative roots, and informational `upgrade`/`update` commands.
-- Add Make commands for local installation, atomic rebuilds, formatting, linting, and isolated unit and race tests, plus dependency-only `make setup` and optional `VERBOSE=1` setup/build diagnostics. Installation initializes nonsecret state and publishes executables under lifecycle locking; rebuilding reports when the service needs an explicit restart. `make clean` delegates to uninstall with purge disabled; both commands currently fail explicitly without changing files until uninstall is implemented.
+- Add Make commands for local installation, atomic rebuilds, formatting, linting, and isolated unit and race tests, plus dependency-only `make setup` and optional `VERBOSE=1` setup/build diagnostics. Installation initializes nonsecret state and publishes executables under lifecycle locking; rebuilding reports when the service needs an explicit restart. `make clean` delegates to uninstall with purge disabled.
 - Add strict nonsecret connection profiles with validated scopes, transport settings, resource limits, and atomic persistence.
 - Add AES-256-GCM credential storage backed by one macOS Keychain item per installation, with durable encryption accounting and recoverable credential cleanup.
 - Add interactive and scripted `db add`, `db edit`, `db remove`/`rm`, and `db list`/`ls`, with nonsecret previews, default-No confirmation, cancellation without saved changes, and versioned JSON listing.
@@ -20,3 +20,4 @@
 - Add `mcp start`, `mcp stop`, and passive `mcp status` with versioned JSON, isolated launchd jobs, verified service identity, bounded readiness and shutdown, and profile reload handling.
 - Add four read-only MCP tools and an authenticated stdio bridge, with strict schemas, scoped metadata, shared query authorization, bounded sessions and payloads, cancellation, and redacted errors.
 - Add automatic user-scope Codex/Claude registration after service readiness, passive per-agent status, conflict preservation, and recoverable ownership records; partial registration failures keep the service available.
+- Add ownership-checked uninstall with credential-preserving reinstall, explicit `PURGE=1` exact-key cleanup, lifecycle serialization, interruption recovery and retained cleanup helpers on failure.

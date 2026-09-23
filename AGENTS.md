@@ -59,7 +59,7 @@ Use Make as the developer entry point; `make help` lists the available targets.
 | `make lint` | Run go vet and pinned staticcheck |
 | `make test` | Run the offline unit/regression suite after dependencies are installed |
 | `make test-race` | Run the same suite with Go's race detector |
-| `make clean` | Alias for uninstall with purge disabled; not ready until P11 |
+| `make clean` | Alias for uninstall with purge disabled; preserves profiles and credentials |
 
 - Go 1.27.1, native cgo and the macOS SDK are the initial toolchain. Read current pins from `go.mod` and build scripts; dependency checks must provide guidance rather than silently install system software.
 - Format changed Go/shell code with `make format`. For a completed implementation package, run this checklist in order:

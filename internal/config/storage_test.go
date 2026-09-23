@@ -107,7 +107,7 @@ func TestOwnedStorage(t *testing.T) {
 	}
 	// P6/P8/P10 extend the exact inventory. Historical installations upgrade under
 	// the lifecycle lock without replacing its identity or credential namespace.
-	for _, count := range []int{11, 13, 17} {
+	for _, count := range []int{11, 13, 17, 19} {
 		legacy := s.identity
 		legacy.Owned = append([]string(nil), ownedPaths[:count]...)
 		raw, err := json.Marshal(legacy)
@@ -242,6 +242,68 @@ func TestPublicationRecovery(t *testing.T) {
 			t.Fatal(point, "torn publication", err)
 		}
 	}
+	// Final cleanup must reopen across identity and lock deletion, using the
+	// terminal receipt when the primary identity has already disappeared.
+	for _, path := range []string{"state/state.lock", "state/state-gate.lock", "state/installation.json", "state/lifecycle.lock", "state/purge.json"} {
+		for _, point := range []string{"before-unlink", "after-unlink"} {
+			if path == "state/purge.json" && point == "after-unlink" {
+				continue
+			} // receipt deletion commits terminal cleanup
+			s, root := storageFixture(t)
+			life, err := s.Lifecycle(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := life.CleanupLease(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = state.BeginPurge(); err != nil {
+				t.Fatal(err)
+			}
+			hit := false
+			s.fault = func(op, name string) error {
+				if !hit && op == point && name == path {
+					hit = true
+					return errors.New("cleanup interruption")
+				}
+				return nil
+			}
+			err = state.FinishPurge()
+			state.Release()
+			life.Release()
+			s.fault = nil
+			if err == nil || !hit {
+				t.Fatal("missing cleanup boundary", path, point, err)
+			}
+			reopened, err := OpenLifecycle(t.Context(), root)
+			if err != nil {
+				t.Fatal("cleanup reopen", path, point, err)
+			}
+			life, err = reopened.Lifecycle(t.Context())
+			if err != nil {
+				t.Fatal("cleanup lifecycle", path, point, err)
+			}
+			state, err = life.CleanupLease(t.Context())
+			if err != nil {
+				t.Fatal("cleanup state", path, point, err)
+			}
+			if err = state.BeginPurge(); err != nil {
+				t.Fatal("cleanup tombstone", err)
+			}
+			err = state.FinishPurge()
+			state.Release()
+			life.Release()
+			reopened.Close()
+			if err != nil {
+				t.Fatal("cleanup retry", path, point, err)
+			}
+			if _, err = os.Lstat(root.Path); !os.IsNotExist(err) {
+				t.Fatal("cleanup left root", err)
+			}
+		}
+	}
+
 }
 
 // TestStateLeases exercises independent flock ownership, writer preference,
@@ -417,7 +479,12 @@ func TestStateLeases(t *testing.T) {
 	stale.finish()
 	// A cached Store opened before purge must not publish a new executable
 	// after the tombstone, even when it later acquires lifecycle successfully.
-	other, _ := storageFixture(t)
+	other, otherRoot := storageFixture(t)
+	cached, err := OpenLifecycle(t.Context(), otherRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cached.Close()
 	tombstone, err := other.PurgeLease(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -426,6 +493,14 @@ func TestStateLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	tombstone.Release()
+	staleSnapshot, err := cached.Lifecycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !staleSnapshot.Identity().Purging {
+		t.Fatal("cached lifecycle hid pending purge")
+	}
+	staleSnapshot.Release()
 	publication, err := other.Lifecycle(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -434,6 +509,44 @@ func TestStateLeases(t *testing.T) {
 		t.Fatal("build bypassed purge tombstone", err)
 	}
 	publication.Release()
+	// Real final purge, not a renamed-lock simulation: both an installer and a
+	// writer captured old descriptors and must refuse a recreated installation.
+	cleanupStore, cleanupRoot := storageFixture(t)
+	if err = os.WriteFile(filepath.Join(cleanupRoot.Path, "state/unrelated"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLife, err := cleanupStore.Lifecycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupState, err := cleanupLife.CleanupLease(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer := startLockHelper(t, cleanupRoot, "install-stale")
+	writer := startLockHelper(t, cleanupRoot, "purge-stale")
+	if err = cleanupState.BeginPurge(); err != nil {
+		t.Fatal(err)
+	}
+	if err = cleanupState.FinishPurge(); err != nil {
+		t.Fatal(err)
+	}
+	cleanupState.Release()
+	cleanupLife.Release()
+	installer.finish()
+	writer.finish()
+	recreated, err := Open(t.Context(), cleanupRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recreated.Close()
+	if lease, err := cleanupStore.WriteLease(t.Context()); !errors.Is(err, ErrStale) {
+		if lease != nil {
+			lease.Release()
+		}
+		t.Fatal("old store accessed recreated root", err)
+	}
+
 }
 
 type lockChild struct{ finish func() }
@@ -474,8 +587,23 @@ func lockHelper(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if mode == "install-stale" {
+		opened, err := Open(t.Context(), root, func(op, path string) error {
+			if op == "lock-open" && path == "state/lifecycle.lock" {
+				fmt.Println("ready")
+			}
+			return nil
+		})
+		if opened != nil {
+			opened.Close()
+		}
+		if !errors.Is(err, ErrStale) {
+			t.Fatal("purge versus installer", err)
+		}
+		return
+	}
 	var s *Store
-	if mode == "lifecycle-stale" {
+	if mode == "lifecycle-stale" || mode == "purge-stale" {
 		s, err = OpenExisting(context.Background(), root)
 	} else {
 		s, err = Open(context.Background(), root, nil)
@@ -541,7 +669,7 @@ func lockHelper(t *testing.T, mode string) {
 		return
 	}
 	s.fault = func(op, path string) error {
-		if op == "lock-open" && path == "state/state.lock" {
+		if op == "lock-open" && ((mode == "purge-stale" && path == "state/state-gate.lock") || (mode != "purge-stale" && path == "state/state.lock")) {
 			fmt.Println("ready")
 		}
 		return nil

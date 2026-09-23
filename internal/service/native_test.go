@@ -120,7 +120,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 				}
 				store.Close()
 			}
-			if e != nil {
+			if e != nil && !errors.Is(e, os.ErrNotExist) {
 				clean = false
 				t.Error("native registration cleanup", e)
 			}
@@ -348,7 +348,11 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	if _, e = launch(ctx, "bootstrap", domain(), foreign); e != nil {
 		t.Fatal(e)
 	}
+	foreignPresent := true
 	t.Cleanup(func() {
+		if !foreignPresent {
+			return
+		}
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
 		if _, e := launch(cleanup, "bootout", target(c.Root)); e != nil {
@@ -364,5 +368,67 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	if j, e := c.launcher.Inspect(ctx, c.Root); e != nil || !j.Present || j.Args[0] != "/bin/sleep" {
 		t.Fatal("foreign job lost", e)
 	}
+	// Integrated cleanup uses the same external helper entry point as Make.
+	if _, e = launch(ctx, "bootout", target(c.Root)); e != nil {
+		t.Fatal(e)
+	}
+	foreignPresent = false
+	run(binary, "mcp", "start", "--json")
+	retained := map[string][]byte{}
+	for _, path := range []string{"config/connections.json", "state/vault.json", "state/vault-usage.json", "state/installation.json"} {
+		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		retained[path] = b
+	}
+	sentinel := filepath.Join(c.Root.Path, "unrelated")
+	if e = os.WriteFile(sentinel, []byte("keep"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	run(original, "__uninstall", "--root", c.Root.Path)
+	if _, e = os.Lstat(binary); !os.IsNotExist(e) {
+		t.Fatal("native uninstall binary", e)
+	}
+	for path, before := range retained {
+		after, err := os.ReadFile(filepath.Join(c.Root.Path, path))
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatal("native uninstall changed credentials", path, err)
+		}
+	}
+	if states, err := c.Agents.Inspect(ctx); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, state := range states {
+			if state.State == "ready" {
+				t.Fatal("native uninstall registration remains", state)
+			}
+		}
+	}
+	if e = os.Mkdir(filepath.Join(c.Root.Path, "bin"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(restore, data, 0700); e != nil {
+		t.Fatal(e)
+	}
+	run(restore, "__install", "--root", c.Root.Path)
+	run(binary, "mcp", "start", "--json") // authenticates the retained vault/key in a new process
+	run(original, "__uninstall", "--root", c.Root.Path, "--purge")
+	if _, e = (vault.Keychain{}).Load(ctx, c.Root.Digest); !errors.Is(e, vault.ErrMissing) {
+		t.Fatal("native purge key remains", e)
+	}
+	if b, err := os.ReadFile(sentinel); err != nil || string(b) != "keep" {
+		t.Fatal("native purge unrelated data", err)
+	}
+	for _, path := range []string{"config", "state", "bin"} {
+		if _, err := os.Lstat(filepath.Join(c.Root.Path, path)); !os.IsNotExist(err) {
+			t.Fatal("native purge artifact remains", path, err)
+		}
+	}
+	if result, e := controllers[1].Inspect(ctx); e != nil || result.State != "running" {
+		t.Fatal("purge affected other checkout", result, e)
+	}
+	run(original, "__uninstall", "--root", c.Root.Path, "--purge")
+	t.Log("native default uninstall/reinstall authenticated retained credentials; integrated purge removed exact key, registrations and files while preserving unrelated and second-root resources")
 	t.Log("native two-root, long-path, concurrent/repeated start, zero-dial readiness, existing vault, reload, crash, rebuild, stop and stopped bridge passed")
 }
