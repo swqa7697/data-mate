@@ -63,9 +63,26 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, root := range roots {
+	for i, root := range roots {
 		copyCheckout(t, root)
-		run(t, root, true, "make", "install")
+		installArgs := []string{"make", "install"}
+		if i == 0 {
+			// Dependency setup must succeed even before application source compiles,
+			// and must not create an installation or runtime state.
+			broken := filepath.Join(root, "cmd", "data-mate", "broken.go")
+			if err := os.WriteFile(broken, []byte("not go"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			run(t, root, true, "make", "setup")
+			if _, err := os.Lstat(filepath.Join(root, ".dev")); !os.IsNotExist(err) {
+				t.Fatal("setup created installation state", err)
+			}
+			if err := os.Remove(broken); err != nil {
+				t.Fatal(err)
+			}
+			installArgs = append(installArgs, "VERBOSE=1")
+		}
+		run(t, root, true, installArgs...)
 		bin := filepath.Join(root, ".dev", "bin", "data-mate")
 		if output := run(t, temp, true, bin, "version"); !strings.Contains(output, "data-mate "+strings.TrimSpace(string(version))+" ") {
 			t.Fatal(output)
@@ -94,7 +111,7 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("not go"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	run(t, root, false, "make", "build")
+	run(t, root, false, "make", "build", "VERBOSE=1")
 	after, err := os.ReadFile(bin)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("failed build replaced installed binary")
@@ -106,7 +123,7 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	if len(leftovers) != 0 {
 		t.Fatal("temporary build output leaked")
 	}
-	for _, name := range []string{".dev/config/connections.json", ".dev/state/vault.json", ".dev/unrelated", ".misc/evidence", ".build/output"} {
+	for _, name := range []string{".dev/config/connections.json", ".dev/state/vault.json", ".dev/unrelated", ".misc/evidence"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
@@ -115,22 +132,16 @@ func TestInstallIsolationAndClean(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	run(t, root, true, "make", "clean")
+	run(t, root, false, "make", "clean")
 	for _, name := range []string{".dev/config/connections.json", ".dev/state/vault.json", ".dev/unrelated", ".misc/evidence"} {
 		b, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil || string(b) != "sentinel" {
 			t.Fatal("clean changed retained data", name)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, ".build")); !os.IsNotExist(err) {
-		t.Fatal("build output not removed")
-	}
-	if err := os.Symlink(filepath.Join(root, ".dev"), filepath.Join(root, ".build")); err != nil {
-		t.Fatal(err)
-	}
-	run(t, root, false, "make", "clean")
-	if _, err := os.Stat(bin); err != nil {
-		t.Fatal("clean followed symlink")
+	after, err = os.ReadFile(bin)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("clean changed installed binary")
 	}
 	for _, target := range []string{"test-integration", "uninstall"} {
 		if output := run(t, root, false, "make", target); !strings.Contains(output, "NOT_READY") && !strings.Contains(output, "excluded from CI") {
@@ -141,6 +152,17 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	after, err = os.ReadFile(bin)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("not-ready uninstall mutated binary")
+	}
+	// Clean must delegate failure and suppress an explicit purge request. The
+	// current uninstall stub cannot otherwise expose which mode it received.
+	uninstall := filepath.Join(root, "scripts", "uninstall.sh")
+	if err := os.WriteFile(uninstall, []byte("#!/bin/bash\nset -euo pipefail\nprintf '%s' \"${PURGE:-unset}\" > clean-purge\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	run(t, root, false, "make", "clean", "PURGE=1")
+	purge, err := os.ReadFile(filepath.Join(root, "clean-purge"))
+	if err != nil || string(purge) != "0" {
+		t.Fatal("clean did not disable purge", string(purge), err)
 	}
 }
 

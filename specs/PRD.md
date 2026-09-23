@@ -27,8 +27,8 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Agent Guidelines: Create project guidelines in root level `AGENTS.md` and an additional `CLAUDE.md` pointing to it
 - Developer Tools: Wire up a root level `Makefile` and bash scripts under `scripts` for commonly used commands, including:
   - `install`/`build`: dev install, including installing dependencies, build binary, and install binary to `.dev`
-  - `clean`: Clean build artifacts
   - `uninstall`: dev uninstall, removing all build artifacts and dev installation, and removing configs & creds (all things) only when PURGE=1 provided
+  - `clean`: Alias of `uninstall` (without purge)
   - `format`/`tidy`: Run formatter (Go source codes and bash scripts)
   - `lint`: Run lint check againt Go source codes
   - `test`: Run test suite (regression tests and unit tests)

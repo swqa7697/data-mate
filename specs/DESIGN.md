@@ -442,10 +442,11 @@ Create root `AGENTS.md` for project guidelines and `CLAUDE.md` pointing to it du
 
 | Target                     | Contract                                                                                                                                          |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `make setup`               | Check build prerequisites and prepare pinned Go dependencies/tools; do not build the application or create `.dev`                                 |
 | `make install`             | Prepare Go dependencies, build, and install into `.dev/bin`; no service startup                                                                   |
 | `make build`               | Build and refresh `.dev/bin/data-mate`; no agent or credential changes                                                                            |
 | `make dev ARGS="..."`      | Run the installed development binary with the checkout's absolute root                                                                            |
-| `make clean`               | Remove owned rebuildable output; preserve installed runtime, profiles, credentials, and evidence                                                  |
+| `make clean`               | Alias for default uninstall; always disable purge, preserving profiles and credentials even if `PURGE=1` is supplied                              |
 | `make uninstall`           | Stop this installation, remove matching agent registrations, installed binary, and owned build/runtime artifacts; preserve profiles and vault/key |
 | `make uninstall PURGE=1`   | Additionally remove this installation's profiles, encrypted vault, exact OS key, and owned state/logs                                             |
 | `make format`, `make tidy` | Format Go and Bash; `tidy` is an alias                                                                                                            |
@@ -454,6 +455,8 @@ Create root `AGENTS.md` for project guidelines and `CLAUDE.md` pointing to it du
 | `make test-integration`    | Explicit Docker integration tests; PostgreSQL 16 and 18 by default                                                                                |
 
 Check required Go, C compiler/macOS SDK, and formatter tooling; provide installation guidance for missing system tools. Install module dependencies through Go modules. Docker is required only for explicit integration runs. Do not change system tooling silently.
+
+Installation runs dependency setup before the application build. `VERBOSE=1` enables Go download/build command diagnostics for `make setup`, `make install`, and `make build`.
 
 Rebuilding an active service does not hot-swap its executable image. Report that `mcp stop` followed by `mcp start` is needed to run the new version. A stopped bridge reports the ordinary service-not-running diagnostic.
 

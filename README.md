@@ -23,6 +23,10 @@ install system packages. Go 1.27.1 is selected explicitly by the scripts. Native
 cgo and the macOS SDK are required. The binary reports the application version
 from `VERSION`, plus revision and working-tree state when Git metadata is present.
 
+Use `make setup` to prepare the same dependencies/tools without compiling the
+application or creating `.dev`. Add `VERBOSE=1` to `make setup`, `make install`, or
+`make build` to show Go download/build commands when those operations run.
+
 The installed binary resolves its root from its executable location, so it works
 from another working directory. An absolute `--root` overrides that location.
 Each checkout has its own `.dev`; installation creates only its private `bin`
@@ -33,10 +37,11 @@ or Keychain item is created during installation.
 | Command | Behavior |
 | --- | --- |
 | `make help` | List all development commands; default target |
+| `make setup` | Prepare pinned dependencies/tools without building the application |
 | `make install` | Download pinned dependencies/tools and build the local binary |
 | `make build` | Rebuild and atomically replace the local binary |
 | `make dev ARGS="..."` | Run that binary with the checkout's absolute root |
-| `make clean` | Remove reserved `.build` output; preserve `.dev` and evidence |
+| `make clean` | Alias for uninstall with purge disabled; not ready until P11, fails without changing files |
 | `make format`, `make tidy` | Format Go and shell sources |
 | `make format-check` | Check formatting without changing files |
 | `make lint` | Run go vet and pinned staticcheck |
@@ -44,6 +49,9 @@ or Keychain item is created during installation.
 | `make test-race` | Run the suite with race detection |
 | `make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16` | Not ready until P3; fails explicitly; excluded from CI |
 | `make uninstall`, `make uninstall PURGE=1` | Not ready until P11; fail without changing files |
+
+CI runs `make setup` in each job before its checks; installation is exercised by
+the regression suite and the Test and build job ends with `make build`.
 
 The normal validation order is `make format-check`, `make lint`, `make test`,
 `make test-race`, and `make build`. After installation, tests disable Go module
@@ -54,6 +62,9 @@ A workflow file alone does not establish a successful hosted run.
 
 Scripts under `scripts/` back the matching Make targets; `common.sh` supplies
 checkout paths, target settings, dependency checks, and directory validation.
+`install.sh` runs `setup.sh` before `build.sh`.
+The `clean` target delegates to `uninstall` with `PURGE=0`, overriding any supplied
+`PURGE` value. Use `make uninstall PURGE=1` to explicitly request purge.
 `dev` invokes the binary directly and `test-race` adds `-race` to `test.sh`.
 
 Profile and MCP contracts are embedded in `internal/contracts/schemas`, with
