@@ -357,7 +357,7 @@ Use `pgx` with driver-owned pools for PostgreSQL access. Pools open lazily, star
 
 Implemented P3 boundary: `database.Driver` provides Validate/Test/ListTables/
 DescribeTable/Query/Invalidate/Close with private in-memory credential access.
-Query explicitly fails until P4/P5. One shared PostgreSQL driver owns admission
+Query explicitly fails until P5. One shared PostgreSQL driver owns admission
 and pools; callers must retain the profile state lease through driver cleanup.
 Each request begins a read-only READ COMMITTED transaction and rechecks role
 readiness. Rollback has a separate two-second budget; uncertain connections are
@@ -419,6 +419,28 @@ Require schema-qualified physical relation names. CTE names and aliases resolve 
 Reject multiple statements, data-modifying CTEs, SELECT INTO, locking clauses, DDL/DML, COPY, CALL, DO, transaction/session commands, role changes, prepared-statement execution, user-defined functions, set-returning functions outside the audited subset, and direct system-catalog queries. Do not expose EXPLAIN in v1. Reject unsupported syntax before preparing or planning agent SQL.
 
 Use `search_path = pg_catalog` for deterministic built-in resolution, require explicit relation schemas, and reject temporary relations. Namespaces on their own are not an access-control boundary; PostgreSQL documents the trust implications of function resolution through the search path. See [PostgreSQL schemas](https://www.postgresql.org/docs/16/ddl-schemas.html).
+
+P4 implements the [compiler contract](../internal/database/postgres/sqlpolicy/README.md):
+independent lexical bounds, strict populated-field checks, typed lexical
+resolution, exact per-major built-in catalog snapshots and canonical emission.
+Compiled plans preserve duplicate result labels through unique internal column
+bindings and bind literal values separately with explicit OIDs. The internal
+compile operation uses trusted catalog SQL only. Differential PG16/18 fixtures
+exercise emitted results; the public Query operation remains unavailable until P5.
+
+The compiler requires contextual types for unknown literals and rejects ambiguous
+or unaudited coercions. Numeric casts and int2-to-int4-to-int8-to-numeric widening
+are supported; comparisons/grouping/ordering require an exact audited signature.
+Conservative exclusions include SELECT DISTINCT, grouping aliases/ordinals, ambiguous output-alias
+ordering, explicit CTE materialization, type modifiers and quoted backslash
+escapes. Use explicit expressions/ordering ordinals and typed parameters instead.
+Default/C/POSIX collations and plain audited built-in btree indexes are supported;
+custom, expression, partial and other index methods fail closed.
+
+Captured hierarchy scans use ONLY/UNION ALL, including typed empty partition
+roots. Stable-fixture semantic equivalence is a P4 gate; deterministic locking,
+post-lock identity/hierarchy validation and attach/detach races remain P5 gates.
+A returned compiled plan is not authorization to execute outside those checks.
 
 ### 9.3 Execution sequence and bounds
 
@@ -482,8 +504,8 @@ CLI list/test/status schemas use a `version:1` envelope with `connections`,
 `results`, or `state`/`agents`, respectively. These schemas define future output;
 P0's unfinished commands return nonzero and emit no success object. Versioned
 PostgreSQL codec/signature fixture formats live under
-`internal/database/postgres/testdata`; native codec execution and catalog-verified
-compiler signatures remain P4/P5 gates.
+`internal/database/postgres/testdata`; native codec execution remains a P5 gate. P4 embeds and verifies complete
+per-major catalog signatures under `internal/database/postgres/sqlpolicy`.
 
 Treat database comments and text values as untrusted data. Return them as data, never as operational instructions. Scope can prevent retrieval of unauthorized objects; it cannot make permitted text immune to prompt injection in the consuming agent.
 

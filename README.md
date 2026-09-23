@@ -3,13 +3,15 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P3 PostgreSQL connection and catalog boundary.**
+**Current implementation: P4 typed SQL policy compiler.**
 `db add`, `db edit`,
 `db remove`/`rm`, and `db list`/`ls` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
 encryption accounting, and one native Keychain item per installation are
 implemented. The internal PostgreSQL driver supports direct/verified TLS,
-read-only role checks, scoped catalog pages and table descriptions. Query
+read-only role checks, scoped catalog pages and table descriptions. The internal
+compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
+signatures and emits parameterized SQL. Query
 execution, CLI `db test`/`db scope`, MCP service and agent registration remain
 later packages; their commands fail explicitly.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
@@ -151,9 +153,20 @@ supported built-in types; views, foreign/materialized relations, custom types,
 generated columns and unverified relation features are reported as unsupported.
 Partition roots include their tree across schemas; ordinary inheritance requires
 all descendants in scope. RLS with inheritance/partitioning is unsupported;
-ordinary noninherited RLS remains supported. P4/P5 still own semantic compilation,
-locking/rechecks, frozen physical scans and execution acceptance. Catalog support
-status alone does not authorize a query.
+ordinary noninherited RLS remains supported. P4 compiles captured physical scans
+with ONLY/UNION ALL and verifies stable-fixture semantics on both PostgreSQL
+majors. P5 still owns locking, identity/hierarchy rechecks, DDL races, result
+limits and execution acceptance. Catalog support status alone does not authorize
+a query.
+
+The [SQL compiler contract](internal/database/postgres/sqlpolicy/README.md) lists
+accepted forms and conservative exclusions. It supports joins, filters, grouping,
+audited aggregates, CTEs, subqueries, typed parameters and bounded pagination.
+Custom types/functions/operators/collations, unsupported indexes and unhandled
+syntax fail closed. Literals are bound separately with exact built-in type OIDs;
+submitted SQL is never prepared during compilation. Catalog signatures are
+pinned separately for PostgreSQL 16 and 18; other majors remain unavailable for
+compilation until audited. No query command becomes available in P4.
 
 Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
 with eight active operations, thirty-two waiters and a five-second queue deadline
@@ -200,8 +213,9 @@ duplicate keys/identities/references, malformed scopes, unsupported transports,
 and excess limits. No plaintext secret field belongs in a profile. Selected
 empty scopes expose nothing; missing scope is invalid. New profiles explicitly
 choose all. PostgreSQL codec/signature fixture formats are
-under `internal/database/postgres/testdata`; these are future acceptance inputs,
-not a working SQL compiler or authorization policy.
+under `internal/database/postgres/testdata`. Codec execution remains P5; the
+compiler's complete per-major signature snapshots live under
+`internal/database/postgres/sqlpolicy`.
 
 See [PRD](specs/PRD.md) and [technical design](specs/DESIGN.md) for intended product
 behavior. Local implementation progress and evidence live in ignored `.misc`.

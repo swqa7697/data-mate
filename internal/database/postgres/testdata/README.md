@@ -6,8 +6,9 @@ int8/numeric are strings. `encoding` marks bytea base64. Local timestamps omit
 zones; timestamptz is UTC; BC and infinity remain explicit strings. All types
 include SQL NULL. These are downstream acceptance inputs, not a working codec.
 
-`signatures.json` freezes the per-major catalog fixture shape: kind, exact
-namespace/name, argument types, result type, and implementation identity.
-The two addition examples do not constitute a compiler allowlist. P4 must fill
-and verify complete signatures against PostgreSQL 16 and 18, including aggregate
-transition/final functions and cast implementations, before authorizing SQL.
+`signatures.json` retains the P0 fixture-schema examples. It is not the runtime
+allowlist. P4 embeds complete per-major type/operator/aggregate/cast/btree and
+function identities in `../sqlpolicy/catalog16.json` and `catalog18.json`, and
+verifies them through `catalog.sql` before compilation. See the
+[compiler contract](../sqlpolicy/README.md) for supported forms, snapshot provenance
+and P5 execution requirements.

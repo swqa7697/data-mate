@@ -294,6 +294,7 @@ func TestPostgresIntegration(t *testing.T) {
 	if err = admin.QueryRow(t.Context(), "SELECT n FROM hidden.audit").Scan(&count); err != nil || count != 0 {
 		t.Fatal("metadata/test executed application RLS or rows")
 	}
+	compilerAcceptance(t, d, access, sql)
 	// Independent concurrent requests share at most two connections per profile.
 	var wg sync.WaitGroup
 	for range 12 {

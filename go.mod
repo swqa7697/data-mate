@@ -16,6 +16,7 @@ require (
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
+	google.golang.org/protobuf v1.31.0
 )
 
 require (
@@ -58,7 +59,6 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
-	google.golang.org/protobuf v1.31.0 // indirect
 	honnef.co/go/tools v0.8.1 // indirect
 	mvdan.cc/editorconfig v0.3.0 // indirect
 	mvdan.cc/sh/v3 v3.14.1 // indirect
