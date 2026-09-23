@@ -9,6 +9,7 @@ import (
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/database/postgres"
+	"github.com/swqa7697/data-mate/internal/mcp"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
 
@@ -69,8 +70,7 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	var wg sync.WaitGroup
-	// P8 bounds pending handshakes and reserves at most 16 session slots. P9
-	// supplies MCP dispatch; session requests currently fail explicitly.
+	// Bound pending handshakes and established sessions together.
 	slots := make(chan struct{}, 16)
 	stop := context.AfterFunc(ctx, func() { listener.Close(); m.cancel() })
 	defer stop()
@@ -115,11 +115,14 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 				check, cancel := context.WithTimeout(ctx, time.Second)
 				reply.State = m.state(check)
 				cancel()
-				if h.Purpose == "session" {
-					reply.Error = "unavailable"
-				}
 			}
-			_ = writeHello(c, reply)
+			if writeHello(c, reply) != nil {
+				return
+			}
+			if h.Purpose == "session" && reply.Error == "" {
+				_ = c.SetDeadline(time.Time{})
+				_ = mcp.Serve(ctx, c, m, r.Build.Version)
+			}
 		}()
 	}
 }

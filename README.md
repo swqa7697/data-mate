@@ -3,7 +3,7 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P8 background service lifecycle.**
+**Current implementation: P9 MCP tools and bridge.**
 `db add`, `db edit`,
 `db remove`/`rm`, `db list`/`ls`, `db scope`, and `db test` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
@@ -14,8 +14,9 @@ read-only role checks, scoped catalog pages and table descriptions. The internal
 compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
 signatures and executes only emitted, parameterized SQL after relation locking
 and fresh authorization checks. `mcp start`, `mcp stop` and `mcp status` manage
-the background service. MCP tool delivery (P9) and agent registration (P10) remain
-unavailable; bridge sessions fail explicitly and agent states report `pending`.
+the background service. The stdio bridge exposes four read-only MCP tools through
+the shared driver. Automatic agent registration (P10) remains unavailable; agent
+states report `pending`.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -55,8 +56,8 @@ make dev ARGS="mcp stop"
 ```
 
 These commands support `--json` with version 1, a service `state`, and per-agent
-states. P8 reports both agents as `pending`; a running service does not yet provide
-MCP tools. Start explicitly bootstraps one job in the current user's GUI launchd
+states. Both agents remain `pending` until automatic registration is implemented.
+Start explicitly bootstraps one job in the current user's GUI launchd
 domain and waits up to 30 seconds for readiness. There is no login item or
 automatic restart after a crash. Repeated starts reuse the matching healthy job.
 Stop preserves profiles and credentials, cancels active work, and allows five
@@ -79,8 +80,8 @@ holds a shared state lease through driver cleanup and result preparation. Profil
 changes retire the affected pools, transports and cursors; invalid configuration
 blocks work until repaired. CLI mutations wait for old-snapshot work to finish.
 The service uses the same driver and request-local catalog verification as the
-CLI. No successful query authorization is cached. P9 will attach MCP dispatch to
-this path. Slow socket output will not hold a state lease.
+CLI. Every MCP database call uses this path; successful query authorization is
+never cached. Slow socket output does not hold a state lease.
 
 The owned runtime socket uses a short private temporary path, full installation
 identity, a per-start nonce and peer UID/PID checks. Build or protocol mismatch
@@ -88,6 +89,32 @@ requires an explicit restart; bridges never start a stopped service. Foreign
 jobs, mismatched records and unsafe files are preserved and reported as conflicts.
 Service roots may contain spaces and long directory names, but not control
 characters. Unknown launchctl inspection formats fail closed.
+
+The internal `mcp bridge` command connects to an already running service and
+relays newline-delimited MCP on stdin/stdout. It uses the executable-relative root
+or an explicit `--root`; startup diagnostics go to stderr. Bridge stdout must be
+a pipe or socket so blocked writes can be interrupted. The bridge exposes:
+
+| Tool | Inputs | Result |
+| --- | --- | --- |
+| `list_connections` | Empty object | Aliases, drivers, database labels and saved scope |
+| `list_tables` | `connection`; optional `schema`, `cursor`, `page_size` | Scoped table page with authenticated next cursor |
+| `describe_table` | `connection`, `schema`, `table` | Columns, keys and visible relationships |
+| `query` | `connection`, `sql`; optional typed `parameters`, `row_limit` | Bounded columns and rows, truncation and elapsed time |
+
+Inputs reject unknown fields. Tools cannot supply credentials or override scope.
+Results provide identical structured data and compact JSON text, with a combined
+one-MiB budget (or the lower profile cap). Expected failures carry a safe code,
+message and retry flag. Cursors expire on restart or relevant profile changes.
+
+Sessions negotiate MCP `2025-11-25` with the pinned official SDK. Newer SDK clients
+fall back from stateless discovery to initialization. The service allows sixteen
+sessions and four in-flight requests per session, with 256-KiB inbound and two-MiB
+outbound frame limits. Excess session/dispatch work or invalid framing closes the
+peer; database queue exhaustion returns a safe tool error. Initialization has ten
+seconds; blocked output has five. Cancellation and disconnect release database
+work. A bridge never starts the service. Automatic Codex/Claude setup and native
+agent workflows remain P10 work.
 
 Manage connections interactively:
 
@@ -270,8 +297,7 @@ numeric planner estimates while retaining implementation and safety properties.
 Only embedded policy is cached; live metadata is checked during compilation
 and again after locking, including queries without base relations.
 The compiler contract documents candidate export through the owned integration
-harness. The executor is an internal driver API; CLI and MCP query delivery are
-not exposed in this package.
+harness. The MCP `query` tool uses this executor through the service manager.
 
 Queries use extended-protocol text results with explicit built-in OIDs. The
 compiler lowers the top-level LIMIT to the row cap plus one lookahead row while
@@ -308,8 +334,8 @@ Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
 with eight active operations, thirty-two waiters and a five-second queue deadline
 per shared driver. Requests have profile timeouts, a two-MiB protocol body cap,
 bounded catalog results and redacted errors. No application rows are queried by
-connection tests or catalog operations. The P8 service manager uses the same
-state leases and shared driver; MCP dispatch is the next package.
+connection tests or catalog operations. The service manager uses the same state
+leases and shared driver for all MCP sessions.
 
 P1's explicit native check uses only synthetic credentials, a random temporary
 root, one exact Keychain account, and a temporary launchd job:

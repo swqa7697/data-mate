@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -356,29 +357,31 @@ func (c *Controller) Inspect(ctx context.Context) (Status, error) {
 	return status(h.State), nil
 }
 
-// ProbeSession verifies availability without starting a stopped service. P9 will
-// attach the MCP relay; until then a matching server explicitly refuses sessions.
-func (c *Controller) ProbeSession(ctx context.Context) error {
+// OpenSession authenticates a socket without starting a stopped service.
+func (c *Controller) OpenSession(ctx context.Context) (*net.UnixConn, error) {
 	s, err := config.OpenExisting(ctx, c.Root)
 	if err != nil {
-		return ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	defer s.Close()
 	l, err := s.ReadLease(ctx)
 	if err != nil {
-		return ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	r, err := readRecord(l.Read, c.Root, l.Identity())
 	l.Release()
 	if err != nil {
-		return ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	conn, _, err := connect(ctx, c.Root, r, c.Build, "session")
+	return conn, err
+}
+
+// ProbeSession checks the authenticated session path and immediately disconnects.
+func (c *Controller) ProbeSession(ctx context.Context) error {
+	conn, err := c.OpenSession(ctx)
 	if conn != nil {
 		conn.Close()
 	}
-	if err != nil {
-		return err
-	}
-	return ErrUnavailable
+	return err
 }

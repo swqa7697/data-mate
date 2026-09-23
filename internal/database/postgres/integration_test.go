@@ -323,6 +323,7 @@ func TestPostgresIntegration(t *testing.T) {
 	if err = admin.QueryRow(t.Context(), "SELECT n FROM hidden.audit").Scan(&count); err != nil || count != 0 {
 		t.Fatal("metadata/test executed application RLS or rows")
 	}
+	mcpAcceptance(t, d, access, sql)
 	scopeAcceptance(t, d, access, password, sql)
 	cliDiagnosticsAcceptance(t, fixture.Root)
 	compilerAcceptance(t, d, access, sql)

@@ -84,6 +84,7 @@ type fakeLaunch struct {
 	done          chan error
 	noReady       bool
 	keys          vault.KeyProvider
+	driver        database.Driver
 }
 
 func (f *fakeLaunch) Inspect(_ context.Context, _ config.Root) (job, error) {
@@ -137,7 +138,11 @@ func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 	if keys == nil {
 		keys = noKeys{}
 	}
-	m := newManager(bg, s, keys, &observedDriver{})
+	d := f.driver
+	if d == nil {
+		d = &observedDriver{}
+	}
+	m := newManager(bg, s, keys, d)
 	go func() {
 		defer s.Close()
 		defer runtime.file.Close()

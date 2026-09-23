@@ -16,5 +16,6 @@
 - Add SSH password/imported-key and SOCKS5 routes with optional verified TLS, remote database DNS, bounded cancellation, and interactive `db add/edit --ssh-enroll` fingerprint confirmation with strict host-key pinning.
 - Add interactive, searchable `db scope` with lazy catalog pages, exact scripted scope replacement, and confirmation that waits for existing database work to finish.
 - Add staged `db test [alias]` diagnostics with versioned JSON, safe errors, shared read-only policy checks, and continued testing after individual connection failures.
-- Add opt-in, isolated Docker integration checks for PostgreSQL 16 and 18 through `make test-integration`; MCP delivery and agent registration remain unavailable.
-- Add `mcp start`, `mcp stop`, and passive `mcp status` with versioned JSON, isolated launchd jobs, verified service identity, bounded readiness and shutdown, and profile reload handling. MCP delivery and agent registration remain pending.
+- Add opt-in, isolated Docker integration checks for PostgreSQL 16 and 18 through `make test-integration`.
+- Add `mcp start`, `mcp stop`, and passive `mcp status` with versioned JSON, isolated launchd jobs, verified service identity, bounded readiness and shutdown, and profile reload handling. Agent registration remains pending.
+- Add four read-only MCP tools and an authenticated stdio bridge, with strict schemas, scoped metadata, shared query authorization, bounded sessions and payloads, cancellation, and redacted errors.

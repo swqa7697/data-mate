@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
@@ -109,6 +110,30 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal("initial passive status", result, e)
 		}
 		run(binary, "mcp", "start", "--json")
+		command := exec.CommandContext(ctx, binary, "mcp", "bridge")
+		command.Dir = "/"
+		var diagnostics bytes.Buffer
+		command.Stderr = &diagnostics
+		client := sdk.NewClient(&sdk.Implementation{Name: "native-fixture", Version: "1"}, nil)
+		session, err := client.Connect(ctx, &sdk.CommandTransport{Command: command}, nil)
+		if err != nil {
+			t.Fatal("installed bridge initialization", err)
+		}
+		tools, err := session.ListTools(ctx, nil)
+		if err != nil || len(tools.Tools) != 4 {
+			t.Fatal("installed bridge tools", err)
+		}
+		toolResult, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_connections", Arguments: map[string]any{}})
+		if err != nil || toolResult.IsError {
+			t.Fatal("installed bridge call", err)
+		}
+		if err = session.Close(); err != nil {
+			t.Fatal("installed bridge EOF", err)
+		}
+		if diagnostics.Len() != 0 {
+			t.Fatal("unexpected installed bridge diagnostics")
+		}
+
 		if _, e = os.Lstat(filepath.Join(root.Path, "state/vault.json")); !os.IsNotExist(e) {
 			t.Fatal("empty startup created vault", e)
 		}

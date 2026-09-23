@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
+	mcprelay "github.com/swqa7697/data-mate/internal/mcp"
 	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
@@ -67,7 +69,19 @@ func newMCP(override *string, build Build) *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 45*time.Second)
 			defer cancel()
 			if name == "bridge" {
-				return serviceError(c.ProbeSession(ctx))
+				conn, err := c.OpenSession(ctx)
+				if err != nil {
+					return serviceError(err)
+				}
+				input, ok := cmd.InOrStdin().(io.ReadCloser)
+				if !ok {
+					input = io.NopCloser(cmd.InOrStdin())
+				}
+				output, ok := cmd.OutOrStdout().(io.WriteCloser)
+				if !ok {
+					output = bridgeWriter{cmd.OutOrStdout()}
+				}
+				return serviceError(mcprelay.Bridge(cmd.Context(), conn, input, output))
 			}
 			var result service.Status
 			switch name {
@@ -144,3 +158,7 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 	}}
 	return []*cobra.Command{daemon, install}
 }
+
+type bridgeWriter struct{ io.Writer }
+
+func (bridgeWriter) Close() error { return nil }

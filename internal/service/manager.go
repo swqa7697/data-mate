@@ -10,6 +10,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/mcp"
 	"github.com/swqa7697/data-mate/internal/transport"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
@@ -170,3 +171,30 @@ func (m *Manager) Work(parent context.Context, alias string, fn func(context.Con
 
 // Close rejects admission, cancels active work and retires pools and tunnels.
 func (m *Manager) Close() { m.cancel(); m.driver.Close(); m.keys.Close() }
+
+// Connections prepares a bounded public snapshot without loading credentials.
+func (m *Manager) Connections(parent context.Context, prepare func([]mcp.Connection) error) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
+	leave, err := m.admit(ctx)
+	if err != nil {
+		return err
+	}
+	defer leave()
+	l, err := m.store.ReadLease(ctx)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
+	p, err := m.refresh(l)
+	if err != nil {
+		return err
+	}
+	items := make([]mcp.Connection, 0, len(p.Connections))
+	for _, p := range p.Connections {
+		items = append(items, mcp.Connection{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database, Scope: p.Scope})
+	}
+	return prepare(items)
+}

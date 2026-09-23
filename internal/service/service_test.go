@@ -54,8 +54,8 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	if e != nil || r.State != "running" {
 		t.Fatal(r, e)
 	}
-	if e = c.ProbeSession(t.Context()); !errors.Is(e, ErrUnavailable) {
-		t.Fatal("unfinished session succeeded", e)
+	if e = c.ProbeSession(t.Context()); e != nil {
+		t.Fatal("session authentication failed", e)
 	}
 	l, e := s.ReadLease(t.Context())
 	if e != nil {

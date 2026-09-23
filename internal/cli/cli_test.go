@@ -29,7 +29,7 @@ func TestCLI(t *testing.T) {
 		{name: "empty list is read only", args: []string{"db", "list"}},
 		{name: "stopped status is passive", args: []string{"mcp", "status", "--json"}},
 		{name: "stopped stop is idempotent", args: []string{"mcp", "stop"}},
-		{name: "unfinished bridge keeps stdout empty", args: []string{"mcp", "bridge"}, code: 1},
+		{name: "stopped bridge keeps stdout empty", args: []string{"mcp", "bridge"}, code: 1},
 		{name: "relative root rejected", args: []string{"db", "list", "--root", "relative"}, code: 2},
 		{name: "password flag redacted", args: []string{"--password", "secret-sentinel"}, code: 2},
 		{name: "unknown command redacted", args: []string{"secret-sentinel"}, code: 2},

@@ -198,9 +198,9 @@ Status checks launchd, the readiness handshake, config validity, and registratio
 
 The runtime handshake contains installation identity, process identity, application version, and internal protocol version. It is an internal socket preamble consumed by the bridge before relaying MCP, so agents see only valid MCP messages. A bridge or CLI with an incompatible internal version reports a restart requirement rather than exchanging uncertain messages. A short socket filename under a verified private temporary directory avoids macOS socket path-length limits; its identity maps back to the full installation root.
 
-P8 implements the lifecycle core and bounded probe/session preamble. Agent states
-remain `pending` until P10; P9 owns MCP dispatch and stdio relay. Session requests
-currently fail explicitly even when the service is running. Start/stop/status
+P8 implements the lifecycle core and bounded probe/session preamble. P9 attaches
+bounded SDK sessions and the stdio relay after successful authentication. Agent
+states remain `pending` until P10. Start/stop/status
 support the version-1 JSON status schema. Status reports degraded/stale output
 alongside a failure diagnostic: invalid state/configuration exits 2, other
 inspection failures exit 1; stopped is a successful query.
@@ -439,7 +439,7 @@ terminates the connection before returning its bounded result instead of drainin
 unread rows; that connection is never reused. Profile changes retire
 pools; explicit invalidation cancels active work and invalidates cursors. There is
 no cached catalog/grant result. P8 integrates the same lease boundary in its
-service manager before P9 connects MCP dispatch.
+service manager; P9 dispatches all database tools through this shared boundary.
 
 Startup removes inherited `PG*` variables before application goroutines. The
 internal initialized pgx template uses explicit placeholders, disabled TLS and
@@ -593,7 +593,37 @@ Expose four tools with stable names and strict JSON input/output schemas:
 
 Metadata pages default to 100 objects and cap at 500, with the same byte budget as query results. Cursors carry only pagination position and the configuration revision; reject stale cursors after a scope change. No tool accepts a host, DSN, credential, arbitrary file path, or connection override. No tool creates profiles or broadens scope.
 
-All tools declare read-only intent using MCP annotations, but enforcement remains server-side. A session cannot alter the service's policy. No sampling, prompts, subscriptions, or persistent MCP resources are required initially. Missing initialization or malformed protocol input is handled by the SDK.
+All tools declare read-only intent using MCP annotations, but enforcement remains server-side. A session cannot alter the service's policy. No sampling, prompts, subscriptions, or persistent MCP resources are required initially. The framing/admission guard rejects uninitialized work and malformed frames before unbounded SDK dispatch; the SDK handles initialized protocol methods.
+
+P9 uses the pinned SDK IOTransport after the identity preamble and negotiates
+MCP `2025-11-25`. It rejects stateless `server/discover` with a protocol error so
+newer SDK clients use their initialization fallback; subscriptions are not
+advertised. Each socket has an independent server session. The pre-dispatch guard
+admits at most four requests, including control requests, and filters repeated or
+unknown cancellation IDs. The lifecycle listener caps handshakes plus sessions
+at sixteen. Saturation closes the excess peer instead of creating a handler or
+response queue. Database admission retains the separate eight-active/32-waiter
+limits and returns typed tool errors.
+
+Frames are complete newline-delimited JSON objects, bounded to 256 KiB inbound
+and 2 MiB outbound including wrapping/newline. Duplicate keys, excess nesting,
+batches, malformed frames and work before initialization close the session.
+Initialization expires after ten seconds and a blocked socket or bridge output
+after five. The bridge owns and closes its streams; cancellable file reads let
+service disconnect interrupt idle stdin. Inherited stdout uses a nonblocking
+duplicate registered with Go's poller; outputs without deadline support are
+refused. Normal stdin EOF ends the bridge successfully; unexpected service EOF
+is an operational failure. EOF/cancellation cancels session work.
+No protocol or upstream error detail is logged or copied to diagnostics.
+
+Each handler validates the embedded strict input schema, calls the shared manager
+and prepares both `structuredContent` and compact JSON text under the state lease.
+The exact combined tool envelope must fit one MiB and the lower profile cap; the
+socket layer independently checks the full JSON-RPC frame. Serialization/output
+after preparation holds no state lease. Connection listing accesses only the
+public profile snapshot and never loads credentials. Error responses preserve
+safe shared-driver codes; unexpected internal errors become `SERVICE_UNAVAILABLE`.
+No successful live catalog verification is cached by a session.
 
 Example query result, carried as MCP structured content:
 
