@@ -1,0 +1,278 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/vault"
+)
+
+// No existing test owns the installed CLI + launchd lifecycle. This opt-in gate
+// uses two isolated installations and synthetic credentials only; it never reads
+// agent configuration or stops any job not created by this fixture.
+func TestNativeServiceLifecycle(t *testing.T) {
+	if os.Getenv("DATA_MATE_NATIVE_TEST") != "1" {
+		t.Skip("requires DATA_MATE_NATIVE_TEST=1, macOS GUI launchd and an unlocked user Keychain")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	dir, err := os.MkdirTemp("/tmp", "data-mate-p8-native-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep retry material if external cleanup fails.
+	clean := true
+	t.Cleanup(func() {
+		if clean {
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Log("native cleanup retry material retained:", dir)
+		}
+	})
+	run := func(bin string, args ...string) []byte {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir = "/"
+		out, e := cmd.CombinedOutput()
+		if e != nil {
+			t.Fatalf("native %s: %v %s", filepath.Base(bin), e, out)
+		}
+		return out
+	}
+	build := func(revision, path string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-trimpath", "-ldflags=-X main.version=native -X main.revision="+revision, "-o", path, "../../cmd/data-mate")
+		if out, e := cmd.CombinedOutput(); e != nil {
+			t.Fatalf("native build: %v %s", e, out)
+		}
+		if e := os.Chmod(path, 0700); e != nil {
+			t.Fatal(e)
+		}
+	}
+	original := filepath.Join(dir, "original")
+	build("p8-native", original)
+	data, err := os.ReadFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var controllers []*Controller
+	for _, name := range []string{"first checkout " + strings.Repeat("long", 35), "second checkout"} {
+		path := filepath.Join(dir, name, ".dev")
+		if err = os.MkdirAll(filepath.Join(path, "bin"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		root, e := config.ResolveRoot(path, "")
+		if e != nil {
+			t.Fatal(e)
+		}
+		tmp := filepath.Join(root.Path, "bin/.data-mate.native")
+		if e = os.WriteFile(tmp, data, 0700); e != nil {
+			t.Fatal(e)
+		}
+		run(tmp, "__install", "--root", root.Path)
+		binary := filepath.Join(root.Path, "bin/data-mate")
+		hash, e := binaryHash(binary)
+		if e != nil {
+			t.Fatal(e)
+		}
+		c := New(root, Build{"native", "p8-native", hash})
+		controllers = append(controllers, c)
+		t.Cleanup(func() {
+			cleanup, done := context.WithTimeout(context.Background(), 15*time.Second)
+			defer done()
+			if _, e := c.Stop(cleanup); e != nil {
+				clean = false
+				t.Error("native service cleanup", e)
+			}
+			if e := (vault.Keychain{}).Delete(cleanup, root.Digest); e != nil {
+				clean = false
+				t.Error("native exact key cleanup", e)
+			}
+		})
+		out := run(binary, "mcp", "status", "--json")
+		var result Status
+		if e = json.Unmarshal(out, &result); e != nil || result.State != "stopped" {
+			t.Fatal("initial passive status", result, e)
+		}
+		run(binary, "mcp", "start", "--json")
+		if _, e = os.Lstat(filepath.Join(root.Path, "state/vault.json")); !os.IsNotExist(e) {
+			t.Fatal("empty startup created vault", e)
+		}
+		if _, e = c.Start(ctx); e != nil {
+			t.Fatal("reuse", e)
+		}
+	}
+	c := controllers[0]
+	binary := filepath.Join(c.Root.Path, "bin/data-mate")
+	var wg sync.WaitGroup
+	starts := make(chan error, 4)
+	for range 4 {
+		wg.Go(func() { _, e := c.Start(ctx); starts <- e })
+	}
+	wg.Wait()
+	close(starts)
+	for e := range starts {
+		if e != nil {
+			t.Fatal("native concurrent start", e)
+		}
+	}
+	// A listening endpoint observes zero accepts during startup/status/reload.
+	listener, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer listener.Close()
+	contacted := make(chan struct{}, 1)
+	go func() {
+		conn, e := listener.Accept()
+		if e == nil {
+			conn.Close()
+			contacted <- struct{}{}
+		}
+	}()
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	run(binary, "db", "add", "--alias", "fixture", "--host", "127.0.0.1", "--port", port, "--database", "synthetic", "--username", "reader", "--passwordless", "--yes")
+	run(binary, "mcp", "status", "--json")
+	if _, e = c.Stop(ctx); e != nil {
+		t.Fatal(e)
+	}
+	// Save with the same signed executable that launchd runs. No secret argument.
+	save := exec.CommandContext(ctx, binary, "db", "edit", "fixture", "--password-stdin", "--yes")
+	save.Stdin = strings.NewReader("synthetic-p8-password\n")
+	save.Dir = "/"
+	if out, e := save.CombinedOutput(); e != nil {
+		t.Fatalf("native synthetic credential save: %v %s", e, out)
+	}
+	if _, e = c.Start(ctx); e != nil {
+		t.Fatal("native existing vault readiness", e)
+	}
+	path := filepath.Join(c.Root.Path, "config/connections.json")
+	profiles, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(path, []byte(`{"version":99}`), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if result, e := c.Inspect(ctx); !errors.Is(e, ErrState) || result.State != "degraded" {
+		t.Fatal("native invalid reload", result, e)
+	}
+	if e = os.WriteFile(path, profiles, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if result, e := c.Inspect(ctx); e != nil || result.State != "running" {
+		t.Fatal("native reload recovery", result, e)
+	}
+	select {
+	case <-contacted:
+		t.Fatal("lifecycle contacted database")
+	default:
+	}
+	// Crash does not restart automatically. Only the owned launchd job is signaled.
+	j, e := c.launcher.Inspect(ctx, c.Root)
+	if e != nil || j.PID <= 0 {
+		t.Fatal(j, e)
+	}
+	if _, e = launch(ctx, "kill", "SIGKILL", target(c.Root)); e != nil {
+		t.Fatal(e)
+	}
+	waitFor(t, func() bool { j, e := c.launcher.Inspect(ctx, c.Root); return e == nil && j.PID == 0 })
+	if result, e := c.Inspect(ctx); e != nil || result.State != "stale" {
+		t.Fatal("crashed service", result, e)
+	}
+	if _, e = c.Start(ctx); e != nil {
+		t.Fatal("explicit crash restart", e)
+	}
+	// A byte-changing rebuild is published through the actual hidden install entry.
+	changed := filepath.Join(c.Root.Path, "bin/.data-mate.changed")
+	build("p8-changed", changed)
+	out := run(changed, "__install", "--root", c.Root.Path)
+	if len(out) == 0 {
+		t.Fatal("build omitted restart diagnostic")
+	}
+	hash, e := binaryHash(binary)
+	if e != nil {
+		t.Fatal(e)
+	}
+	newer := New(c.Root, Build{"native", "p8-changed", hash})
+	newer.readiness = 2 * time.Second
+	if result, e := newer.Inspect(ctx); !errors.Is(e, ErrRestart) || result.State != "stale" {
+		t.Fatal("rebuild skew", result, e)
+	}
+	if e = newer.ProbeSession(ctx); !errors.Is(e, ErrRestart) {
+		t.Fatal("bridge rebuild skew", e)
+	}
+	if _, e = newer.Stop(ctx); e != nil {
+		t.Fatal("stop older executable", e)
+	}
+	// Keychain may grant an already approved identity or deny the changed ad-hoc
+	// executable. Either way startup must be explicit and leave no partial job.
+	result, changedErr := newer.Start(ctx)
+	if changedErr != nil && !errors.Is(changedErr, ErrStartup) {
+		t.Fatal("changed native key identity", changedErr)
+	}
+	t.Logf("changed executable readiness: state=%s error=%v", result.State, changedErr)
+	if _, e = newer.Stop(ctx); e != nil {
+		t.Fatal(e)
+	}
+	restore := filepath.Join(c.Root.Path, "bin/.data-mate.restore")
+	if e = os.WriteFile(restore, data, 0700); e != nil {
+		t.Fatal(e)
+	}
+	run(restore, "__install", "--root", c.Root.Path)
+	if _, e = c.Start(ctx); e != nil {
+		t.Fatal("original identity restart", e)
+	}
+	run(binary, "mcp", "stop", "--json")
+	stopped := exec.CommandContext(ctx, binary, "mcp", "bridge")
+	var stdout, stderr bytes.Buffer
+	stopped.Stdout = &stdout
+	stopped.Stderr = &stderr
+	if e = stopped.Run(); e == nil || stdout.Len() != 0 || stderr.Len() == 0 {
+		t.Fatal("stopped bridge exit/streams", e)
+	}
+	if result, e := controllers[1].Inspect(ctx); e != nil || result.State != "running" {
+		t.Fatal("other checkout affected", result, e)
+	}
+	// Native foreign job under our suffix must survive start/stop conflicts.
+	// This job is itself owned by the fixture, so final cleanup is exact.
+	foreign := filepath.Join(dir, "foreign.plist")
+	body := `<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>` + label(c.Root) + `</string><key>ProgramArguments</key><array><string>/bin/sleep</string><string>30</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><false/></dict></plist>`
+	if e = os.WriteFile(foreign, []byte(body), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = launch(ctx, "bootstrap", domain(), foreign); e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() {
+		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		if _, e := launch(cleanup, "bootout", target(c.Root)); e != nil {
+			clean = false
+			t.Error("foreign fixture cleanup", e)
+		}
+	})
+	for _, action := range []func(context.Context) (Status, error){c.Start, c.Stop} {
+		if _, e = action(ctx); !errors.Is(e, ErrConflict) {
+			t.Fatal("native foreign job altered", e)
+		}
+	}
+	if j, e := c.launcher.Inspect(ctx, c.Root); e != nil || !j.Present || j.Args[0] != "/bin/sleep" {
+		t.Fatal("foreign job lost", e)
+	}
+	t.Log("native two-root, long-path, concurrent/repeated start, zero-dial readiness, existing vault, reload, crash, rebuild, stop and stopped bridge passed")
+}

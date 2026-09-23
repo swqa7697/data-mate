@@ -44,9 +44,15 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		// No root is passed: this proves root inference from a different cwd.
 		run(t, temp, true, bin, "db", "list", "--json")
 		entries, err := os.ReadDir(filepath.Join(root, ".dev"))
-		if err != nil || len(entries) != 1 || entries[0].Name() != "bin" {
-			t.Fatal("install created runtime state")
+		if err != nil || len(entries) != 3 {
+			t.Fatal("install must create bin plus owned config/state", err)
 		}
+		// Lifecycle initialization must not create credentials or a running job.
+		if _, err := os.Lstat(filepath.Join(root, ".dev/state/vault.json")); !os.IsNotExist(err) {
+			t.Fatal("install created vault", err)
+		}
+		run(t, temp, true, bin, "mcp", "status", "--json")
+		run(t, temp, false, bin, "mcp", "bridge")
 		info, err := os.Stat(bin)
 		if err != nil || info.Mode().Perm() != 0700 {
 			t.Fatal("binary permissions")

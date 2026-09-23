@@ -105,10 +105,10 @@ func TestOwnedStorage(t *testing.T) {
 	if err != nil || observed != next {
 		t.Fatal("existing-only snapshot", err)
 	}
-	// P6 extends the exact owned inventory. A pre-P6 installation upgrades under
+	// P6/P8 extend the exact owned inventory. A pre-P6 installation upgrades under
 	// the lifecycle lock without replacing its identity or credential namespace.
 	legacy := s.identity
-	legacy.Owned = append([]string(nil), ownedPaths[:len(ownedPaths)-2]...)
+	legacy.Owned = append([]string(nil), ownedPaths[:11]...)
 	raw, err := json.Marshal(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -374,6 +374,30 @@ func TestStateLeases(t *testing.T) {
 	}
 	openCancel()
 	purge.Release()
+	// P8 lifecycle publication and stale waiters obey the same independent OS
+	// lease protocol as state writers. A tombstone cannot be bypassed by build.
+	life, err := s.Lifecycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeout, done := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	if lease, e := s.PurgeLease(timeout); !errors.Is(e, context.DeadlineExceeded) {
+		if lease != nil {
+			lease.Release()
+		}
+		t.Fatal("purge bypassed lifecycle", e)
+	}
+	done()
+	waiter := startLockHelper(t, root, "lifecycle-stale")
+	lifePath := filepath.Join(root.Path, "state/lifecycle.lock")
+	if err := os.Rename(lifePath, lifePath+".retired"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lifePath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	life.Release()
+	waiter.finish()
 	// Waiter captured old state inode, then a simulated purge unlinks it. It must
 	// fail after acquiring the old lock instead of writing into the new installation.
 	held := profileLease(t, s, false)
@@ -388,6 +412,25 @@ func TestStateLeases(t *testing.T) {
 	}
 	held.Release()
 	stale.finish()
+	// A cached Store opened before purge must not publish a new executable
+	// after the tombstone, even when it later acquires lifecycle successfully.
+	other, _ := storageFixture(t)
+	tombstone, err := other.PurgeLease(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tombstone.BeginPurge(); err != nil {
+		t.Fatal(err)
+	}
+	tombstone.Release()
+	publication, err := other.Lifecycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = publication.InstallBinary(".data-mate.fixture"); !errors.Is(err, ErrPurging) {
+		t.Fatal("build bypassed purge tombstone", err)
+	}
+	publication.Release()
 }
 
 type lockChild struct{ finish func() }
@@ -428,11 +471,34 @@ func lockHelper(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(context.Background(), root, nil)
+	var s *Store
+	if mode == "lifecycle-stale" {
+		s, err = OpenExisting(context.Background(), root)
+	} else {
+		s, err = Open(context.Background(), root, nil)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if mode == "lifecycle-stale" {
+		s.fault = func(op, path string) error {
+			if op == "lock-open" && path == "state/lifecycle.lock" {
+				fmt.Println("ready")
+			}
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		l, e := s.Lifecycle(ctx)
+		if l != nil {
+			l.Release()
+		}
+		if !errors.Is(e, ErrStale) {
+			t.Fatal("stale lifecycle waiter", e)
+		}
+		return
+	}
 
 	if mode == "write" {
 		fmt.Println("ready")

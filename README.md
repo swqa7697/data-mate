@@ -3,7 +3,7 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P7 scope selection and connection diagnostics.**
+**Current implementation: P8 background service lifecycle.**
 `db add`, `db edit`,
 `db remove`/`rm`, `db list`/`ls`, `db scope`, and `db test` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
@@ -13,8 +13,9 @@ routes with optional verified TLS,
 read-only role checks, scoped catalog pages and table descriptions. The internal
 compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
 signatures and executes only emitted, parameterized SQL after relation locking
-and fresh authorization checks. The MCP service and agent registration remain later packages; their commands
-fail explicitly.
+and fresh authorization checks. `mcp start`, `mcp stop` and `mcp status` manage
+the background service. MCP tool delivery (P9) and agent registration (P10) remain
+unavailable; bridge sessions fail explicitly and agent states report `pending`.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -37,12 +38,56 @@ application or creating `.dev`. Add `VERBOSE=1` to `make setup`, `make install`,
 
 The installed binary resolves its root from its executable location, so it works
 from another working directory. An absolute `--root` overrides that location.
-Each checkout has its own `.dev`; installation creates only its private `bin`
-directory and executable. The internal store initializes persistent identity and
-state locks after a confirmed mutation or the first `db test` of manually written
-profiles. Listing, previews and canceled forms do not initialize that store. Install/build do not initialize it either. Service
-lifecycle integration arrives in P8. Builds replace the executable
-atomically. No service, agent registration, or Keychain item is created during installation.
+Each checkout has its own `.dev`. Install/build initialize its private `bin`,
+`config` and `state` directories, installation identity, empty profiles and stable
+locks, then publish the executable atomically under the lifecycle lock. Existing
+profiles and credentials are preserved. No service, agent registration or
+Keychain item is created by installation. Listing, status, previews and canceled
+forms do not initialize state. Builds report a required restart when service
+state exists; run `mcp stop` then `mcp start` to load the new executable.
+
+Manage the background service:
+
+```bash
+make dev ARGS="mcp start"
+make dev ARGS="mcp status --json"
+make dev ARGS="mcp stop"
+```
+
+These commands support `--json` with version 1, a service `state`, and per-agent
+states. P8 reports both agents as `pending`; a running service does not yet provide
+MCP tools. Start explicitly bootstraps one job in the current user's GUI launchd
+domain and waits up to 30 seconds for readiness. There is no login item or
+automatic restart after a crash. Repeated starts reuse the matching healthy job.
+Stop preserves profiles and credentials, cancels active work, and allows five
+seconds before launchd terminates the verified job. It never signals a PID merely
+because it appears in a file.
+
+Startup validates profiles and existing encrypted credentials. It retains one
+vault key in process memory; an empty installation neither loads nor creates a
+key. Startup and status open no database connections, so an unreachable database
+does not prevent service readiness. Native Keychain denial or timeout fails
+startup and cleans the partial job. A rebuilt executable may need fresh native
+approval. Status is passive: no secret access, service startup, database access,
+agent command or repair. States are `stopped`, `starting`, `running`, `degraded`
+and `stale`. Stopped status exits 0; invalid configuration/state exits 2 and other
+inspection failures exit 1. A status failure still emits its JSON report when
+requested, with diagnostics on stderr.
+
+Each internal operation validates fresh profile bytes after bounded admission and
+holds a shared state lease through driver cleanup and result preparation. Profile
+changes retire the affected pools, transports and cursors; invalid configuration
+blocks work until repaired. CLI mutations wait for old-snapshot work to finish.
+The service uses the same driver and request-local catalog verification as the
+CLI. No successful query authorization is cached. P9 will attach MCP dispatch to
+this path. Slow socket output will not hold a state lease.
+
+The owned runtime socket uses a short private temporary path, full installation
+identity, a per-start nonce and peer UID/PID checks. Build or protocol mismatch
+requires an explicit restart; bridges never start a stopped service. Foreign
+jobs, mismatched records and unsafe files are preserved and reported as conflicts.
+Service roots may contain spaces and long directory names, but not control
+characters. Unknown launchctl inspection formats fail closed.
 
 Manage connections interactively:
 
@@ -263,7 +308,8 @@ Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
 with eight active operations, thirty-two waiters and a five-second queue deadline
 per shared driver. Requests have profile timeouts, a two-MiB protocol body cap,
 bounded catalog results and redacted errors. No application rows are queried by
-connection tests or catalog operations. Service state-lease integration is P8.
+connection tests or catalog operations. The P8 service manager uses the same
+state leases and shared driver; MCP dispatch is the next package.
 
 P1's explicit native check uses only synthetic credentials, a random temporary
 root, one exact Keychain account, and a temporary launchd job:

@@ -270,3 +270,30 @@ func (r *Repository) PurgeCredentials(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ValidateExisting authenticates the existing vault and all referenced bundles
+// before service readiness. Empty installations neither load nor create a key.
+func (r *Repository) ValidateExisting(ctx context.Context, l *config.Lease) error {
+	p, _, err := l.ProfileSnapshot()
+	if err != nil {
+		return err
+	}
+	v, err := r.load(ctx, l, false)
+	if err != nil {
+		return err
+	}
+	defer clear(v.key)
+	for _, c := range p.Connections {
+		if c.CredentialRef == "" {
+			continue
+		}
+		b, ok := v.document.Bundles[c.CredentialRef]
+		if !ok {
+			return ErrCredentialMissing
+		}
+		if b.ConnectionID != c.ID {
+			return ErrBinding
+		}
+	}
+	return nil
+}

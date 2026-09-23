@@ -198,6 +198,31 @@ Status checks launchd, the readiness handshake, config validity, and registratio
 
 The runtime handshake contains installation identity, process identity, application version, and internal protocol version. It is an internal socket preamble consumed by the bridge before relaying MCP, so agents see only valid MCP messages. A bridge or CLI with an incompatible internal version reports a restart requirement rather than exchanging uncertain messages. A short socket filename under a verified private temporary directory avoids macOS socket path-length limits; its identity maps back to the full installation root.
 
+P8 implements the lifecycle core and bounded probe/session preamble. Agent states
+remain `pending` until P10; P9 owns MCP dispatch and stdio relay. Session requests
+currently fail explicitly even when the service is running. Start/stop/status
+support the version-1 JSON status schema. Status reports degraded/stale output
+alongside a failure diagnostic: invalid state/configuration exits 2, other
+inspection failures exit 1; stopped is a successful query.
+
+Service state records the full installation binding, protocol, instance nonce,
+application version/revision, executable SHA-256 and observed PID. The preamble
+is a four-byte big-endian length plus strict JSON, capped at 4 KiB before body
+allocation. Both peers check native UID and PID and the full identity/nonce.
+A byte-changing rebuild requires restart even when version/revision are unchanged.
+The private socket is `/private/tmp/dm-<uid>-<root-suffix>/s`, with an independent
+full-identity marker; the directory is 0700 and marker/socket are 0600. Runtime
+cleanup preserves unrelated entries. Roots containing control characters are
+rejected; long paths and spaces are supported.
+
+The launchd adapter checks the exact plist path and ProgramArguments from bounded
+inspection output before any bootout. Unknown launchctl layouts fail closed.
+`KeepAlive=false` prevents crash restart; `RunAtLoad=true` applies only when
+`mcp start` explicitly bootstraps the private plist. `ExitTimeOut=5` delegates
+forced termination to the verified job. Stop waits for launchd removal before
+unlinking owned runtime state. P8 emits no retained daemon logs; daemon streams go
+to `/dev/null`, and callers receive bounded safe readiness diagnostics.
+
 ## 5. Persistent data and configuration
 
 ### 5.1 Development layout
@@ -211,13 +236,14 @@ The runtime handshake contains installation identity, process identity, applicat
   state/installation.json
   state/registrations.json
   state/service.plist
+  state/service.json
   state/state.lock
   state/state-gate.lock
   state/lifecycle.lock
   logs/service.log
 ```
 
-Runtime sockets live in a private, owner-checked OS temporary directory, with their location recorded in service state. Installation records contain nonsecret identity and owned-artifact inventory only. Directories are mode 0700; profile, vault, state, and log files are mode 0600. P1's identity records the installation UUID, full root digest, established-profile state, purge tombstone, and exact owned paths, including fixed `.tmp` publication siblings. Only the corresponding exclusive writer may recover an interrupted sibling; unknown files remain untouched. Reject symlink substitution for files the application owns and validate ownership before mutation or cleanup.
+Runtime sockets live in a private, owner-checked OS temporary directory, with their location derived from the full root identity in service state. Installation records contain nonsecret identity and owned-artifact inventory only. Directories are mode 0700; profile, vault, state, and log files are mode 0600. P1's identity records the installation UUID, full root digest, established-profile state, purge tombstone, and exact owned paths, including fixed `.tmp` publication siblings. Only the corresponding exclusive writer may recover an interrupted sibling; unknown files remain untouched. Reject symlink substitution for files the application owns and validate ownership before mutation or cleanup.
 
 The development binary resolves its root from its installed location, independent of the working directory; `make dev` also passes the absolute root explicitly. Agent registrations pin that root. Developer roots never fall back to a shared user configuration or another checkout's Keychain namespace. A future distributed installation may use `~/.config/data-mate` for profiles through the same path resolver; no distributed layout is installed now.
 
@@ -270,7 +296,7 @@ ordering do not change revisions; settings and limits do.
 
 Use an OS file lock shared by CLI writers and the service, atomic same-directory replacement, file sync, and parent-directory sync. Do not lock a replaceable data file's inode. All changes validate before publication.
 
-Database requests hold a shared state lock from configuration validation through execution and response preparation. CLI changes take the exclusive lock; bounded queries limit the wait. Once a change command succeeds, no operation using the previous configuration remains active. A separate lifecycle lock serializes start, stop, install, and uninstall when those paths are integrated in P8/P11. P1 initialization and its internal purge coordinator already use lifecycle locking. Lock order is lifecycle, admission gate, then state. Readers briefly hold the exclusive admission gate while acquiring a shared state lease; writers retain it through exclusive state access. A process-local writer-preferring queue supplements independently opened OS flock descriptors. Acquisition is context-bounded, and each acquired lease rechecks lock inode and installation identity; a stale waiter cannot mutate a recreated installation.
+Database requests hold a shared state lock from configuration validation through execution and response preparation. CLI changes take the exclusive lock; bounded queries limit the wait. Once a change command succeeds, no operation using the previous configuration remains active. A separate lifecycle lock serializes start, stop and executable publication in P8; P11 will integrate the outer uninstall coordinator. P1 initialization and its internal purge coordinator already use lifecycle locking. Lock order is lifecycle, admission gate, then state. Readers briefly hold the exclusive admission gate while acquiring a shared state lease; writers retain it through exclusive state access. A process-local writer-preferring queue supplements independently opened OS flock descriptors. Acquisition is context-bounded, and each acquired lease rechecks lock inode and installation identity; a stale waiter cannot mutate a recreated installation.
 
 Configuration and vault are separate files, so writes must remain safe across partial completion:
 
@@ -412,7 +438,8 @@ discarded and cleanup failure cannot produce success. Deliberate byte truncation
 terminates the connection before returning its bounded result instead of draining
 unread rows; that connection is never reused. Profile changes retire
 pools; explicit invalidation cancels active work and invalidates cursors. There is
-no cached catalog/grant result. P8 still owns service-level lease integration.
+no cached catalog/grant result. P8 integrates the same lease boundary in its
+service manager before P9 connects MCP dispatch.
 
 Startup removes inherited `PG*` variables before application goroutines. The
 internal initialized pgx template uses explicit placeholders, disabled TLS and
@@ -663,6 +690,11 @@ Create root `AGENTS.md` for project guidelines and `CLAUDE.md` pointing to it du
 Check required Go, C compiler/macOS SDK, and formatter tooling; provide installation guidance for missing system tools. Install module dependencies through Go modules. Docker is required only for explicit integration runs. Do not change system tooling silently.
 
 Installation runs dependency setup before the application build. `VERBOSE=1` enables Go download/build command diagnostics for `make setup`, `make install`, and `make build`.
+
+Install/build now initialize the nonsecret installation identity, empty profiles
+and stable locks, without creating a vault/key or starting a job. A private
+publication entry point verifies the built executable sibling and atomically
+renames it under lifecycle locking. Purge tombstones block publication.
 
 Rebuilding an active service does not hot-swap its executable image. Report that `mcp stop` followed by `mcp start` is needed to run the new version. A stopped bridge reports the ordinary service-not-running diagnostic.
 

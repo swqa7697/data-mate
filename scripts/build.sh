@@ -31,5 +31,5 @@ build_args=(build -mod=readonly -trimpath)
 if [[ "${VERBOSE:-0}" == 1 ]]; then build_args+=(-x); fi
 go "${build_args[@]}" -ldflags "$flags" -o "$temporary" ./cmd/data-mate
 chmod 700 "$temporary"
-mv -f "$temporary" "$target"
+"$temporary" __install --root "$project_dir/.dev"
 printf 'Installed %s\n' "$target"

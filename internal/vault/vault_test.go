@@ -196,6 +196,17 @@ func TestVaultTransactions(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	p, rev := snapshot(t, f.repo)
+	validate := func() error {
+		l, err := f.store.ReadLease(ctx)
+		if err != nil {
+			return err
+		}
+		defer l.Release()
+		return f.repo.ValidateExisting(ctx, l)
+	}
+	if err := validate(); err != nil {
+		t.Fatal("empty service vault validation", err)
+	}
 	if f.keys.loads != 0 {
 		t.Fatal("listing touched key store")
 	}
@@ -236,6 +247,37 @@ func TestVaultTransactions(t *testing.T) {
 	}
 	first := addSecret(t, f, 1)
 	second := addSecret(t, f, 2)
+	if err := validate(); err != nil {
+		t.Fatal("existing service vault validation", err)
+	}
+	f.keys.failure = ErrDenied
+	if err := validate(); !errors.Is(err, ErrDenied) {
+		t.Fatal("service readiness bypassed key denial", err)
+	}
+	f.keys.failure = nil
+	// The service keeps one process key while revalidating live ciphertext and
+	// binding. Closing that process cache must make future access impossible.
+	sessionKeys := NewSessionKeys(f.keys)
+	sessionRepo := New(f.store, sessionKeys)
+	l, err := f.store.ReadLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = sessionRepo.ValidateExisting(ctx, l); err != nil {
+		t.Fatal(err)
+	}
+	loads := f.keys.loads
+	f.keys.failure = ErrDenied
+	if _, err = sessionRepo.Credential(ctx, l, first.ID); err != nil || f.keys.loads != loads {
+		t.Fatal("service reloaded the native key", err)
+	}
+	sessionKeys.Close()
+	if _, err = sessionRepo.Credential(ctx, l, first.ID); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("closed service key reused", err)
+	}
+	l.Release()
+	f.keys.failure = nil
+
 	if f.keys.creates != 1 || len(f.keys.keys) != 1 {
 		t.Fatal("per-profile keys")
 	}

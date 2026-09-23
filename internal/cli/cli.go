@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
 
@@ -102,24 +100,8 @@ func commandWithDatabase(build Build, keys vault.KeyProvider, factory databaseFa
 		}
 		return nil
 	}})
-	unavailable := func(cmd *cobra.Command, _ []string) error {
-		if err := cmd.Context().Err(); err != nil {
-			return err
-		}
-		executable, err := os.Executable()
-		if err != nil {
-			return &Error{ExitFailure, "cannot locate executable"}
-		}
-		if _, err := config.ResolveRoot(override, executable); err != nil {
-			return &Error{ExitInvalid, err.Error()}
-		}
-		return &Error{ExitFailure, "SERVICE_UNAVAILABLE: command is not ready"}
-	}
 	db := newDB(&override, keys, factory)
-	mcp := &cobra.Command{Use: "mcp", Short: "Manage MCP service (not ready)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, name := range []string{"start", "stop", "status", "bridge"} {
-		mcp.AddCommand(&cobra.Command{Use: name, Short: "Not ready", Hidden: name == "bridge", Args: cobra.NoArgs, RunE: unavailable})
-	}
-	root.AddCommand(db, mcp)
+	root.AddCommand(db, newMCP(&override, build))
+	root.AddCommand(internalServiceCommands(&override, build, keys)...)
 	return root
 }

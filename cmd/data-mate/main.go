@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/swqa7697/data-mate/internal/cli"
 	"github.com/swqa7697/data-mate/internal/database/postgres"
@@ -16,7 +17,7 @@ var dirty = "unknown"
 
 func main() {
 	postgres.SanitizeEnvironment()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, cli.Build{Version: version, Revision: revision, Dirty: dirty})
 	stop()
 	os.Exit(code)

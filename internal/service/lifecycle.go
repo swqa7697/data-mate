@@ -1,0 +1,384 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/swqa7697/data-mate/internal/config"
+)
+
+// AgentStatus remains pending until the registration adapters are implemented.
+type AgentStatus struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+}
+
+// Status is the versioned passive lifecycle report.
+type Status struct {
+	Version int           `json:"version"`
+	State   string        `json:"state"`
+	Agents  []AgentStatus `json:"agents"`
+}
+
+func status(state string) Status {
+	return Status{1, state, []AgentStatus{{"codex", "pending"}, {"claude", "pending"}}}
+}
+
+// Controller serializes lifecycle mutations through the installation store.
+type Controller struct {
+	Root      config.Root
+	Build     Build
+	launcher  launchManager
+	readiness time.Duration
+}
+
+// New constructs a native lifecycle controller without accessing state.
+func New(root config.Root, build Build) *Controller {
+	return &Controller{root, build, launchd{}, 30 * time.Second}
+}
+func (c *Controller) inspect(ctx context.Context, r record, l *config.LifecycleLease) (job, error) {
+	j, err := c.launcher.Inspect(ctx, c.Root)
+	if err != nil {
+		return j, err
+	}
+	if j.Present {
+		if !matching(j, r) {
+			return j, ErrConflict
+		}
+		b, err := l.Read("state/service.plist", 16384)
+		if err != nil || !bytes.Equal(b, plist(c.Root, r)) {
+			return j, ErrConflict
+		}
+	}
+	return j, nil
+}
+func (c *Controller) clearRuntime(r record) error {
+	d, err := openRuntime(c.Root, r.Identity, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer d.file.Close()
+	return d.cleanup()
+}
+func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r record) error {
+	j, err := c.inspect(ctx, r, l)
+	if err != nil {
+		return err
+	}
+	if j.Present {
+		// bootout targets the verified launchd job, never a PID from a state file.
+		// ExitTimeOut=5 gives the service time to cancel requests and close resources.
+		bootErr := c.launcher.Bootout(ctx, c.Root)
+		wait, cancel := context.WithTimeout(ctx, 6*time.Second)
+		defer cancel()
+		tick := time.NewTicker(25 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			j, err = c.launcher.Inspect(wait, c.Root)
+			if err != nil {
+				return err
+			}
+			if !j.Present {
+				break
+			}
+			if !matching(j, r) {
+				return ErrConflict
+			}
+			if bootErr != nil {
+				return bootErr
+			}
+			select {
+			case <-wait.Done():
+				return ErrUnavailable
+			case <-tick.C:
+			}
+		}
+	}
+	if err = c.clearRuntime(r); err != nil {
+		return err
+	}
+	for _, path := range []string{"state/service.plist.tmp", "state/service.plist", "state/service.json.tmp", "state/service.json"} {
+		if err = l.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Start starts or reuses this exact installation. Agent registration is pending.
+func (c *Controller) Start(parent context.Context) (Status, error) {
+	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
+	defer cancel()
+	if !safePath(c.Root) {
+		return status("stale"), ErrState
+	}
+	if _, _, err := config.Preview(ctx, c.Root); err != nil {
+		return status("stale"), ErrState
+	}
+	s, err := config.Open(ctx, c.Root, nil)
+	if err != nil {
+		return status("stale"), ErrState
+	}
+	defer s.Close()
+	l, err := s.Lifecycle(ctx)
+	if err != nil {
+		return status("stale"), err
+	}
+	defer l.Release()
+	hash, err := binaryHash(filepath.Join(c.Root.Path, "bin/data-mate"))
+	if err != nil {
+		return status("stale"), err
+	}
+	if hash != c.Build.Fingerprint {
+		return status("stale"), ErrRestart
+	}
+	r, err := readRecord(l.Read, c.Root, l.Identity())
+	if err == nil {
+		j, e := c.inspect(ctx, r, l)
+		if e != nil {
+			return status("stale"), e
+		}
+		if j.Present && j.PID > 0 {
+			conn, h, e := connect(ctx, c.Root, r, c.Build, "probe")
+			if e == nil {
+				conn.Close()
+				if h.PID != j.PID {
+					return status("stale"), ErrConflict
+				}
+				if h.State != "running" {
+					return status(h.State), ErrStartup
+				}
+				return status(h.State), nil
+			}
+			// Never replace a live but unresponsive process on a repeated start.
+			return status("stale"), e
+		}
+		if e = c.stopLocked(ctx, l, r); e != nil {
+			return status("stale"), e
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return status("stale"), err
+	} else {
+		j, e := c.launcher.Inspect(ctx, c.Root)
+		if e != nil {
+			return status("stale"), e
+		}
+		if j.Present {
+			return status("stale"), ErrConflict
+		}
+	}
+	nonce, err := config.NewID()
+	if err != nil {
+		return status("stopped"), ErrStartup
+	}
+	r = record{1, installation(c.Root, l.Identity()), c.Build, nonce, 0}
+	runtime, err := openRuntime(c.Root, r.Identity, true)
+	if err != nil {
+		return status("stale"), err
+	}
+	err = runtime.removeStaleSocket()
+	runtime.file.Close()
+	if err != nil {
+		return status("stale"), err
+	}
+	if err = saveRecord(l, r); err != nil {
+		return status("stopped"), err
+	}
+	if err = l.Replace("state/service.plist", plist(c.Root, r)); err != nil {
+		return status("stopped"), err
+	}
+	bootErr := c.launcher.Bootstrap(ctx, c.Root)
+	if bootErr == nil {
+		ready, done := context.WithTimeout(ctx, c.readiness)
+		defer done()
+		tick := time.NewTicker(50 * time.Millisecond)
+		defer tick.Stop()
+		for ready.Err() == nil {
+			j, e := c.inspect(ready, r, l)
+			if e != nil {
+				if ready.Err() == nil {
+					bootErr = e
+				}
+				break
+			}
+			if j.Present && j.PID > 0 {
+				conn, h, e := connect(ready, c.Root, r, c.Build, "probe")
+				if e == nil {
+					conn.Close()
+					if h.PID != j.PID {
+						bootErr = ErrConflict
+						break
+					}
+					if h.State == "running" {
+						r.PID = h.PID
+						if e = saveRecord(l, r); e == nil {
+							return status("running"), nil
+						}
+						bootErr = e
+						break
+					}
+				} else if errors.Is(e, ErrConflict) || errors.Is(e, ErrRestart) {
+					bootErr = e
+					break
+				}
+			}
+			select {
+			case <-ready.Done():
+			case <-tick.C:
+			}
+		}
+	}
+	// Cancellation/timeouts still clean only this verified partial launch.
+	cleanup, finish := context.WithTimeout(context.Background(), 10*time.Second)
+	defer finish()
+	if err = c.stopLocked(cleanup, l, r); err != nil {
+		return status("stale"), err
+	}
+	if parent.Err() != nil {
+		return status("stopped"), parent.Err()
+	}
+	if bootErr != nil && !errors.Is(bootErr, ErrStartup) {
+		return status("stopped"), bootErr
+	}
+	return status("stopped"), ErrStartup
+}
+
+// Stop is idempotent. Invalid profile data does not prevent owned job cleanup.
+func (c *Controller) Stop(ctx context.Context) (Status, error) {
+	s, err := config.OpenLifecycle(ctx, c.Root)
+	if errors.Is(err, os.ErrNotExist) {
+		j, e := c.launcher.Inspect(ctx, c.Root)
+		if e != nil {
+			return status("stale"), e
+		}
+		if j.Present {
+			return status("stale"), ErrConflict
+		}
+		return status("stopped"), nil
+	}
+	if err != nil {
+		return status("stale"), ErrState
+	}
+	defer s.Close()
+	l, err := s.Lifecycle(ctx)
+	if err != nil {
+		return status("stale"), err
+	}
+	defer l.Release()
+	r, err := readRecord(l.Read, c.Root, l.Identity())
+	if errors.Is(err, os.ErrNotExist) {
+		j, e := c.launcher.Inspect(ctx, c.Root)
+		if e != nil {
+			return status("stale"), e
+		}
+		if j.Present {
+			return status("stale"), ErrConflict
+		}
+		return status("stopped"), nil
+	}
+	if err != nil {
+		return status("stale"), err
+	}
+	if err = c.stopLocked(ctx, l, r); err != nil {
+		return status("stale"), err
+	}
+	return status("stopped"), nil
+}
+
+// Inspect reads profiles and probes an already-running job. No secrets, database
+// connections, registration commands, process startup or state repair occur.
+func (c *Controller) Inspect(ctx context.Context) (Status, error) {
+	configErr := error(nil)
+	if _, _, err := config.Preview(ctx, c.Root); err != nil {
+		configErr = ErrState
+	}
+	s, err := config.OpenExisting(ctx, c.Root)
+	if errors.Is(err, os.ErrNotExist) {
+		j, e := c.launcher.Inspect(ctx, c.Root)
+		if e != nil {
+			return status("stale"), e
+		}
+		if j.Present {
+			return status("stale"), ErrConflict
+		}
+		return status("stopped"), configErr
+	}
+	if err != nil {
+		return status("stale"), ErrState
+	}
+	defer s.Close()
+	l, err := s.ReadLease(ctx)
+	if err != nil {
+		return status("stale"), ErrState
+	}
+	r, recordErr := readRecord(l.Read, c.Root, l.Identity())
+	l.Release()
+	j, err := c.launcher.Inspect(ctx, c.Root)
+	if err != nil {
+		return status("stale"), err
+	}
+	if errors.Is(recordErr, os.ErrNotExist) && !j.Present {
+		return status("stopped"), configErr
+	}
+	if recordErr != nil {
+		return status("stale"), ErrState
+	}
+	if !j.Present || j.PID == 0 {
+		return status("stale"), configErr
+	}
+	if !matching(j, r) {
+		return status("stale"), ErrConflict
+	}
+	conn, h, err := connect(ctx, c.Root, r, c.Build, "probe")
+	if err != nil {
+		if r.PID == 0 && errors.Is(err, ErrUnavailable) {
+			return status("starting"), configErr
+		}
+		return status("stale"), err
+	}
+	conn.Close()
+	if h.PID != j.PID {
+		return status("stale"), ErrConflict
+	}
+	if configErr != nil {
+		return status("degraded"), configErr
+	}
+	if h.State != "running" && h.State != "degraded" && h.State != "stopped" {
+		return status("stale"), ErrState
+	}
+	return status(h.State), nil
+}
+
+// ProbeSession verifies availability without starting a stopped service. P9 will
+// attach the MCP relay; until then a matching server explicitly refuses sessions.
+func (c *Controller) ProbeSession(ctx context.Context) error {
+	s, err := config.OpenExisting(ctx, c.Root)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer s.Close()
+	l, err := s.ReadLease(ctx)
+	if err != nil {
+		return ErrUnavailable
+	}
+	r, err := readRecord(l.Read, c.Root, l.Identity())
+	l.Release()
+	if err != nil {
+		return ErrUnavailable
+	}
+	conn, _, err := connect(ctx, c.Root, r, c.Build, "session")
+	if conn != nil {
+		conn.Close()
+	}
+	if err != nil {
+		return err
+	}
+	return ErrUnavailable
+}

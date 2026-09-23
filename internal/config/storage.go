@@ -60,6 +60,8 @@ var ownedPaths = []string{
 	"state/vault-usage.json", "state/vault-usage.json.tmp",
 	"state/vault.json", "state/vault.json.tmp",
 	"config/known_hosts", "config/known_hosts.tmp",
+	"state/service.json", "state/service.json.tmp",
+	"state/service.plist", "state/service.plist.tmp",
 }
 
 // Fault is an optional test seam called before/after durability boundaries. It
@@ -79,7 +81,17 @@ type Store struct {
 // OpenExisting pins initialized state without creating files or migrating an
 // inventory. Interactive catalog browsing uses it so cancellation cannot leave
 // initialization artifacts. A state lease must still validate each snapshot.
-func OpenExisting(ctx context.Context, root Root) (_ *Store, err error) {
+func OpenExisting(ctx context.Context, root Root) (*Store, error) {
+	return openExisting(ctx, root, false)
+}
+
+// OpenLifecycle permits an existing purge tombstone for stop/cleanup only.
+// Ordinary state leases still reject the tombstone. It creates no files.
+func OpenLifecycle(ctx context.Context, root Root) (*Store, error) {
+	return openExisting(ctx, root, true)
+}
+
+func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -100,6 +112,10 @@ func OpenExisting(ctx context.Context, root Root) (_ *Store, err error) {
 	if err = s.validRoot(); err != nil {
 		return nil, err
 	}
+	var state unix.Stat_t
+	if e := unix.Fstatat(fd, "state", &state, unix.AT_SYMLINK_NOFOLLOW); errors.Is(e, unix.ENOENT) {
+		return nil, os.ErrNotExist
+	}
 	raw, err := s.read("state/installation.json", 8192)
 	if err != nil {
 		return nil, err
@@ -107,7 +123,7 @@ func OpenExisting(ctx context.Context, root Root) (_ *Store, err error) {
 	if err = decodeIdentity(raw, root, &s.identity); err != nil {
 		return nil, err
 	}
-	if s.identity.Purging {
+	if s.identity.Purging && !cleanup {
 		return nil, ErrPurging
 	}
 	return s, nil
@@ -186,7 +202,7 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 		if err = decodeIdentity(raw, root, &s.identity); err != nil {
 			return nil, err
 		}
-		// Upgrade only the exact pre-P6 inventory, under the lifecycle lease.
+		// Upgrade only an exact historical inventory, under the lifecycle lease.
 		// Identity, credential namespace and existing owned data remain intact.
 		if !slices.Equal(s.identity.Owned, ownedPaths) {
 			s.identity.Owned = slices.Clone(ownedPaths)
@@ -235,7 +251,7 @@ func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
 		return ErrOwnership
 	}
-	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:len(ownedPaths)-2])) {
+	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:11]) && !slices.Equal(id.Owned, ownedPaths[:13])) {
 		return ErrOwnership
 	}
 	return nil
