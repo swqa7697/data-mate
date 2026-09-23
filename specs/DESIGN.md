@@ -113,12 +113,13 @@ transports. Missing keys or corrupt vault accounting are not silently recreated.
 
 Add/edit also accept the scope flags without a catalog fetch. Advanced transport
 and limit flags are persisted in P2. P3 implements internal direct/TLS
-connectivity and catalogs; CLI diagnostics/browsing and host-key enrollment
-remain later packages. `--query-timeout` accepts whole
+connectivity and catalogs; P6 adds SSH/SOCKS5 and interactive host-key enrollment.
+CLI diagnostics/browsing remain P7. `--query-timeout` accepts whole
 milliseconds (`1ms`–`30s`); the other limit flags are `--max-rows` and
 `--max-result-bytes`. `--tls=false` disables TLS and clears its CA path, while an
 omitted CA field is preserved when enabling TLS. SSH key source bytes are imported
-once and kept only in the encrypted bundle. No transport is tested while saving.
+once and kept only in the encrypted bundle. Normal saving performs no connection
+test. Explicit `--ssh-enroll` probes only the SSH host key before confirmation.
 A durable profile removal with failed credential cleanup exits 1 and reports the
 partial outcome; subsequent confirmed mutations retry orphan reconciliation.
 
@@ -352,6 +353,34 @@ Build connection parameters explicitly from the profile and vault. Do not inheri
 TLS failure never falls back to plaintext. Do not offer a “skip verification” switch. With TLS disabled, the preview states that database traffic lacks TLS protection; non-loopback endpoints receive a concise confirmation note. This preserves the PRD's opt-in advanced settings while making their effect visible. PostgreSQL password authentication alone does not encrypt query traffic.
 
 SSH host-key enrollment happens only during an interactive connection operation with an explicit fingerprint confirmation; changed host keys fail. The background service cannot accept host keys. Importing a key must not invoke shell commands, SSH config `ProxyCommand`, or arbitrary helper programs. SOCKS5 proxy URLs cannot embed credentials. SSH and proxy are mutually exclusive in v1 to keep the dialing path simple. TLS may be layered over either and verifies the database's configured hostname.
+
+P6 implements enrollment through `db add/edit --ssh-enroll`, requiring a TTY,
+explicit SHA-256 fingerprint confirmation and the final default-No profile
+confirmation. `--yes` and stdin credential modes cannot enroll. The probe sends
+no authentication material; the candidate remains in memory until the confirmed
+writer rechecks the profile revision and current pin. Atomic mode-0600
+`config/known_hosts` publication precedes profile publication. A later save failure
+can leave an unused owned pin; cancellation before confirmation persists nothing.
+The bounded 1 MiB file accepts exact endpoint public-key entries only, rejecting
+duplicate endpoints, wildcards, certificates and markers. Changed pins cannot be
+overwritten by enrollment. Existing installation inventories gain exactly this
+file and its publication sibling under the lifecycle lock, preserving identity.
+
+Each database connection owns its SSH TCP connection and one forwarding channel,
+or its SOCKS5 socket. Closing/retiring the database connection closes the route.
+SSH deadlines dispose the whole route and report timeout errors, including writes
+blocked on channel window credit. Connection setup has a ten-second upper bound
+and honors earlier cancellation. SOCKS5 username/password fields have protocol
+limits of 255 bytes. Database hostnames resolve remotely through the chosen route;
+pgx's local lookup is bypassed only for SSH/SOCKS5. Remote addresses retain the
+original database endpoint for pgx cancellation connections. TLS always verifies
+the configured database hostname, with no direct or plaintext fallback. No ambient
+SSH agent/configuration, proxy environment, or helper process participates.
+
+Private access snapshots include transport credentials and owned host pins, read
+under the caller's state lease. Changes to either retire the pool just like profile
+or database-password changes. Transport code has no SQL policy responsibilities;
+every query still reaches the same fresh P5 catalog and authorization checks.
 
 Use `pgx` with driver-owned pools for PostgreSQL access. Pools open lazily, start with zero idle connections, and hold at most two connections per profile. A global semaphore caps active database work at eight operations, with a bounded waiting queue of 32 and a five-second queue deadline. Evict idle pools after five minutes and cap open pools at 16. No idle polling of every database is required. See the [pgx driver documentation](https://pkg.go.dev/github.com/jackc/pgx/v5).
 

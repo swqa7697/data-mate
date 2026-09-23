@@ -292,7 +292,7 @@ func (l *Lease) Read(path string, limit int) ([]byte, error) {
 
 // Replace durably publishes an owned data document under an exclusive lease.
 func (l *Lease) Replace(path string, b []byte) error {
-	if !l.write || (path != "config/connections.json" && path != "state/vault.json" && path != "state/vault-usage.json") || len(b) > 8<<20 {
+	if !l.write || (path != "config/connections.json" && path != "state/vault.json" && path != "state/vault-usage.json" && path != "config/known_hosts") || len(b) > 8<<20 {
 		return ErrOwnership
 	}
 	if err := l.check(); err != nil {
@@ -301,10 +301,10 @@ func (l *Lease) Replace(path string, b []byte) error {
 	return l.store.replace(path, b)
 }
 
-// Remove is restricted to the three data files; stable lock/identity removal is P11.
+// Remove is restricted to owned data files; stable lock/identity removal is P11.
 func (l *Lease) Remove(path string) error {
 	base := strings.TrimSuffix(path, ".tmp")
-	if !l.write || (base != "config/connections.json" && base != "state/vault.json" && base != "state/vault-usage.json") {
+	if !l.write || (base != "config/connections.json" && base != "state/vault.json" && base != "state/vault-usage.json" && base != "config/known_hosts") {
 		return ErrOwnership
 	}
 	if err := l.check(); err != nil {

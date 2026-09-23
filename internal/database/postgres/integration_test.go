@@ -297,6 +297,7 @@ func TestPostgresIntegration(t *testing.T) {
 	compilerAcceptance(t, d, access, sql)
 	catalogCompatibilityAcceptance(t, d, access, admin)
 	executorAcceptance(t, d, access, admin, sql)
+	transportAcceptance(t, p, password, fixture.Root, admin)
 	// Independent concurrent requests share at most two connections per profile.
 	var wg sync.WaitGroup
 	for range 12 {

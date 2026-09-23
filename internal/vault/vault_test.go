@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,8 @@ import (
 	"time"
 
 	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/transport"
+	"golang.org/x/crypto/ssh"
 )
 
 const syntheticPassword = "SYNTHETIC-P1-password-never-persist-plaintext"
@@ -203,6 +207,33 @@ func TestVaultTransactions(t *testing.T) {
 	if f.keys.creates != 0 {
 		t.Fatal("cancel created key")
 	}
+	// Enrollment is part of the confirmed writer transaction. A host publication
+	// failure must precede profile publication, and stale previews cannot add pins.
+	_, private, e := ed25519.GenerateKey(rand.Reader)
+	if e != nil {
+		t.Fatal(e)
+	}
+	signer, e := ssh.NewSignerFromKey(private)
+	if e != nil {
+		t.Fatal(e)
+	}
+	pin := &transport.HostKey{Address: "jump.invalid:22", Key: signer.PublicKey()}
+	f.fault = func(op, path string) error {
+		if op == "before-rename" && path == "config/known_hosts" {
+			return errors.New("injected host publication failure")
+		}
+		return nil
+	}
+	if out, e := f.repo.Apply(ctx, Mutation{Expected: rev, Profiles: config.Profiles{Version: 1, Connections: []config.Profile{testProfile(t, 99)}}, HostKey: pin}); e == nil || out.ProfilesSaved {
+		t.Fatal("host failure published profile")
+	}
+	f.fault = nil
+	if current, _ := snapshot(t, f.repo); len(current.Connections) != 0 {
+		t.Fatal("profile changed before pin publication")
+	}
+	if _, e = f.repo.Apply(ctx, Mutation{Expected: rev, Profiles: p, HostKey: pin}); e != nil {
+		t.Fatal(e)
+	}
 	first := addSecret(t, f, 1)
 	second := addSecret(t, f, 2)
 	if f.keys.creates != 1 || len(f.keys.keys) != 1 {
@@ -225,6 +256,13 @@ func TestVaultTransactions(t *testing.T) {
 	}
 	if !bytes.Equal(before, readOwned(t, f, "state/vault.json")) {
 		t.Fatal("stale preview changed vault")
+	}
+	beforeHosts := readOwned(t, f, "config/known_hosts")
+	if _, e := f.repo.Apply(ctx, Mutation{Expected: rev, Profiles: p, HostKey: &transport.HostKey{Address: "other.invalid:22", Key: signer.PublicKey()}}); !errors.Is(e, config.ErrRevision) {
+		t.Fatal("stale enrollment accepted", e)
+	}
+	if !bytes.Equal(beforeHosts, readOwned(t, f, "config/known_hosts")) {
+		t.Fatal("stale enrollment changed host pins")
 	}
 	// A fresh Store represents restart; the same key and identities must decrypt.
 	restarted, e := config.Open(ctx, f.root, nil)

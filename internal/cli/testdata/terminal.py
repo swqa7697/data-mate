@@ -11,7 +11,7 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
-for mode in ("happy", "no", "ctrl-c", "signal"):
+for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel"):
     root = os.path.join(base, mode)
     os.mkdir(root, 0o700)
     master, slave = pty.openpty()
@@ -42,13 +42,21 @@ for mode in ("happy", "no", "ctrl-c", "signal"):
         os.write(master, answer.encode())
 
     try:
-        send_after("Driver [postgres]:", "\r")
-        send_after("Alias:", "analytics\r")
-        send_after("Host:", "localhost\r")
-        send_after("Port [5432]:", "\r")
-        send_after("Database:", "app\r")
-        send_after("Username:", "reader\r")
-        if mode == "signal":
+        if mode.startswith("enroll"):
+            send_after("SSH password:", "synthetic\r")
+            send_after("Trust this SSH fingerprint? [y/N]:", "\r" if mode == "enroll-no" else "y\r")
+            if mode != "enroll-no":
+                send_after("Save changes? [y/N]:", "y\r" if mode == "enroll" else "n\r")
+        else:
+            send_after("Driver [postgres]:", "\r")
+            send_after("Alias:", "analytics\r")
+            send_after("Host:", "localhost\r")
+            send_after("Port [5432]:", "\r")
+            send_after("Database:", "app\r")
+            send_after("Username:", "reader\r")
+        if mode.startswith("enroll"):
+            pass
+        elif mode == "signal":
             send_after("Password:", "")
             proc.send_signal(signal.SIGINT)
         elif mode == "ctrl-c":
@@ -88,11 +96,16 @@ for mode in ("happy", "no", "ctrl-c", "signal"):
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode == "happy" else 130), (mode, code, transcript)
+        assert code == (0 if mode in ("happy", "enroll") else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
         assert b"\x1b[36m" not in transcript, "NO_COLOR ignored"
-        if mode == "happy":
+        if mode == "enroll":
+            with open(os.path.join(root, "config/known_hosts")) as stream:
+                assert 'ssh-ed25519' in stream.read(), "confirmed key missing"
+            assert b'SHA256:' in transcript, "fingerprint not shown"
+            assert b'synthetic' not in transcript, "SSH password echoed"
+        elif mode == "happy":
             with open(os.path.join(root, "config/connections.json")) as stream:
                 assert json.load(stream)["connections"] == []
             assert b'reader' in transcript, "username must remain visible"

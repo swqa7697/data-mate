@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/transport"
 )
 
 const idleTTL = 5 * time.Minute
@@ -135,9 +137,15 @@ func (d *Driver) Close() {
 }
 func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Revision) (*pgx.Conn, context.Context, func(bool), error) {
 	mac := hmac.New(sha256.New, d.key[:])
-	mac.Write([]byte(rev))
-	mac.Write([]byte{0})
-	mac.Write([]byte(a.Password()))
+	secrets, hosts := a.TransportCredentials()
+	// Hash exact length-framed bytes, including private transport credentials.
+	// JSON would replace invalid UTF-8 and could alias distinct credential inputs.
+	for _, value := range []string{string(rev), a.Password(), secrets.SSHPassword, secrets.SSHPrivateKey, secrets.SSHKeyPassphrase, secrets.ProxyPassword, string(hosts)} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		mac.Write(size[:])
+		mac.Write([]byte(value))
+	}
 	fp := hex.EncodeToString(mac.Sum(nil))
 	id := a.Profile.ID
 	d.mu.Lock()
@@ -325,6 +333,14 @@ func safeError(err error) error {
 	var known *database.Error
 	if errors.As(err, &known) {
 		return known
+	}
+	for _, safe := range []error{transport.ErrUnknownHost, transport.ErrChangedHost, transport.ErrKnownHosts} {
+		if errors.Is(err, safe) {
+			return database.Fail(contracts.ConnectFailed, safe.Error(), false)
+		}
+	}
+	if errors.Is(err, transport.ErrConfiguration) {
+		return database.Fail(contracts.ConfigInvalid, "invalid transport configuration or credentials", false)
 	}
 	if errors.Is(err, context.Canceled) {
 		return database.Fail(contracts.Cancelled, "database operation canceled", true)

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -35,16 +36,13 @@ func normalized(a database.Access) (database.Access, config.Revision, error) {
 	if err != nil {
 		return a, "", database.Fail(contracts.ConfigInvalid, "invalid profile", false)
 	}
-	a = database.NewAccess(p.Connections[0], a.Password())
+	a.Profile = p.Connections[0]
 	host := a.Profile.Connection.Host
 	if len(host) > 253 || (net.ParseIP(host) == nil && strings.ContainsAny(host, "/\\:@, \t\r\n")) {
 		return a, "", database.Fail(contracts.ConfigInvalid, "host must be one TCP hostname or IP address", false)
 	}
 	if len(a.Password()) > 128<<10 || strings.ContainsRune(a.Password(), 0) {
 		return a, "", database.Fail(contracts.ConfigInvalid, "invalid credential", false)
-	}
-	if a.Profile.Transport.SSH != nil || a.Profile.Transport.Proxy != nil {
-		return a, "", database.Fail(contracts.QueryUnsupported, "SSH and proxy transport are not ready", false)
 	}
 	return a, rev, nil
 }
@@ -72,7 +70,16 @@ func connectionConfig(a database.Access) (*pgx.ConnConfig, error) {
 		return nil, database.Fail(contracts.ConnectFailed, "cannot load verified TLS configuration", false)
 	}
 	c.Fallbacks = nil
-	c.DialFunc = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	secrets, hosts := a.TransportCredentials()
+	c.DialFunc, err = transport.Dialer(p.Transport, secrets, hosts)
+	if err != nil {
+		return nil, safeError(err)
+	}
+	if p.Transport.SSH != nil || p.Transport.Proxy != nil {
+		// The chosen route resolves the original database host remotely. TLS still
+		// verifies that hostname, and no local database DNS or direct fallback runs.
+		c.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
+	}
 	c.ConnectTimeout = 10 * time.Second
 	c.RuntimeParams = map[string]string{"application_name": "data-mate", "search_path": "pg_catalog", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "bytea_output": "hex", "client_encoding": "UTF8", "extra_float_digits": "3", "default_transaction_read_only": "on", "statement_timeout": "10000", "lock_timeout": "1000"}
 	c.MaxProtocolMessageBodyLen = 2 << 20

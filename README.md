@@ -3,12 +3,13 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P5 bounded read-only PostgreSQL executor.**
+**Current implementation: P6 optional SSH and SOCKS5 transports.**
 `db add`, `db edit`,
 `db remove`/`rm`, and `db list`/`ls` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
 encryption accounting, and one native Keychain item per installation are
-implemented. The internal PostgreSQL driver supports direct/verified TLS,
+implemented. The internal PostgreSQL driver supports direct, SSH and SOCKS5
+routes with optional verified TLS,
 read-only role checks, scoped catalog pages and table descriptions. The internal
 compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
 signatures and executes only emitted, parameterized SQL after relation locking
@@ -75,16 +76,32 @@ Both input modes require `--yes` and complete fields and cannot share stdin with
 forms. Add requires an explicit password choice; omitted edit secrets remain
 unchanged. No password argument or credential-bearing URL is accepted.
 
-Advanced flags persist settings only: `--tls`, `--tls-ca /absolute/path`,
+Advanced settings use `--tls`, `--tls-ca /absolute/path`,
 `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`,
 `--proxy socks5://host:port`, and `--proxy-user`. SSH and proxy are mutually
 exclusive. Key files are imported once into the encrypted vault; their source
 files remain untouched. `--tls=false`, `--clear-ssh`, and `--clear-proxy` remove
 transport settings; the latter two also clear their secrets. Individual clear
 flags are `--clear-ssh-password`, `--clear-ssh-key-passphrase`, and
-`--clear-proxy-password`. TLS CA requires enabled TLS. The internal driver
-supports direct/TLS; SSH/proxy runtime and CLI connection tests remain later
-packages.
+`--clear-proxy-password`. TLS CA requires enabled TLS. The internal driver supports
+password or imported-key SSH authentication (including encrypted keys and vault
+passphrases), and authenticated or unauthenticated SOCKS5. TLS verifies the
+original database hostname through either route. Database DNS resolution happens
+at the jump host/proxy; only its endpoint is resolved locally. No SSH agent,
+OpenSSH configuration, proxy environment or external helper is used.
+
+Enroll an SSH host with interactive `db add ... --ssh-enroll` or
+`db edit analytics --ssh-enroll`. Compare the displayed SHA-256 fingerprint with
+the server's trusted fingerprint, confirm it, then confirm the profile preview.
+Both confirmations default to No. Enrollment rejects `--yes`, stdin credential
+flags and non-TTY input; scripted saving alone cannot trust a host. Pins publish
+to the owned mode-0600 `config/known_hosts` before the profile; cancellation before
+the final confirmation writes nothing. An interrupted save may leave an unused
+pin. The file supports exact host/port public-key entries, without wildcards,
+certificates or ambient known-host files. Unknown and changed keys fail at runtime;
+changed keys are never automatically replaced. Normal saving makes no network
+connection; `--ssh-enroll` only probes the SSH host key, without authentication or
+database access. CLI connection diagnostics remain in P7.
 
 `--query-timeout` accepts whole milliseconds from `1ms` to `30s`; `--max-rows`
 accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `10s`,

@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/transport"
 )
 
 // Repository owns profile/vault publication ordering. No method prints secrets.
@@ -80,6 +81,7 @@ type Mutation struct {
 	Expected     config.Revision
 	Profiles     config.Profiles
 	Replacements map[string]Secrets
+	HostKey      *transport.HostKey
 }
 
 // Outcome distinguishes a committed profile change from a cleanup failure.
@@ -125,6 +127,14 @@ func (r *Repository) Apply(ctx context.Context, m Mutation) (Outcome, error) {
 	}
 	if current != m.Expected {
 		return outcome, config.ErrRevision
+	}
+	if m.HostKey != nil {
+		if err = ctx.Err(); err != nil {
+			return outcome, err
+		}
+		if err = transport.SaveHostKey(l, *m.HostKey); err != nil {
+			return outcome, err
+		}
 	}
 
 	// Deletion and unchanged credential references can publish profiles before

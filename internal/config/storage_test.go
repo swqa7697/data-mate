@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 	"testing"
@@ -73,6 +74,20 @@ func TestOwnedStorage(t *testing.T) {
 		t.Fatal("stale preview changed profiles", err)
 	}
 	l.Release()
+	// P6 extends the exact owned inventory. A pre-P6 installation upgrades under
+	// the lifecycle lock without replacing its identity or credential namespace.
+	legacy := s.identity
+	legacy.Owned = append([]string(nil), ownedPaths[:len(ownedPaths)-2]...)
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root.Path, "state/installation.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = Preview(t.Context(), root); err != nil {
+		t.Fatal("legacy preview", err)
+	}
 	s2, err := Open(context.Background(), root, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +96,9 @@ func TestOwnedStorage(t *testing.T) {
 	l2 := profileLease(t, s2, false)
 	if l2.Identity().ID != s.identity.ID {
 		t.Fatal("restart changed identity")
+	}
+	if !reflect.DeepEqual(l2.Identity().Owned, ownedPaths) {
+		t.Fatal("legacy owned inventory was not upgraded")
 	}
 	l2.Release()
 	path := filepath.Join(root.Path, "config/connections.json")

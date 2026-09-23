@@ -259,6 +259,8 @@ func TestConnectionInputs(t *testing.T) {
 		{"missing add password", `{}`, []string{"--credentials-stdin"}},
 		{"URL", "", []string{"--passwordless", "--host", "postgres://reader:secret-sentinel@host/db"}},
 		{"proxy URL", "", []string{"--passwordless", "--proxy", "socks5://reader:secret-sentinel@host:1080"}},
+		{"noninteractive host enrollment", "", []string{"--passwordless", "--ssh-enroll"}},
+		{"nonTTY host enrollment", "", []string{"--passwordless", "--ssh-enroll", "--yes=false"}},
 		{"password argv", "", []string{"--password", "secret-sentinel"}},
 		{"scope conflict", "", []string{"--passwordless", "--none", "--all"}},
 		{"transport conflict", "", []string{"--passwordless", "--ssh-host", "jump", "--ssh-user", "u", "--proxy", "socks5://host:1080"}},

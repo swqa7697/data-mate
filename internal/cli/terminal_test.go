@@ -7,8 +7,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/swqa7697/data-mate/internal/testsupport/transportfixture"
 )
 
 // Real PTYs are necessary for hidden input, raw-mode restoration and cancellation;
@@ -30,6 +34,19 @@ func TestConnectionTerminal(t *testing.T) {
 				fmt.Fprintln(os.Stderr, err)
 			}
 			return ExitCode(err)
+		}
+		if strings.HasPrefix(mode, "enroll") {
+			peer := transportfixture.New(t, "ssh", transportfixture.Options{User: "fixture", Password: "synthetic"})
+			args := []string{"add", "--alias", "analytics", "--host", "localhost", "--database", "app", "--username", "reader", "--passwordless", "--ssh-host", "127.0.0.1", "--ssh-port", strconv.Itoa(peer.SSHConfig("password").Port), "--ssh-user", "fixture", "--ssh-enroll"}
+			code := run(args...)
+			peer.Close()
+			if mode == "enroll" && code == 0 {
+				p := snapshot(t, root)
+				if credential(t, root, keys, p.Connections[0].ID).SSHPassword != "synthetic" {
+					t.Fatal("SSH password not encrypted")
+				}
+			}
+			os.Exit(code)
 		}
 		code := run("add")
 		if mode != "happy" {

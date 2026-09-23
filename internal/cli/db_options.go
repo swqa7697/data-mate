@@ -28,6 +28,7 @@ func profileFlags(cmd *cobra.Command) {
 	}
 	f.Int("port", 5432, "Database port")
 	f.Int("ssh-port", 22, "SSH port")
+	f.Bool("ssh-enroll", false, "Interactively verify and save an SSH host fingerprint")
 	f.Duration("query-timeout", 10*time.Second, "Query timeout (1ms to 30s)")
 	f.Int("max-rows", 500, "Maximum rows")
 	f.Int("max-result-bytes", 1048576, "Maximum result bytes")

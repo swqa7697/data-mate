@@ -511,22 +511,7 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 			t.Fatal("cancellation failed")
 		}
 		cancel()
-		// Connection disposal/rollback must end backend work, not merely abandon the
-		// caller's goroutine. PostgreSQL may process socket EOF just after return.
-		deadline = time.Now().Add(2 * time.Second)
-		for {
-			var active bool
-			if err := admin.QueryRow(t.Context(), "SELECT EXISTS(SELECT FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND (state='active' OR state LIKE 'idle in transaction%'))", pid).Scan(&active); err != nil {
-				t.Fatal(err)
-			}
-			if !active {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("backend survived cancellation")
-			}
-			runtime.Gosched()
-		}
+		waitBackendStopped(t, admin, pid)
 		if _, err := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 			t.Fatal("query after cancellation", err)
 		}
@@ -536,4 +521,24 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 	_, err := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.changing"})
 	sql("ROLLBACK")
 	requireCode(t, err, contracts.QueryTimeout)
+}
+
+// PostgreSQL can process cancellation/EOF just after the caller returns. This
+// shared bounded observation verifies actual server cleanup for every route.
+func waitBackendStopped(t *testing.T, admin *pgx.Conn, pid uint32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var active bool
+		if err := admin.QueryRow(t.Context(), "SELECT EXISTS(SELECT FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND (state='active' OR state LIKE 'idle in transaction%'))", pid).Scan(&active); err != nil {
+			t.Fatal(err)
+		}
+		if !active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("backend survived cancellation")
+		}
+		runtime.Gosched()
+	}
 }

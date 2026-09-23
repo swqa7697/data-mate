@@ -15,7 +15,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/transport"
 	"github.com/swqa7697/data-mate/internal/vault"
+	"golang.org/x/crypto/ssh"
 )
 
 func newDB(override *string, keys vault.KeyProvider) *cobra.Command {
@@ -65,6 +67,9 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 		return listProfiles(cmd, profiles)
 	}
 	stdinMode := flag(cmd, "password-stdin") || flag(cmd, "credentials-stdin")
+	if flag(cmd, "ssh-enroll") && (flag(cmd, "yes") || stdinMode || !hasTerminal(cmd)) {
+		return invalid("SSH enrollment requires interactive fingerprint and final save confirmations; omit --yes and stdin credential flags")
+	}
 	if stdinMode && !flag(cmd, "yes") {
 		return invalid("stdin credentials require complete flags and --yes")
 	}
@@ -160,6 +165,38 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 	if err != nil {
 		return invalid("invalid profile settings or duplicate alias; check db help")
 	}
+	var hostKey *transport.HostKey
+	if flag(cmd, "ssh-enroll") {
+		if profile.Transport.SSH == nil {
+			return invalid("SSH enrollment requires SSH settings")
+		}
+		raw, e := config.PreviewKnownHosts(ctx, root)
+		if e != nil {
+			return storageError(e, true)
+		}
+		pin, e := transport.ProbeHostKey(ctx, *profile.Transport.SSH, raw)
+		if e != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return failure(e.Error()) // transport returns only fixed safe diagnostics
+		}
+		f, e := getForm()
+		if e != nil {
+			return e
+		}
+		if _, e = fmt.Fprintf(f.terminal, "SSH endpoint: %q\nFingerprint: %s\n", pin.Address, ssh.FingerprintSHA256(pin.Key)); e != nil {
+			return failure("cannot write SSH fingerprint")
+		}
+		answer, e := f.ask("Trust this SSH fingerprint? [y/N]", "", false)
+		if e != nil {
+			return e
+		}
+		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
+			return context.Canceled
+		}
+		hostKey = &pin
+	}
 	// Review goes to stderr; terminal output passes through the raw-mode renderer.
 	var review io.Writer = cmd.ErrOrStderr()
 	if ui != nil {
@@ -195,7 +232,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 		keys = vault.Keychain{Interactive: hasTerminal(cmd)}
 	}
 	repo := vault.New(store, keys)
-	mutation := vault.Mutation{Expected: revision, Profiles: profiles}
+	mutation := vault.Mutation{Expected: revision, Profiles: profiles, HostKey: hostKey}
 	if action == "edit" || len(patch) > 0 {
 		var secrets vault.Secrets
 		if original.CredentialRef != "" {
@@ -277,7 +314,7 @@ func storageError(err error, input bool) error {
 	if errors.Is(err, vault.ErrCredentialMissing) {
 		return failure(string(contracts.CredentialMissing) + ": " + vault.ErrCredentialMissing.Error())
 	}
-	for _, safe := range []error{vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, config.ErrOwnership, config.ErrStale, config.ErrPurging} {
+	for _, safe := range []error{vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, config.ErrOwnership, config.ErrStale, config.ErrPurging, transport.ErrChangedHost, transport.ErrKnownHosts} {
 		if errors.Is(err, safe) {
 			return failure(safe.Error())
 		}
@@ -311,11 +348,6 @@ func previewProfile(w io.Writer, action string, p config.Profile, secretsChanged
 	_, err := fmt.Fprintf(w, "%s\nAlias: %s\nDriver: %s\nHost: %q\nPort: %d\nDatabase: %q\nUsername: %q\nTransport: %s\nScope: %s\nLimits: %s\nCredentials: %s\n", title, p.Alias, p.Driver, p.Connection.Host, p.Connection.Port, p.Connection.Database, p.Connection.Username, transport, scopeSummary(p.Scope), limits, secretState)
 	if err != nil {
 		return failure("cannot write preview")
-	}
-	if p.Transport.SSH != nil || p.Transport.Proxy != nil {
-		if _, err = fmt.Fprintln(w, "Transport settings will be saved; runtime support is not available yet."); err != nil {
-			return failure("cannot write preview")
-		}
 	}
 	return nil
 }

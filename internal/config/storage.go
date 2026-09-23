@@ -59,6 +59,7 @@ var ownedPaths = []string{
 	"state/lifecycle.lock", "state/state-gate.lock", "state/state.lock",
 	"state/vault-usage.json", "state/vault-usage.json.tmp",
 	"state/vault.json", "state/vault.json.tmp",
+	"config/known_hosts", "config/known_hosts.tmp",
 }
 
 // Fault is an optional test seam called before/after durability boundaries. It
@@ -148,6 +149,14 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 		if err = decodeIdentity(raw, root, &s.identity); err != nil {
 			return nil, err
 		}
+		// Upgrade only the exact pre-P6 inventory, under the lifecycle lease.
+		// Identity, credential namespace and existing owned data remain intact.
+		if !slices.Equal(s.identity.Owned, ownedPaths) {
+			s.identity.Owned = slices.Clone(ownedPaths)
+			if err = s.writeIdentity(); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, p := range []string{"state/state-gate.lock", "state/state.lock"} {
 		flags := unix.O_RDWR
@@ -189,7 +198,7 @@ func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
 		return ErrOwnership
 	}
-	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || !slices.Equal(id.Owned, ownedPaths) {
+	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:len(ownedPaths)-2])) {
 		return ErrOwnership
 	}
 	return nil

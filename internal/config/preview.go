@@ -10,6 +10,32 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// PreviewKnownHosts reads nonsecret owned host pins without initializing state.
+// A confirmed writer must recheck pins under its exclusive state lease.
+func PreviewKnownHosts(ctx context.Context, root Root) ([]byte, error) {
+	if _, _, err := Preview(ctx, root); err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, ErrOwnership
+	}
+	s := &Store{root: root, dir: os.NewFile(uintptr(fd), root.Path)}
+	defer s.dir.Close()
+	if err := s.validRoot(); err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(fd, "config", &st, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	b, err := s.read("config/known_hosts", 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
+}
+
 // Preview reads a validated nonsecret snapshot without initializing or recovering
 // state. A confirmed writer must reopen and compare the returned revision under
 // its write lease. Manual profiles need no installation activation record.

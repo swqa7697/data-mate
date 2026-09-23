@@ -7,18 +7,36 @@ import (
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/transport"
 )
 
 // Access carries a validated profile snapshot and private, in-memory credentials.
 // Callers must hold their state lease until an operation and its cleanup finish.
 // Never serialize or log Access; credentials do not belong in agent requests.
 type Access struct {
-	Profile  config.Profile
-	password string
+	Profile          config.Profile
+	password         string
+	transportSecrets transport.Credentials
+	knownHosts       []byte
 }
 
 // NewAccess binds credentials supplied by the vault to a profile snapshot.
-func NewAccess(p config.Profile, password string) Access { return Access{p, password} }
+func NewAccess(p config.Profile, password string) Access {
+	return Access{Profile: p, password: password}
+}
+
+// WithTransport binds private vault credentials and an owned known-host snapshot.
+// Callers read known hosts under the same state lease as the profile/credentials.
+func (a Access) WithTransport(secrets transport.Credentials, knownHosts []byte) Access {
+	a.transportSecrets = secrets
+	a.knownHosts = append([]byte(nil), knownHosts...)
+	return a
+}
+
+// TransportCredentials is for driver configuration only, never public output.
+func (a Access) TransportCredentials() (transport.Credentials, []byte) {
+	return a.transportSecrets, append([]byte(nil), a.knownHosts...)
+}
 
 // Password is for the driver only, never a public output field.
 func (a Access) Password() string { return a.password }

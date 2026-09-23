@@ -130,7 +130,7 @@ func TestConnectionBoundary(t *testing.T) {
 		requireCode(t, d.Validate(database.NewAccess(bad, "")), contracts.ConfigInvalid)
 	}
 	p.Transport.SSH = &config.SSH{Host: "jump", Port: 22, User: "user", Auth: "password"}
-	requireCode(t, d.Validate(database.NewAccess(p, "")), contracts.QueryUnsupported)
+	requireCode(t, d.Validate(database.NewAccess(p, "")), contracts.ConnectFailed)
 	_, err = d.Query(t.Context(), database.NewAccess(profile(), ""), database.QueryRequest{SQL: "DELETE FROM app.items"})
 	requireCode(t, err, contracts.QueryUnsupported)
 	t.Setenv("PGPASSWORD", "unexpected-after-startup")
