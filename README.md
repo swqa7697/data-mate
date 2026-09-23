@@ -49,7 +49,7 @@ atomically. No service, agent registration, or Keychain item is created during i
 | `make format`, `make tidy` | Format Go and shell sources |
 | `make format-check` | Check formatting without changing files |
 | `make lint` | Run go vet and pinned staticcheck |
-| `make test` | Run isolated unit/regression tests, including cgo dependency compilation |
+| `make test` | Run isolated unit/regression tests |
 | `make test-race` | Run the suite with race detection |
 | `make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16` | Not ready until P3; fails explicitly; excluded from CI |
 | `make uninstall`, `make uninstall PURGE=1` | Not ready until P11; fail without changing files |
@@ -97,7 +97,8 @@ The `clean` target delegates to `uninstall` with `PURGE=0`, overriding any suppl
 `dev` invokes the binary directly and `test-race` adds `-race` to `test.sh`.
 
 Profile and MCP contracts are embedded in `internal/contracts/schemas`, with
-examples in `internal/contracts/testdata`. Profiles reject unknown fields,
+examples in `internal/contracts/testdata` and a decoder fixture in
+`internal/config/testdata`. Profiles reject unknown fields,
 duplicate keys/identities/references, malformed scopes, unsupported transports,
 and excess limits. No plaintext secret field belongs in a profile. Selected
 empty scopes expose nothing; missing scope is invalid. New-profile creation in
