@@ -135,7 +135,7 @@ func (c *compilerCatalog) Resolve(ctx context.Context, schema, name string, only
 }
 func (c *compilerCatalog) columns(ctx context.Context, oid uint32) ([]sqlpolicy.Column, error) {
 	// Only built-in scalar types and default/C/POSIX collations can reach the
-	// emitter. The catalog fingerprint verifies their I/O and comparison functions.
+	// emitter. The semantic manifest verifies their I/O and comparison functions.
 	rows, err := c.tx.Query(ctx, `SELECT a.attname,a.atttypid,t.typnamespace=11 AND t.typtype='b' AND a.attgenerated='' AND a.attcollation IN (0,100,950,951)
  FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1601`, oid)
 	if err != nil {

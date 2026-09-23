@@ -422,7 +422,13 @@ Use `search_path = pg_catalog` for deterministic built-in resolution, require ex
 
 P4 implements the [compiler contract](../internal/database/postgres/sqlpolicy/README.md):
 independent lexical bounds, strict populated-field checks, typed lexical
-resolution, exact per-major built-in catalog snapshots and canonical emission.
+resolution, per-major built-in semantic manifests and canonical emission.
+The catalog verifier compares typed definitions by semantic identity, excluding
+incidental cast/opclass/family-entry row OIDs and numeric planner estimates.
+Implementation identities, signatures, security properties and referenced
+callbacks remain exact. Embedded policy is indexed once; live metadata is
+reverified on every compilation. The compiler contract documents the complete
+field exceptions and owned-fixture regeneration procedure.
 Compiled plans preserve duplicate result labels through unique internal column
 bindings and bind literal values separately with explicit OIDs. The internal
 compile operation uses trusted catalog SQL only. Differential PG16/18 fixtures

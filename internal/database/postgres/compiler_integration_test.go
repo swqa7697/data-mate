@@ -6,10 +6,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
 )
@@ -227,4 +229,77 @@ func fixtureQuery(ctx context.Context, tx pgx.Tx, sql string, params []sqlpolicy
 		out.Types = append(out.Types, f.DataTypeOID)
 	}
 	return out, nil
+}
+
+// Extends the owned compiler fixture: live changes distinguish planner estimates
+// and incidental row IDs from a callable's security/behavioral properties.
+func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Access, admin *pgx.Conn) {
+	t.Helper()
+	var cost float64
+	var strict bool
+	if err := admin.QueryRow(t.Context(), "SELECT procost,proisstrict FROM pg_catalog.pg_proc WHERE oid='pg_catalog.int4pl(int4,int4)'::regprocedure").Scan(&cost, &strict); err != nil {
+		t.Fatal(err)
+	}
+	restoreFunction := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		defer cancel()
+		mode := "CALLED ON NULL INPUT"
+		if strict {
+			mode = "RETURNS NULL ON NULL INPUT"
+		}
+		if _, err := admin.Exec(ctx, fmt.Sprintf("ALTER FUNCTION pg_catalog.int4pl(int4,int4) COST %g %s", cost, mode)); err != nil {
+			t.Errorf("restore fixture function: %v", err)
+		}
+	}
+	defer restoreFunction()
+	if _, err := admin.Exec(t.Context(), fmt.Sprintf("ALTER FUNCTION pg_catalog.int4pl(int4,int4) COST %g", cost+1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Compile(t.Context(), access, "SELECT 1", nil); err != nil {
+		t.Fatal("planner estimate rejected", err)
+	}
+	mode := "RETURNS NULL ON NULL INPUT"
+	if strict {
+		mode = "CALLED ON NULL INPUT"
+	}
+	if _, err := admin.Exec(t.Context(), "ALTER FUNCTION pg_catalog.int4pl(int4,int4) "+mode); err != nil {
+		t.Fatal(err)
+	}
+	_, err := d.Compile(t.Context(), access, "SELECT 1", nil)
+	requireCode(t, err, contracts.QueryUnsupported)
+	restoreFunction()
+	if _, err := d.Compile(t.Context(), access, "SELECT 1", nil); err != nil {
+		t.Fatal("restored definition rejected", err)
+	}
+	// No external database can reach this helper. These are catalog row identities,
+	// not implementation OIDs. The chosen opclass has no fixture indexes depending
+	// on it; changing a referenced opclass OID would corrupt that fixture's indexes.
+	for i, target := range []struct{ table, where string }{
+		{"pg_cast", "castsource=20 AND casttarget=21"},
+		{"pg_opclass", "opcnamespace=11 AND opcname='varchar_pattern_ops' AND opcmethod=403"},
+		{"pg_amop", "amopfamily=1976 AND amoplefttype=23 AND amoprighttype=23 AND amopstrategy=1 AND amoppurpose='s'"},
+		{"pg_amproc", "amprocfamily=1976 AND amproclefttype=23 AND amprocrighttype=23 AND amprocnum=1"},
+	} {
+		func() {
+			var oid uint32
+			if err := admin.QueryRow(t.Context(), "SELECT oid FROM pg_catalog."+target.table+" WHERE "+target.where).Scan(&oid); err != nil {
+				t.Fatal(err)
+			}
+			restore := func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+				defer cancel()
+				if _, err := admin.Exec(ctx, "UPDATE pg_catalog."+target.table+" SET oid=$1 WHERE "+target.where, oid); err != nil {
+					t.Errorf("restore fixture identity: %v", err)
+				}
+			}
+			defer restore()
+			if _, err := admin.Exec(t.Context(), "UPDATE pg_catalog."+target.table+" SET oid=$1 WHERE "+target.where, uint32(9000000+i)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.Compile(t.Context(), access, "SELECT 1", nil); err != nil {
+				t.Fatalf("incidental %s identity rejected: %v", target.table, err)
+			}
+		}()
+	}
+	t.Log("catalog compatibility: cost accepted; strictness rejected and restored; four incidental row identities accepted")
 }

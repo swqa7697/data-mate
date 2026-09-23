@@ -166,7 +166,11 @@ Custom types/functions/operators/collations, unsupported indexes and unhandled
 syntax fail closed. Literals are bound separately with exact built-in type OIDs;
 submitted SQL is never prepared during compilation. Catalog signatures are
 pinned separately for PostgreSQL 16 and 18; other majors remain unavailable for
-compilation until audited. No query command becomes available in P4.
+compilation until audited. Verification ignores incidental catalog row IDs and
+numeric planner estimates while retaining implementation and safety properties.
+Only embedded policy is cached; live metadata is checked on every compilation.
+The compiler contract documents candidate export through the owned integration
+harness. No query command becomes available in P4.
 
 Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
 with eight active operations, thirty-two waiters and a five-second queue deadline
@@ -214,7 +218,7 @@ and excess limits. No plaintext secret field belongs in a profile. Selected
 empty scopes expose nothing; missing scope is invalid. New profiles explicitly
 choose all. PostgreSQL codec/signature fixture formats are
 under `internal/database/postgres/testdata`. Codec execution remains P5; the
-compiler's complete per-major signature snapshots live under
+compiler's reviewed per-major semantic manifests live under
 `internal/database/postgres/sqlpolicy`.
 
 See [PRD](specs/PRD.md) and [technical design](specs/DESIGN.md) for intended product

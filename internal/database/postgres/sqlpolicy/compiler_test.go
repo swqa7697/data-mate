@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,6 +31,7 @@ func compileFixture(sql string) (Compiled, error) {
 // Step 3 of the regression ladder: previous tests never compile SQL. This owns
 // lexical/typed rejection and emission; live semantics extend the existing PG test.
 func TestCompilerBoundary(t *testing.T) {
+	verifyConcurrentCatalogs(t)
 	positive := []string{
 		"SELECT 1", "SELECT id, name FROM app.items WHERE id >= 2 ORDER BY id DESC LIMIT 3", "SELECT a.*, a.id FROM app.items a",
 		"SELECT count(*), sum(id), avg(amount), min(name), max(id) FROM app.items",
@@ -98,17 +100,128 @@ func TestCompilerBoundary(t *testing.T) {
 	if _, err = p.Compile(t.Context(), 17, &fixtureCatalog{}, []Parameter{{23, &v}}); err == nil {
 		t.Fatal("unaudited major accepted")
 	}
-	var altered map[string]any
-	if err = json.Unmarshal(catalog16, &altered); err != nil {
-		t.Fatal(err)
+	verifyCatalogMutations(t)
+}
+
+// Regression ladder step 2: extend the existing compiler boundary. These cases
+// distinguish semantic corruption from ordering and malformed transport data.
+func verifyConcurrentCatalogs(t *testing.T) {
+	t.Helper()
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Go(func() {
+			for _, c := range []struct {
+				major int
+				data  []byte
+			}{{16, catalog16}, {18, catalog18}} {
+				if err := VerifyCatalog(c.major, c.data); err != nil {
+					t.Errorf("concurrent major %d: %v", c.major, err)
+				}
+				if _, err := loadSignatures(c.major); err != nil {
+					t.Errorf("signature initialization: %v", err)
+				}
+			}
+		})
 	}
-	altered["functions"].([]any)[0].(map[string]any)["prosrc"] = "unapproved_implementation"
-	tampered, _ := json.Marshal(altered)
-	if VerifyCatalog(16, tampered) == nil {
-		t.Fatal("changed implementation accepted")
+	workers.Wait()
+}
+
+func verifyCatalogMutations(t *testing.T) {
+	t.Helper()
+	decode := func() map[string]any {
+		t.Helper()
+		var doc map[string]any
+		if err := json.Unmarshal(catalog16, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc
 	}
-	if VerifyCatalog(16, catalog16) != nil || VerifyCatalog(18, catalog18) != nil || VerifyCatalog(16, []byte(`{}`)) == nil {
-		t.Fatal("signature verification")
+	row := func(doc map[string]any, section string) map[string]any {
+		return doc[section].([]any)[0].(map[string]any)
+	}
+	mutations := []struct {
+		name   string
+		change func(map[string]any)
+	}{
+		{"function implementation", func(d map[string]any) { row(d, "functions")["prosrc"] = "unapproved_implementation" }},
+		{"function security", func(d map[string]any) { row(d, "functions")["prosecdef"] = true }},
+		{"operator implementation", func(d map[string]any) { row(d, "operators")["oprcode"] = 31 }},
+		{"aggregate helper", func(d map[string]any) { row(d, "aggregates")["aggtransfn"] = 31 }},
+		{"cast implementation", func(d map[string]any) { row(d, "casts")["castfunc"] = 31 }},
+		{"btree implementation", func(d map[string]any) { row(d, "supports")["amproc"] = 31 }},
+		{"operator family member", func(d map[string]any) { row(d, "members")["amopopr"] = 4294967295 }},
+		{"operator class family", func(d map[string]any) { row(d, "classes")["opcfamily"] = 0 }},
+		{"type implementation", func(d map[string]any) { row(d, "types")["typinput"] = 31 }},
+		{"planner callback", func(d map[string]any) { row(d, "functions")["prosupport"] = 31 }},
+		{"dangling callback", func(d map[string]any) { row(d, "functions")["prosupport"] = 4294967295 }},
+		{"missing false", func(d map[string]any) { delete(row(d, "functions"), "prosecdef") }},
+		{"missing zero", func(d map[string]any) { delete(row(d, "functions"), "pronargdefaults") }},
+		{"missing null", func(d map[string]any) { delete(row(d, "functions"), "proconfig") }},
+		{"null scalar", func(d map[string]any) { row(d, "functions")["prosecdef"] = nil }},
+		{"unknown property", func(d map[string]any) { row(d, "functions")["unexpected"] = true }},
+		{"case variant field", func(d map[string]any) { r := row(d, "functions"); r["Prosrc"] = r["prosrc"]; delete(r, "prosrc") }},
+		{"case variant section", func(d map[string]any) { d["Functions"] = d["functions"]; delete(d, "functions") }},
+		{"case alias duplicate", func(d map[string]any) { row(d, "functions")["Prosrc"] = row(d, "functions")["prosrc"] }},
+		{"string OID", func(d map[string]any) { row(d, "functions")["oid"] = "31" }},
+		{"negative OID", func(d map[string]any) { row(d, "functions")["oid"] = -1 }},
+		{"fractional OID", func(d map[string]any) { row(d, "functions")["oid"] = 31.5 }},
+		{"overflow OID", func(d map[string]any) { row(d, "functions")["oid"] = 4294967296 }},
+		{"extra definition", func(d map[string]any) {
+			r := map[string]any{}
+			for k, v := range row(d, "functions") {
+				r[k] = v
+			}
+			r["oid"] = 999999
+			d["functions"] = append(d["functions"].([]any), r)
+		}},
+	}
+	for _, mutation := range mutations {
+		doc := decode()
+		mutation.change(doc)
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if VerifyCatalog(16, b) == nil {
+			t.Fatalf("catalog accepted %s", mutation.name)
+		}
+	}
+	for _, section := range []string{"types", "operators", "aggregates", "casts", "classes", "members", "supports", "functions"} {
+		for _, action := range []string{"missing section", "missing record", "duplicate identity"} {
+			doc := decode()
+			rows := doc[section].([]any)
+			switch action {
+			case "missing section":
+				delete(doc, section)
+			case "missing record":
+				doc[section] = rows[1:]
+			case "duplicate identity":
+				doc[section] = append(rows, rows[0])
+			}
+			b, _ := json.Marshal(doc)
+			if VerifyCatalog(16, b) == nil {
+				t.Fatalf("catalog accepted %s: %s", section, action)
+			}
+		}
+	}
+	for _, b := range [][]byte{[]byte(`{}`), append(append([]byte{}, catalog16...), []byte(` {}`)...), []byte(`{"types":[],"types":[]}`), []byte(`{"types":[{"oid":16,"oid":17}]}`), []byte(strings.Repeat(" ", (2<<20)+1))} {
+		if VerifyCatalog(16, b) == nil {
+			t.Fatal("malformed catalog accepted")
+		}
+	}
+	if VerifyCatalog(17, catalog16) == nil || VerifyCatalog(18, catalog16) == nil {
+		t.Fatal("wrong major accepted")
+	}
+	doc := decode()
+	for _, value := range doc {
+		rows := value.([]any)
+		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+			rows[i], rows[j] = rows[j], rows[i]
+		}
+	}
+	b, _ := json.Marshal(doc)
+	if err := VerifyCatalog(16, b); err != nil {
+		t.Fatal("row order affected semantic verification", err)
 	}
 }
 
