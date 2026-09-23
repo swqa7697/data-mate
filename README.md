@@ -3,12 +3,15 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P2 connection CRUD CLI.** `db add`, `db edit`,
+**Current implementation: P3 PostgreSQL connection and catalog boundary.**
+`db add`, `db edit`,
 `db remove`/`rm`, and `db list`/`ls` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
 encryption accounting, and one native Keychain item per installation are
-implemented. Database connectivity, query execution, MCP service, scope browsing,
-and agent registration remain later packages; their commands fail explicitly.
+implemented. The internal PostgreSQL driver supports direct/verified TLS,
+read-only role checks, scoped catalog pages and table descriptions. Query
+execution, CLI `db test`/`db scope`, MCP service and agent registration remain
+later packages; their commands fail explicitly.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -77,8 +80,9 @@ exclusive. Key files are imported once into the encrypted vault; their source
 files remain untouched. `--tls=false`, `--clear-ssh`, and `--clear-proxy` remove
 transport settings; the latter two also clear their secrets. Individual clear
 flags are `--clear-ssh-password`, `--clear-ssh-key-passphrase`, and
-`--clear-proxy-password`. TLS CA requires enabled TLS. Transport runtime support
-and connection tests are not available in P2.
+`--clear-proxy-password`. TLS CA requires enabled TLS. The internal driver
+supports direct/TLS; SSH/proxy runtime and CLI connection tests remain later
+packages.
 
 `--query-timeout` accepts whole milliseconds from `1ms` to `30s`; `--max-rows`
 accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `10s`,
@@ -110,7 +114,7 @@ agents.
 | `make lint` | Run go vet and pinned staticcheck |
 | `make test` | Run isolated unit/regression tests |
 | `make test-race` | Run the suite with race detection |
-| `make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16` | Not ready until P3; fails explicitly; excluded from CI |
+| `make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16` | Run the owned PostgreSQL 16 Docker fixture; use `postgres:18` for 18 or omit `DB_IMAGE` for both; excluded from CI |
 | `make uninstall`, `make uninstall PURGE=1` | Not ready until P11; fail without changing files |
 
 CI runs `make setup` in each job before its checks; installation is exercised by
@@ -122,6 +126,40 @@ network access and use disposable roots. They do not connect to a real database,
 read/write Keychain items, or alter agent configuration. The CI workflow uses
 `macos-15`, records its actual architecture/toolchain, and runs these local gates.
 A workflow file alone does not establish a successful hosted run.
+
+The Docker suite requires Docker, OpenSSL and Python 3. It creates a random
+network, volume, credentials and TLS certificates, publishes only an ephemeral
+loopback port, and removes its resources on success, failure and interruption.
+It accepts only `DB_DRIVER=postgres` and the two documented images, refuses
+external endpoint variables and CI, and records image digests/server versions.
+It never connects to a supplied database URL. Images remain in Docker's cache.
+
+P3 checks actual authenticated identity, PostgreSQL 16+, CONNECT, inherited and
+SET-reachable role privileges, and PUBLIC grants on every operation. Use a
+non-owner role without elevated, creation, relation/column write, sequence write,
+or server file/program privileges. These safety checks cover application objects
+throughout the database, even outside the saved scope; TEMP alone is allowed.
+The driver does not modify grants. Startup discards inherited `PG*` settings;
+password/service files, ambient TLS certificates and connection fallbacks are not
+used. TLS verifies the configured database hostname and never falls back.
+
+Metadata applies exact saved scope, schema USAGE and table SELECT, hides foreign
+keys to unavailable targets, and omits expressions/defaults. Pages use signed
+process-local cursors invalidated by profile/scope changes, explicit invalidation,
+or restart. Supported query candidates are ordinary/partitioned heap tables with
+supported built-in types; views, foreign/materialized relations, custom types,
+generated columns and unverified relation features are reported as unsupported.
+Partition roots include their tree across schemas; ordinary inheritance requires
+all descendants in scope. RLS with inheritance/partitioning is unsupported;
+ordinary noninherited RLS remains supported. P4/P5 still own semantic compilation,
+locking/rechecks, frozen physical scans and execution acceptance. Catalog support
+status alone does not authorize a query.
+
+Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
+with eight active operations, thirty-two waiters and a five-second queue deadline
+per shared driver. Requests have profile timeouts, a two-MiB protocol body cap,
+bounded catalog results and redacted errors. No application rows are queried by
+connection tests or catalog operations. Service state-lease integration is P8.
 
 P1's explicit native check uses only synthetic credentials, a random temporary
 root, one exact Keychain account, and a temporary launchd job:

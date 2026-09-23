@@ -43,5 +43,5 @@ test: ## Run isolated offline unit and regression tests
 test-race: ## Run the same suite with Go's race detector
 	@./scripts/test.sh -race
 
-test-integration: ## Explicit Docker suite (not ready until P3; never runs in CI)
+test-integration: ## Run owned PostgreSQL 16/18 Docker fixtures (never in CI)
 	@./scripts/test-integration.sh

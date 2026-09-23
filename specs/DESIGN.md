@@ -112,8 +112,9 @@ A missing bundle can be repaired with explicit credentials for all configured
 transports. Missing keys or corrupt vault accounting are not silently recreated.
 
 Add/edit also accept the scope flags without a catalog fetch. Advanced transport
-and limit flags are persisted in P2; connectivity, host-key enrollment and
-catalog browsing remain later packages. `--query-timeout` accepts whole
+and limit flags are persisted in P2. P3 implements internal direct/TLS
+connectivity and catalogs; CLI diagnostics/browsing and host-key enrollment
+remain later packages. `--query-timeout` accepts whole
 milliseconds (`1ms`–`30s`); the other limit flags are `--max-rows` and
 `--max-result-bytes`. `--tls=false` disables TLS and clears its CA path, while an
 omitted CA field is preserved when enabling TLS. SSH key source bytes are imported
@@ -352,7 +353,36 @@ TLS failure never falls back to plaintext. Do not offer a “skip verification�
 
 SSH host-key enrollment happens only during an interactive connection operation with an explicit fingerprint confirmation; changed host keys fail. The background service cannot accept host keys. Importing a key must not invoke shell commands, SSH config `ProxyCommand`, or arbitrary helper programs. SOCKS5 proxy URLs cannot embed credentials. SSH and proxy are mutually exclusive in v1 to keep the dialing path simple. TLS may be layered over either and verifies the database's configured hostname.
 
-Use `pgx` and its pool for PostgreSQL access. Pools open lazily, start with zero idle connections, and hold at most two connections per profile. A global semaphore caps active database work at eight operations, with a bounded waiting queue of 32 and a five-second queue deadline. Evict idle pools after five minutes and cap open pools at 16. No idle polling of every database is required. See the [pgx driver documentation](https://pkg.go.dev/github.com/jackc/pgx/v5).
+Use `pgx` with driver-owned pools for PostgreSQL access. Pools open lazily, start with zero idle connections, and hold at most two connections per profile. A global semaphore caps active database work at eight operations, with a bounded waiting queue of 32 and a five-second queue deadline. Evict idle pools after five minutes and cap open pools at 16. No idle polling of every database is required. See the [pgx driver documentation](https://pkg.go.dev/github.com/jackc/pgx/v5).
+
+Implemented P3 boundary: `database.Driver` provides Validate/Test/ListTables/
+DescribeTable/Query/Invalidate/Close with private in-memory credential access.
+Query explicitly fails until P4/P5. One shared PostgreSQL driver owns admission
+and pools; callers must retain the profile state lease through driver cleanup.
+Each request begins a read-only READ COMMITTED transaction and rechecks role
+readiness. Rollback has a separate two-second budget; uncertain connections are
+discarded and cleanup failure cannot produce success. Profile changes retire
+pools; explicit invalidation cancels active work and invalidates cursors. There is
+no cached catalog/grant result. P8 still owns service-level lease integration.
+
+Startup removes inherited `PG*` variables before application goroutines. The
+internal initialized pgx template uses explicit placeholders, disabled TLS and
+`/dev/null` password/service files, then receives validated settings and an
+allowlisted session configuration. A missed startup sanitation fails closed.
+Only TCP hostnames/IPs are accepted. Every connection, including readiness and
+catalog connections, caps PostgreSQL message bodies at 2 MiB. A constant-memory
+frame-length observer preserves RESOURCE_LIMIT when pgx's simple-query error
+path otherwise reports only a closed connection; it does not retain message data.
+
+Catalog operations apply privileges/scope in trusted parameterized SQL before
+keyset pagination with C collation. Cursor authentication binds version, profile
+ID/revision, schema filter, position and process invalidation epoch; tokens are
+at most 2 KiB. Pages are capped at 500, columns at 1600, and hierarchy/constraint
+materialization at 4096 entries, additionally bounded by operation time and
+conservative encoded-payload accounting. Default expressions, full definitions,
+and hidden foreign-key endpoints are omitted. Metadata may label unsupported
+relation kinds/types, but cannot authorize application execution. P4/P5 must
+recheck relation identity, grants and hierarchy after locking.
 
 `db test` exercises profile validation, vault access, network/TLS/SSH/proxy setup, authentication, server version, and policy readiness using the same driver. It does not query application rows or change the database. Report each stage separately, continue through all selected profiles, and redact sensitive upstream messages.
 
@@ -363,6 +393,16 @@ Read-only behavior uses several independent controls. A `SELECT` prefix or a key
 ### 9.1 Role and object boundary
 
 Use a dedicated role with CONNECT, schema USAGE, and SELECT on intended objects. The driver checks effective privileges and blocks execution through superuser, BYPASSRLS, database/object-owner, role-administration, write, schema-creation, or server file/program capabilities relevant to the exposed objects. Reject unsafe inherited capabilities as well as direct ones. The application never grants or revokes server privileges.
+
+P3 evaluates both immediately inherited and SET-reachable role capabilities,
+including mixed SET/INHERIT paths and membership ADMIN options. It rejects
+application schema/database ownership/creation, relation/column writes, sequence
+USAGE/UPDATE, privileged file/program roles or function grants, and PostgreSQL
+17+ MAINTAIN. PUBLIC grants are included by PostgreSQL privilege functions.
+Read-only readiness checks cover application objects throughout the database,
+not only saved scope; TEMP alone is permitted. Role/schema listings and upstream
+server diagnostics never become public metadata. Administrator grant changes and
+application server code remain trusted configuration, not frozen by this check.
 
 RLS policies execute under the configured role. Owners and BYPASSRLS roles can bypass RLS, so they are unsuitable. Application-defined RLS functions and database administrator behavior remain part of the trusted server configuration; v1 cannot prove arbitrary server code harmless. See [PostgreSQL row security](https://www.postgresql.org/docs/16/ddl-rowsecurity.html).
 

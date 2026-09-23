@@ -94,9 +94,17 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("clean changed installed binary")
 	}
-	for _, target := range []string{"test-integration", "uninstall"} {
-		run(t, root, false, "make", target)
+	// Integration preflight must fail before creating Docker resources.
+	for _, args := range [][]string{
+		{"make", "test-integration"},
+		{"make", "test-integration", "DB_DRIVER=mysql"},
+		{"make", "test-integration", "DB_DRIVER=postgres", "DB_IMAGE=postgres:15"},
+		{"env", "CI=1", "make", "test-integration", "DB_DRIVER=postgres"},
+		{"env", "DATABASE_URL=postgres://unrelated", "make", "test-integration", "DB_DRIVER=postgres"},
+	} {
+		run(t, root, false, args...)
 	}
+	run(t, root, false, "make", "uninstall")
 	run(t, root, false, "make", "uninstall", "PURGE=1")
 	after, err = os.ReadFile(bin)
 	if err != nil || !bytes.Equal(before, after) {
