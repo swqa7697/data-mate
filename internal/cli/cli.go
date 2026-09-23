@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/vault"
 )
 
 const (
@@ -67,7 +68,9 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, build Build)
 }
 
 // New creates the CLI without touching configuration, credentials, or agents.
-func New(build Build) *cobra.Command {
+func New(build Build) *cobra.Command { return newCommand(build, nil) }
+
+func newCommand(build Build, keys vault.KeyProvider) *cobra.Command {
 	var override string
 	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
@@ -107,18 +110,11 @@ func New(build Build) *cobra.Command {
 		if _, err := config.ResolveRoot(override, executable); err != nil {
 			return &Error{ExitInvalid, err.Error()}
 		}
-		return &Error{ExitFailure, "SERVICE_UNAVAILABLE: command is not ready; P0 provides foundation contracts only"}
+		return &Error{ExitFailure, "SERVICE_UNAVAILABLE: command is not ready"}
 	}
-	db := &cobra.Command{Use: "db", Short: "Manage database profiles (not ready)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, entry := range []struct {
-		name    string
-		aliases []string
-	}{{"add", nil}, {"edit", nil}, {"remove", []string{"rm"}}, {"list", []string{"ls"}}, {"test", nil}, {"scope", nil}} {
-		args := cobra.MaximumNArgs(1)
-		if entry.name == "list" || entry.name == "add" {
-			args = cobra.NoArgs
-		}
-		db.AddCommand(&cobra.Command{Use: entry.name, Aliases: entry.aliases, Short: "Not ready", Args: args, RunE: unavailable})
+	db := newDB(&override, keys)
+	for _, name := range []string{"test", "scope"} {
+		db.AddCommand(&cobra.Command{Use: name, Short: "Not ready", Args: cobra.MaximumNArgs(1), RunE: unavailable})
 	}
 	mcp := &cobra.Command{Use: "mcp", Short: "Manage MCP service (not ready)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, name := range []string{"start", "stop", "status", "bridge"} {

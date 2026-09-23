@@ -42,9 +42,7 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		}
 		run(t, root, true, "make", "dev", "ARGS=version")
 		// No root is passed: this proves root inference from a different cwd.
-		if output := run(t, temp, false, bin, "db", "list"); !strings.Contains(output, "SERVICE_UNAVAILABLE") {
-			t.Fatal(output)
-		}
+		run(t, temp, true, bin, "db", "list", "--json")
 		entries, err := os.ReadDir(filepath.Join(root, ".dev"))
 		if err != nil || len(entries) != 1 || entries[0].Name() != "bin" {
 			t.Fatal("install created runtime state")

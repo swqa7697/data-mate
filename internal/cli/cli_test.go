@@ -26,7 +26,7 @@ func TestCLI(t *testing.T) {
 		{name: "version writes stdout", args: []string{"version"}},
 		{name: "upgrade remains informational", args: []string{"upgrade"}},
 		{name: "update remains informational", args: []string{"update"}},
-		{name: "unfinished db fails", args: []string{"db", "list"}, code: 1},
+		{name: "empty list is read only", args: []string{"db", "list"}},
 		{name: "unfinished bridge keeps stdout empty", args: []string{"mcp", "bridge"}, code: 1},
 		{name: "relative root rejected", args: []string{"db", "list", "--root", "relative"}, code: 2},
 		{name: "password flag redacted", args: []string{"--password", "secret-sentinel"}, code: 2},
@@ -37,6 +37,9 @@ func TestCLI(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
+			if err := os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
 			args := append([]string{"--root", root}, tc.args...)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

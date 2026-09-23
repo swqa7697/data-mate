@@ -3,13 +3,12 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P1 persistence and credential vault.** Help, version,
-root resolution, strict profile/schema contracts, developer tooling, and the
-internal profile/vault store are implemented. The store uses verified private
-files, cross-process leases, atomic publication, AES-256-GCM, durable encryption
-accounting, and one native Keychain item per installation. CLI connection CRUD
-arrives in P2; query execution, MCP service, and agent registration remain later
-packages. Those unfinished commands fail without creating runtime state.
+**Current implementation: P2 connection CRUD CLI.** `db add`, `db edit`,
+`db remove`/`rm`, and `db list`/`ls` use the profile/vault store. Interactive
+forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
+encryption accounting, and one native Keychain item per installation are
+implemented. Database connectivity, query execution, MCP service, scope browsing,
+and agent registration remain later packages; their commands fail explicitly.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -34,9 +33,69 @@ The installed binary resolves its root from its executable location, so it works
 from another working directory. An absolute `--root` overrides that location.
 Each checkout has its own `.dev`; installation creates only its private `bin`
 directory and executable. The internal store initializes persistent identity and
-state locks when opened for confirmed work; install/build do not initialize that
-store. Service lifecycle integration arrives in P8. Builds replace the executable
+state locks after a confirmed mutation; listing, previews and canceled forms do
+not initialize that store. Install/build do not initialize it either. Service
+lifecycle integration arrives in P8. Builds replace the executable
 atomically. No service, agent registration, or Keychain item is created during installation.
+
+Manage connections interactively:
+
+```bash
+make dev ARGS="db add"
+make dev ARGS="db edit"                # Select a saved connection.
+make dev ARGS="db list --json"
+make dev ARGS="db remove analytics"
+```
+
+The basic form asks for driver, alias, host, port, database, visible username,
+and hidden password, followed by a nonsecret preview and one default-No Y/N
+confirmation. Blank edit fields preserve values; a blank edit password keeps the
+existing secret. Use `--clear-password` to remove it. Cancellation exits 130 and
+leaves files and Keychain untouched. Human previews honor `NO_COLOR`; JSON listing
+is version 1, contains no credential references, and never accesses Keychain.
+
+For scripts, supply complete fields and `--yes`. This example explicitly saves a
+passwordless profile; no database connection is attempted:
+
+```bash
+make dev ARGS="db add --alias analytics --host localhost --database app --username reader --passwordless --yes"
+make dev ARGS="db edit analytics --alias reporting --none --yes"
+```
+
+Use `--password-stdin` instead of `--passwordless` to read one UTF-8 password line
+from standard input. Only one terminal LF or CRLF is removed; other whitespace is
+preserved. `--credentials-stdin` accepts a strict JSON object with optional
+`password`, `ssh_password`, `ssh_key_passphrase`, and `proxy_password` strings.
+Both input modes require `--yes` and complete fields and cannot share stdin with
+forms. Add requires an explicit password choice; omitted edit secrets remain
+unchanged. No password argument or credential-bearing URL is accepted.
+
+Advanced flags persist settings only: `--tls`, `--tls-ca /absolute/path`,
+`--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`,
+`--proxy socks5://host:port`, and `--proxy-user`. SSH and proxy are mutually
+exclusive. Key files are imported once into the encrypted vault; their source
+files remain untouched. `--tls=false`, `--clear-ssh`, and `--clear-proxy` remove
+transport settings; the latter two also clear their secrets. Individual clear
+flags are `--clear-ssh-password`, `--clear-ssh-key-passphrase`, and
+`--clear-proxy-password`. TLS CA requires enabled TLS. Transport runtime support
+and connection tests are not available in P2.
+
+`--query-timeout` accepts whole milliseconds from `1ms` to `30s`; `--max-rows`
+accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `10s`,
+500 and 1048576. Add/edit can replace scope with `--all`, `--none`, repeated
+`--schema`/`--table schema.table`, or `--scope-json`. Structured JSON supports
+identifiers containing dots. Exact selections require no catalog fetch; a new
+connection defaults to all accessible tables, while an empty selection means
+none. Interactive catalog selection remains part of `db scope` in P7.
+
+Manual profiles follow the same schema without an activation record. Malformed
+configuration is preserved and reported. Editing a profile with a missing
+credential bundle reports a repair instruction: supply its credentials through
+`db edit` or explicitly clear them. Missing/corrupt vault keys or accounting are
+not reset. A removal can durably save the profile change while credential cleanup
+fails; the command exits 1 and reports that partial result. A subsequent confirmed
+add/edit/remove retries orphan cleanup. Saving never starts services or registers
+agents.
 
 | Command | Behavior |
 | --- | --- |
@@ -101,8 +160,8 @@ examples in `internal/contracts/testdata` and a decoder fixture in
 `internal/config/testdata`. Profiles reject unknown fields,
 duplicate keys/identities/references, malformed scopes, unsupported transports,
 and excess limits. No plaintext secret field belongs in a profile. Selected
-empty scopes expose nothing; missing scope is invalid. New-profile creation in
-P2 will explicitly choose all. PostgreSQL codec/signature fixture formats are
+empty scopes expose nothing; missing scope is invalid. New profiles explicitly
+choose all. PostgreSQL codec/signature fixture formats are
 under `internal/database/postgres/testdata`; these are future acceptance inputs,
 not a working SQL compiler or authorization policy.
 

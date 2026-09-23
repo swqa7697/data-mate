@@ -91,6 +91,36 @@ Standard flags for basic fields and `--yes` support scripting. A password may be
 
 Human output uses restrained color, honors `NO_COLOR`, and disables animation outside a TTY. `--json` on list, test, and status produces stable structured output without color. Errors and progress go to stderr. Exit codes are 0 for success, 1 for operational failure, 2 for invalid usage/configuration, and 130 for user cancellation. Testing multiple profiles continues after individual failures and exits nonzero if any fail.
 
+P2 implements add/edit/remove/list. Forms collect the basic fields in the order
+above, keep username visible, and hide all secret input. Omitted edit aliases
+select by number or exact alias; remove uses the same selection. Listing and
+preview use descriptor-checked read-only access without initializing state or
+accessing Keychain. After confirmation, the CLI restores terminal modes, opens
+the store, and compares the preview revision before publication. Changes after a
+preview fail and require a fresh review. Invalid configuration remains untouched.
+
+`--credentials-stdin` is mutually exclusive with `--password-stdin` and accepts
+one strict bounded JSON object containing optional `password`, `ssh_password`,
+`ssh_key_passphrase`, and `proxy_password`. Each secret is limited to 128 KiB of
+UTF-8. Password stdin accepts one line, removing only one terminal LF/CRLF and
+preserving other whitespace. Both modes require complete flags and `--yes`.
+Add requires explicit password input or `--passwordless`. Omitted edit secrets
+remain unchanged; `--clear-password`, `--clear-ssh-password`,
+`--clear-ssh-key-passphrase`, and `--clear-proxy-password` remove individual
+secrets. `--clear-ssh` and `--clear-proxy` remove their settings and secrets.
+A missing bundle can be repaired with explicit credentials for all configured
+transports. Missing keys or corrupt vault accounting are not silently recreated.
+
+Add/edit also accept the scope flags without a catalog fetch. Advanced transport
+and limit flags are persisted in P2; connectivity, host-key enrollment and
+catalog browsing remain later packages. `--query-timeout` accepts whole
+milliseconds (`1ms`–`30s`); the other limit flags are `--max-rows` and
+`--max-result-bytes`. `--tls=false` disables TLS and clears its CA path, while an
+omitted CA field is preserved when enabling TLS. SSH key source bytes are imported
+once and kept only in the encrypted bundle. No transport is tested while saving.
+A durable profile removal with failed credential cleanup exits 1 and reports the
+partial outcome; subsequent confirmed mutations retry orphan reconciliation.
+
 ### 3.2 Normal workflow
 
 ```bash
