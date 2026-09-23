@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/swqa7697/data-mate/internal/agent"
 	"github.com/swqa7697/data-mate/internal/config"
 	mcprelay "github.com/swqa7697/data-mate/internal/mcp"
 	"github.com/swqa7697/data-mate/internal/service"
@@ -24,12 +25,12 @@ func serviceError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
-	for _, safe := range []error{service.ErrState, config.ErrOwnership, config.ErrPurging, config.ErrStale} {
+	for _, safe := range []error{service.ErrState, agent.ErrInspection, config.ErrOwnership, config.ErrPurging, config.ErrStale} {
 		if errors.Is(err, safe) {
 			return invalid("invalid or unsafe installation/service state")
 		}
 	}
-	for _, safe := range []error{service.ErrRestart, service.ErrUnavailable, service.ErrConflict, service.ErrStartup} {
+	for _, safe := range []error{agent.ErrPartial, agent.ErrConflict, service.ErrRestart, service.ErrUnavailable, service.ErrConflict, service.ErrStartup} {
 		if errors.Is(err, safe) {
 			return failure(safe.Error())
 		}
@@ -83,24 +84,35 @@ func newMCP(override *string, build Build) *cobra.Command {
 				}
 				return serviceError(mcprelay.Bridge(cmd.Context(), conn, input, output))
 			}
+			c.Agents = agent.New(c.Root)
 			var result service.Status
 			switch name {
 			case "start":
 				result, err = c.Start(ctx)
 			case "stop":
 				result, err = c.Stop(ctx)
+				states, inspectErr := c.Agents.Inspect(ctx)
+				result.Agents = states
+				if err == nil {
+					err = inspectErr
+				}
 			case "status":
 				result, err = c.Inspect(ctx)
 			}
 			// Status retains a machine-readable degraded/stale state even on failure.
-			if err != nil && name != "status" {
+			if err != nil && name != "status" && !((name == "start" && result.State == "running") || (name == "stop" && result.State == "stopped")) {
 				return serviceError(err)
 			}
 			var outputErr error
 			if flag(cmd, "json") {
 				outputErr = json.NewEncoder(cmd.OutOrStdout()).Encode(result)
 			} else {
-				_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "Service: %s\nAgents: codex pending, claude pending (registration not implemented)\n", result.State)
+				_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "Service: %s\nRegistration: %s\nRoot: %s\n", result.State, agent.Name(c.Root), c.Root.Path)
+				for _, a := range result.Agents {
+					if outputErr == nil {
+						_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", a.Name, a.State)
+					}
+				}
 			}
 			if outputErr != nil {
 				return failure("cannot write service status")

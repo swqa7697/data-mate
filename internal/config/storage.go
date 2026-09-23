@@ -62,6 +62,7 @@ var ownedPaths = []string{
 	"config/known_hosts", "config/known_hosts.tmp",
 	"state/service.json", "state/service.json.tmp",
 	"state/service.plist", "state/service.plist.tmp",
+	"state/registrations.json", "state/registrations.json.tmp",
 }
 
 // Fault is an optional test seam called before/after durability boundaries. It
@@ -251,7 +252,7 @@ func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
 		return ErrOwnership
 	}
-	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:11]) && !slices.Equal(id.Owned, ownedPaths[:13])) {
+	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:11]) && !slices.Equal(id.Owned, ownedPaths[:13]) && !slices.Equal(id.Owned, ownedPaths[:17])) {
 		return ErrOwnership
 	}
 	return nil

@@ -11,6 +11,8 @@ import (
 )
 
 func TestCLI(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	for _, tc := range []struct {
 		name          string
 		args          []string

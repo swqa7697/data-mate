@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "data-mate-fixture": {
+      "type": "stdio",
+      "command": "/nonexistent/data-mate",
+      "args": ["mcp", "bridge", "--root", "/tmp/example root"],
+      "env": {}
+    }
+  }
+}

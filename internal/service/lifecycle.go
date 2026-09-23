@@ -9,14 +9,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/swqa7697/data-mate/internal/agent"
 	"github.com/swqa7697/data-mate/internal/config"
 )
 
-// AgentStatus remains pending until the registration adapters are implemented.
-type AgentStatus struct {
-	Name  string `json:"name"`
-	State string `json:"state"`
-}
+// AgentStatus is independent user-scope registration readiness.
+type AgentStatus = agent.Status
 
 // Status is the versioned passive lifecycle report.
 type Status struct {
@@ -26,7 +24,7 @@ type Status struct {
 }
 
 func status(state string) Status {
-	return Status{1, state, []AgentStatus{{"codex", "pending"}, {"claude", "pending"}}}
+	return Status{1, state, []AgentStatus{{Name: "codex", State: "pending"}, {Name: "claude", State: "pending"}}}
 }
 
 // Controller serializes lifecycle mutations through the installation store.
@@ -35,11 +33,12 @@ type Controller struct {
 	Build     Build
 	launcher  launchManager
 	readiness time.Duration
+	Agents    *agent.Manager
 }
 
 // New constructs a native lifecycle controller without accessing state.
 func New(root config.Root, build Build) *Controller {
-	return &Controller{root, build, launchd{}, 30 * time.Second}
+	return &Controller{Root: root, Build: build, launcher: launchd{}, readiness: 30 * time.Second}
 }
 func (c *Controller) inspect(ctx context.Context, r record, l *config.LifecycleLease) (job, error) {
 	j, err := c.launcher.Inspect(ctx, c.Root)
@@ -113,7 +112,7 @@ func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r
 	return nil
 }
 
-// Start starts or reuses this exact installation. Agent registration is pending.
+// Start starts or reuses this exact installation, then ensures CLI agent registrations.
 func (c *Controller) Start(parent context.Context) (Status, error) {
 	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
 	defer cancel()
@@ -156,7 +155,7 @@ func (c *Controller) Start(parent context.Context) (Status, error) {
 				if h.State != "running" {
 					return status(h.State), ErrStartup
 				}
-				return status(h.State), nil
+				return c.ensureAgents(ctx, l, h.State)
 			}
 			// Never replace a live but unresponsive process on a repeated start.
 			return status("stale"), e
@@ -220,7 +219,7 @@ func (c *Controller) Start(parent context.Context) (Status, error) {
 					if h.State == "running" {
 						r.PID = h.PID
 						if e = saveRecord(l, r); e == nil {
-							return status("running"), nil
+							return c.ensureAgents(ctx, l, "running")
 						}
 						bootErr = e
 						break
@@ -295,7 +294,16 @@ func (c *Controller) Stop(ctx context.Context) (Status, error) {
 
 // Inspect reads profiles and probes an already-running job. No secrets, database
 // connections, registration commands, process startup or state repair occur.
-func (c *Controller) Inspect(ctx context.Context) (Status, error) {
+func (c *Controller) Inspect(ctx context.Context) (result Status, resultErr error) {
+	defer func() {
+		if c.Agents != nil {
+			states, err := c.Agents.Inspect(ctx)
+			result.Agents = states
+			if resultErr == nil {
+				resultErr = err
+			}
+		}
+	}()
 	configErr := error(nil)
 	if _, _, err := config.Preview(ctx, c.Root); err != nil {
 		configErr = ErrState
@@ -384,4 +392,14 @@ func (c *Controller) ProbeSession(ctx context.Context) error {
 		conn.Close()
 	}
 	return err
+}
+
+func (c *Controller) ensureAgents(ctx context.Context, l *config.LifecycleLease, state string) (Status, error) {
+	result := status(state)
+	if c.Agents == nil {
+		return result, nil
+	}
+	var err error
+	result.Agents, err = c.Agents.Ensure(ctx, l)
+	return result, err
 }

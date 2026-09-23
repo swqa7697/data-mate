@@ -324,6 +324,7 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Fatal("metadata/test executed application RLS or rows")
 	}
 	mcpAcceptance(t, d, access, sql)
+	nativeAgentAcceptance(t, p, password, sql)
 	scopeAcceptance(t, d, access, password, sql)
 	cliDiagnosticsAcceptance(t, fixture.Root)
 	compilerAcceptance(t, d, access, sql)

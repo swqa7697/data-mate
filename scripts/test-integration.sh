@@ -150,10 +150,14 @@ p=pathlib.Path(root)
 (p/'manifest.json').write_text(json.dumps(dict(port=int(port),root=root,container=container,owner=owner,image=image)))
 PY
   printf 'Running owned fixture %s (%s)\n' "$fixture_id" "$image"
+  test_timeout=3m
+  if [[ "${DATA_MATE_AGENT_TEST:-}" == 1 ]]; then
+    test_timeout=15m
+  fi
   # Job control gives the go runner and its test subprocess one owned group.
   set -m
   DATA_MATE_PG_FIXTURE="$fixture_dir/manifest.json" GOPROXY=off GOSUMDB=off \
-    go test -mod=readonly -count=1 -timeout=3m -v -run '^TestPostgresIntegration$' ./internal/database/postgres &
+    go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestPostgresIntegration$' ./internal/database/postgres &
   test_pid=$!
   wait "$test_pid"
   test_pid=''

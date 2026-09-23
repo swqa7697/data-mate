@@ -179,6 +179,32 @@ Only change entries owned by this installation. An unrelated entry with the same
 
 Missing agents are reported as unavailable and skipped. If a detected agent cannot be configured, report partial readiness and exit nonzero; keep any successfully started service and registrations, making the next start a safe retry. An installation with neither supported agent can still run for diagnostics. Native agent approval rules remain in force. New agent sessions load the registration; an already running session may need its normal MCP reconnect or restart action.
 
+P10 reads Codex TOML and Claude user-scope JSON directly for passive inspection;
+it does not invoke `mcp get` or `mcp list`. Configuration locations honor absolute
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` overrides. Input is capped at 4 MiB and rejects
+unsafe files, duplicate keys and unsupported registration layouts. Writes use
+bounded CLI argument arrays (eight seconds, 64 KiB discarded output) from `/`.
+Only absolute PATH directories participate in detection and child PATH.
+
+`state/registrations.json` binds version, installation UUID, full root/digest,
+client/config location, name, expected command/arguments, exact canonical entry
+fingerprint and intent/owned phase. Add intent is durable before the CLI write;
+an exact match reconciles interrupted completion. Matching unrecorded entries
+are usable without acquiring deletion authority. Removal requires both recorded
+ownership and an unchanged fingerprint. Relocated config overrides are conflicts.
+Client writes are inspected immediately before and after; unrelated existing
+configuration values must remain unchanged. External concurrent client edits are
+not transactionally locked by Data Mate; observed changes produce a conflict,
+and no wholesale rollback overwrites user changes.
+
+Agent states are unavailable, pending, ready, disabled, conflict and failed.
+Ready means the user-scope registration matches, not that session policy grants
+access. Codex's disabled flag is preserved and reported; project/managed policy
+and native approval remain the client's responsibility. A registration failure
+returns exit 1 and still emits the running service/independent agent report.
+Status reads local ownership and client configuration without repair; unreadable
+or invalid metadata exits 2. Missing agents do not prevent service startup.
+
 ### 4.2 Start, stop, and status
 
 Use a per-user `launchd` job for reliable process detachment and supervision. Store its generated plist beneath the installation root; do not install a login item. `mcp start` bootstraps and starts the job explicitly. Automatic login startup and automatic restart after a crash are disabled in v1.
@@ -199,8 +225,9 @@ Status checks launchd, the readiness handshake, config validity, and registratio
 The runtime handshake contains installation identity, process identity, application version, and internal protocol version. It is an internal socket preamble consumed by the bridge before relaying MCP, so agents see only valid MCP messages. A bridge or CLI with an incompatible internal version reports a restart requirement rather than exchanging uncertain messages. A short socket filename under a verified private temporary directory avoids macOS socket path-length limits; its identity maps back to the full installation root.
 
 P8 implements the lifecycle core and bounded probe/session preamble. P9 attaches
-bounded SDK sessions and the stdio relay after successful authentication. Agent
-states remain `pending` until P10. Start/stop/status
+bounded SDK sessions and the stdio relay after successful authentication. P10
+ensures user-scope agent registrations after readiness under the same lifecycle
+lease. Start/stop/status
 support the version-1 JSON status schema. Status reports degraded/stale output
 alongside a failure diagnostic: invalid state/configuration exits 2, other
 inspection failures exit 1; stopped is a successful query.

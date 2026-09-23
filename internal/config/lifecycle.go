@@ -49,7 +49,7 @@ func (l *LifecycleLease) Read(path string, limit int) ([]byte, error) {
 
 // Replace publishes only lifecycle-owned records. It cannot mutate profiles.
 func (l *LifecycleLease) Replace(path string, b []byte) error {
-	if (path != "state/service.json" && path != "state/service.plist") || len(b) > 16384 {
+	if (path != "state/service.json" && path != "state/service.plist" && path != "state/registrations.json") || len(b) > 16384 {
 		return ErrOwnership
 	}
 	if err := l.lease.check(); err != nil {
@@ -61,7 +61,7 @@ func (l *LifecycleLease) Replace(path string, b []byte) error {
 // Remove removes only lifecycle-owned records or their publication siblings.
 func (l *LifecycleLease) Remove(path string) error {
 	base := strings.TrimSuffix(path, ".tmp")
-	if base != "state/service.json" && base != "state/service.plist" {
+	if base != "state/service.json" && base != "state/service.plist" && base != "state/registrations.json" {
 		return ErrOwnership
 	}
 	if err := l.lease.check(); err != nil {

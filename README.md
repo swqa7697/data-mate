@@ -3,7 +3,7 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P9 MCP tools and bridge.**
+**Current implementation: P10 automatic agent registration.**
 `db add`, `db edit`,
 `db remove`/`rm`, `db list`/`ls`, `db scope`, and `db test` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
@@ -15,8 +15,9 @@ compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
 signatures and executes only emitted, parameterized SQL after relation locking
 and fresh authorization checks. `mcp start`, `mcp stop` and `mcp status` manage
 the background service. The stdio bridge exposes four read-only MCP tools through
-the shared driver. Automatic agent registration (P10) remains unavailable; agent
-states report `pending`.
+the shared driver. Start also registers the bridge with installed Codex and
+Claude Code clients; new sessions can discover it from other working directories.
+Complete uninstall and final acceptance remain P11 work.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -56,7 +57,13 @@ make dev ARGS="mcp stop"
 ```
 
 These commands support `--json` with version 1, a service `state`, and per-agent
-states. Both agents remain `pending` until automatic registration is implemented.
+states. Agent states are `unavailable`, `pending`, `ready`, `disabled`, `conflict`
+and `failed`. Start output names the root and `data-mate-dev-<root-hash>`
+registration. After service readiness, start adds missing user-scope entries using
+supported client commands and verifies the result. Absent clients are skipped;
+a failed adapter returns exit 1 with a structured partial report while the
+healthy service and successful adapter remain available. Retry `mcp start` after
+resolving the reported agent state. Stop preserves registrations.
 Start explicitly bootstraps one job in the current user's GUI launchd
 domain and waits up to 30 seconds for readiness. There is no login item or
 automatic restart after a crash. Repeated starts reuse the matching healthy job.
@@ -113,8 +120,26 @@ sessions and four in-flight requests per session, with 256-KiB inbound and two-M
 outbound frame limits. Excess session/dispatch work or invalid framing closes the
 peer; database queue exhaustion returns a safe tool error. Initialization has ten
 seconds; blocked output has five. Cancellation and disconnect release database
-work. A bridge never starts the service. Automatic Codex/Claude setup and native
-agent workflows remain P10 work.
+work. A bridge never starts the service.
+
+Agent detection uses absolute PATH directories at CLI invocation. Codex reads
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`); Claude reads
+`$CLAUDE_CONFIG_DIR/.claude.json` (default `~/.claude.json`). Relative overrides,
+unsafe files and unknown registration layouts fail without repair. Passive
+status reads these files directly, capped at 4 MiB; it never invokes client
+health checks. Registration subprocesses have eight-second and 64-KiB output
+bounds, and their output is not exposed in diagnostics.
+
+Each checkout records an add intent before invoking the client. A retry can
+reconcile an interrupted add when the exact command, arguments and root match.
+Conflicts are preserved. Matching manually created entries are usable but are
+not adopted for deletion; cleanup requires recorded ownership and an unchanged
+fingerprint. Use the same client configuration location for start and cleanup.
+Data Mate preserves disabled-server, trust, approval, sandbox and project
+settings. `ready` describes the user registration; native policy or a project
+override may still prevent a session from using it. Codex entries with
+`enabled = false` report `disabled`. New sessions load the registration; existing
+sessions may need their normal reconnect or restart action.
 
 Manage connections interactively:
 
@@ -336,6 +361,22 @@ per shared driver. Requests have profile timeouts, a two-MiB protocol body cap,
 bounded catalog results and redacted errors. No application rows are queried by
 connection tests or catalog operations. The service manager uses the same state
 leases and shared driver for all MCP sessions.
+
+Actual authenticated Codex/Claude workflows are a separate opt-in:
+
+```bash
+DATA_MATE_AGENT_TEST=1 make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16
+```
+
+This uses an owned Docker database, temporary installation and unique registration
+names in the clients' current user configuration. It requires authenticated
+clients, an unlocked Keychain and GUI launchd, may use normal model quota, and
+removes only the fixture's registrations, service and key afterward. Cleanup
+failure retains the exact retry root. Codex uses its configured permissions;
+Claude uses manual mode with a normal allow rule limited to the fixture's four
+read-only tools, plus an explicit query-deny check. No bypass permission mode is
+used. The default suite never reads user agent configuration or authentication.
+Native service-only checks use isolated client configuration directories.
 
 P1's explicit native check uses only synthetic credentials, a random temporary
 root, one exact Keychain account, and a temporary launchd job:

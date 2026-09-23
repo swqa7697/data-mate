@@ -28,6 +28,7 @@
           "state": {
             "enum": [
               "unavailable",
+              "disabled",
               "pending",
               "ready",
               "conflict",

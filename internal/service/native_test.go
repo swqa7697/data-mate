@@ -16,13 +16,14 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/swqa7697/data-mate/internal/agent"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
 
 // No existing test owns the installed CLI + launchd lifecycle. This opt-in gate
 // uses two isolated installations and synthetic credentials only; it never reads
-// agent configuration or stops any job not created by this fixture.
+// real agent configuration or stops any job not created by this fixture.
 func TestNativeServiceLifecycle(t *testing.T) {
 	if os.Getenv("DATA_MATE_NATIVE_TEST") != "1" {
 		t.Skip("requires DATA_MATE_NATIVE_TEST=1, macOS GUI launchd and an unlocked user Keychain")
@@ -32,6 +33,14 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "data-mate-p8-native-")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Installed CLI registration uses isolated native-client configuration.
+	for _, variable := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
+		configDir := filepath.Join(dir, variable)
+		if err = os.Mkdir(configDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(variable, configDir)
 	}
 	// Keep retry material if external cleanup fails.
 	clean := true
@@ -91,6 +100,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		c := New(root, Build{"native", "p8-native", hash})
+		c.Agents = agent.New(root)
 		controllers = append(controllers, c)
 		t.Cleanup(func() {
 			cleanup, done := context.WithTimeout(context.Background(), 15*time.Second)
@@ -98,6 +108,21 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			if _, e := c.Stop(cleanup); e != nil {
 				clean = false
 				t.Error("native service cleanup", e)
+			}
+			store, e := config.OpenLifecycle(cleanup, root)
+			if e == nil {
+				lease, le := store.Lifecycle(cleanup)
+				if le == nil {
+					e = c.Agents.RemoveOwned(cleanup, lease)
+					lease.Release()
+				} else {
+					e = le
+				}
+				store.Close()
+			}
+			if e != nil {
+				clean = false
+				t.Error("native registration cleanup", e)
 			}
 			if e := (vault.Keychain{}).Delete(cleanup, root.Digest); e != nil {
 				clean = false
@@ -155,6 +180,46 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal("native concurrent start", e)
 		}
 	}
+	// A same-name conflict returns structured partial readiness without stopping
+	// the service, altering the other adapter, or overwriting either checkout.
+	codexConfig := filepath.Join(os.Getenv("CODEX_HOME"), "config.toml")
+	originalConfig, e := os.ReadFile(codexConfig)
+	if e != nil {
+		t.Fatal(e)
+	}
+	changedConfig := bytes.Replace(originalConfig, []byte(binary), []byte("/foreign/data-mate"), 1)
+	if bytes.Equal(originalConfig, changedConfig) {
+		t.Fatal("missing native registration")
+	}
+	if e = os.WriteFile(codexConfig, changedConfig, 0600); e != nil {
+		t.Fatal(e)
+	}
+	partialCmd := exec.CommandContext(ctx, binary, "mcp", "start", "--json")
+	partialCmd.Dir = "/"
+	partialOutput, partialErr := partialCmd.Output()
+	var partial Status
+	if partialErr == nil || json.Unmarshal(partialOutput, &partial) != nil || partial.State != "running" || len(partial.Agents) != 2 || partial.Agents[0].State != "conflict" || partial.Agents[1].State != "ready" {
+		t.Fatal("native partial readiness", partial, partialErr)
+	}
+	preservedConfig, e := os.ReadFile(codexConfig)
+	if e != nil || !bytes.Equal(preservedConfig, changedConfig) {
+		t.Fatal("native registration conflict overwrote config")
+	}
+	if e = os.WriteFile(codexConfig, originalConfig, 0600); e != nil {
+		t.Fatal(e)
+	}
+	for _, controller := range controllers {
+		result, e := controller.Inspect(ctx)
+		if e != nil || result.State != "running" {
+			t.Fatal("native independent registration status", e)
+		}
+		for _, a := range result.Agents {
+			if a.State != "ready" {
+				t.Fatal("native adapter unavailable", a)
+			}
+		}
+	}
+	t.Log("native two-checkout registrations, partial readiness, conflict preservation and passive status passed")
 	// A listening endpoint observes zero accepts during startup/status/reload.
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {

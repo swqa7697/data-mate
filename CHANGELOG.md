@@ -17,5 +17,6 @@
 - Add interactive, searchable `db scope` with lazy catalog pages, exact scripted scope replacement, and confirmation that waits for existing database work to finish.
 - Add staged `db test [alias]` diagnostics with versioned JSON, safe errors, shared read-only policy checks, and continued testing after individual connection failures.
 - Add opt-in, isolated Docker integration checks for PostgreSQL 16 and 18 through `make test-integration`.
-- Add `mcp start`, `mcp stop`, and passive `mcp status` with versioned JSON, isolated launchd jobs, verified service identity, bounded readiness and shutdown, and profile reload handling. Agent registration remains pending.
+- Add `mcp start`, `mcp stop`, and passive `mcp status` with versioned JSON, isolated launchd jobs, verified service identity, bounded readiness and shutdown, and profile reload handling.
 - Add four read-only MCP tools and an authenticated stdio bridge, with strict schemas, scoped metadata, shared query authorization, bounded sessions and payloads, cancellation, and redacted errors.
+- Add automatic user-scope Codex/Claude registration after service readiness, passive per-agent status, conflict preservation, and recoverable ownership records; partial registration failures keep the service available.
