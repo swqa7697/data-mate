@@ -3,11 +3,14 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P0 foundation.** Help, version, root resolution, strict
-profile/schema contracts, and developer tooling are implemented. Database CRUD,
-credentials, query execution, MCP service, and agent registration are not ready.
-Those commands fail without creating runtime state. `upgrade` and `update`
-explain how to rebuild locally and make no network request.
+**Current implementation: P1 persistence and credential vault.** Help, version,
+root resolution, strict profile/schema contracts, developer tooling, and the
+internal profile/vault store are implemented. The store uses verified private
+files, cross-process leases, atomic publication, AES-256-GCM, durable encryption
+accounting, and one native Keychain item per installation. CLI connection CRUD
+arrives in P2; query execution, MCP service, and agent registration remain later
+packages. Those unfinished commands fail without creating runtime state.
+`upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
 
@@ -30,9 +33,10 @@ application or creating `.dev`. Add `VERBOSE=1` to `make setup`, `make install`,
 The installed binary resolves its root from its executable location, so it works
 from another working directory. An absolute `--root` overrides that location.
 Each checkout has its own `.dev`; installation creates only its private `bin`
-directory and executable. Persistent installation identity and locking arrive in
-P1/P8. Builds replace the executable atomically. No service, agent registration,
-or Keychain item is created during installation.
+directory and executable. The internal store initializes persistent identity and
+state locks when opened for confirmed work; install/build do not initialize that
+store. Service lifecycle integration arrives in P8. Builds replace the executable
+atomically. No service, agent registration, or Keychain item is created during installation.
 
 | Command | Behavior |
 | --- | --- |
@@ -59,6 +63,31 @@ network access and use disposable roots. They do not connect to a real database,
 read/write Keychain items, or alter agent configuration. The CI workflow uses
 `macos-15`, records its actual architecture/toolchain, and runs these local gates.
 A workflow file alone does not establish a successful hosted run.
+
+P1's explicit native check uses only synthetic credentials, a random temporary
+root, one exact Keychain account, and a temporary launchd job:
+
+```bash
+DATA_MATE_NATIVE_TEST=1 make test
+```
+
+This opt-in requires an unlocked macOS user Keychain and a GUI launchd session.
+The default suite skips this native gate and uses fake providers. The native
+fixture also creates its own temporary Keychain for locked/denied/unavailable
+checks; it never locks the user's Keychain. A rebuilt ad-hoc executable may need
+new OS authorization: denial preserves the vault and never resets its key.
+Unattended access reports denial rather than displaying UI. If fixture cleanup
+fails, the test reports and retains its exact helper/root for retry.
+
+Vault writes reserve one of a maximum of 1,000,000 encryptions durably before
+sealing. Failed publication consumes its reservation. Profile edits publish a
+fresh encrypted bundle before its reference; deletion publishes profiles before
+credential cleanup and reports partial completion if cleanup fails. The internal
+purge coordinator removes the exact key before its accounting, retains retry
+identity, and blocks ordinary access once purge begins. Full `uninstall`/`clean`
+integration remains P11. Do not restore old vault/accounting backups or move
+Keychain items between stores; recovery is nonsecret profile import and credential
+re-entry in a fresh installation namespace.
 
 Scripts under `scripts/` back the matching Make targets; `common.sh` supplies
 checkout paths, target settings, dependency checks, and directory validation.

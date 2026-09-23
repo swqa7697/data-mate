@@ -1,0 +1,47 @@
+// Real negative paths in an owned temporary keychain. Never lock/unlock/delete
+// the user's default keychain or change its password or authorization policy.
+#include "../../keychain_darwin.h"
+#include <stdio.h>
+static void wipe(unsigned char *p, size_t n) { volatile unsigned char *v=p; while(n--)*v++=0; }
+static int fail(const char *stage, OSStatus status) {fprintf(stderr,"%s: OSStatus %d\n",stage,(int)status);return 1;}
+int main(int argc,char **argv) {
+ if(argc!=2)return 2;
+ unsigned char password[32],key[32],loaded[32];
+ if(SecRandomCopyBytes(kSecRandomDefault,32,password)!=errSecSuccess || SecRandomCopyBytes(kSecRandomDefault,32,key)!=errSecSuccess)return 1;
+ SecKeychainRef fixture=NULL;
+ OSStatus status=SecKeychainCreate(argv[1],32,password,false,NULL,&fixture);
+ if(status!=errSecSuccess)return fail("create isolated keychain",status);
+ SecKeychainSetUserInteractionAllowed(false);
+ int result=1;
+ const char *account="0000000000000000000000000000000000000000000000000000000000000000";
+ status=dm_create(fixture,account,false,key);
+ if(status!=errSecSuccess){fail("create synthetic item",status);goto done;}
+ status=dm_load(fixture,account,false,loaded);
+ if(status!=errSecSuccess||memcmp(key,loaded,32)){fail("load synthetic item",status);goto done;}
+ status=SecKeychainLock(fixture);
+ if(status!=errSecSuccess){fail("lock isolated keychain",status);goto done;}
+ status=dm_load(fixture,account,false,loaded);
+ printf("locked store OSStatus %d\n",(int)status);
+ if(status!=errSecInteractionNotAllowed && status!=errSecAuthFailed && status!=errSecInteractionRequired){fail("locked access unexpectedly allowed",status);goto done;}
+ unsigned char wrong[32];memset(wrong,0,sizeof(wrong));
+ status=SecKeychainUnlock(fixture,32,wrong,true);
+ printf("denied unlock OSStatus %d\n",(int)status);
+ if(status!=errSecAuthFailed){fail("wrong fixture password accepted",status);goto done;}
+ status=SecKeychainUnlock(fixture,32,password,true);
+ if(status!=errSecSuccess){fail("unlock isolated keychain",status);goto done;}
+ status=dm_delete(fixture,account,false);
+ if(status!=errSecSuccess){fail("exact fixture item delete",status);goto done;}
+ status=dm_load(fixture,account,false,loaded);
+ if(status!=errSecItemNotFound){fail("deleted fixture item present",status);goto done;}
+ status=SecKeychainDelete(fixture);
+ if(status!=errSecSuccess){fail("delete isolated keychain",status);goto done;}
+ status=dm_load(fixture,account,false,loaded);
+ printf("unavailable store OSStatus %d\n",(int)status);
+ if(status!=errSecNoSuchKeychain && status!=errSecInvalidKeychain){fail("unavailable fixture unexpectedly accessed",status);goto done;}
+ result=0;
+done:
+ // Only this newly created keychain is ever deleted.
+ status=SecKeychainDelete(fixture);
+ if(status!=errSecSuccess && status!=errSecNoSuchKeychain && status!=errSecInvalidKeychain){fail("isolated cleanup",status);result=1;}
+ CFRelease(fixture);wipe(password,32);wipe(key,32);wipe(loaded,32);return result;
+}

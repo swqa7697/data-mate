@@ -157,15 +157,17 @@ The runtime handshake contains installation identity, process identity, applicat
   bin/data-mate
   config/connections.json
   state/vault.json
+  state/vault-usage.json
   state/installation.json
   state/registrations.json
   state/service.plist
   state/state.lock
+  state/state-gate.lock
   state/lifecycle.lock
   logs/service.log
 ```
 
-Runtime sockets live in a private, owner-checked OS temporary directory, with their location recorded in service state. Installation records contain nonsecret identity and owned-artifact inventory only. Directories are mode 0700; profile, vault, state, and log files are mode 0600. Reject symlink substitution for files the application owns and validate ownership before mutation or cleanup.
+Runtime sockets live in a private, owner-checked OS temporary directory, with their location recorded in service state. Installation records contain nonsecret identity and owned-artifact inventory only. Directories are mode 0700; profile, vault, state, and log files are mode 0600. P1's identity records the installation UUID, full root digest, established-profile state, purge tombstone, and exact owned paths, including fixed `.tmp` publication siblings. Only the corresponding exclusive writer may recover an interrupted sibling; unknown files remain untouched. Reject symlink substitution for files the application owns and validate ownership before mutation or cleanup.
 
 The development binary resolves its root from its installed location, independent of the working directory; `make dev` also passes the absolute root explicitly. Agent registrations pin that root. Developer roots never fall back to a shared user configuration or another checkout's Keychain namespace. A future distributed installation may use `~/.config/data-mate` for profiles through the same path resolver; no distributed layout is installed now.
 
@@ -218,7 +220,7 @@ ordering do not change revisions; settings and limits do.
 
 Use an OS file lock shared by CLI writers and the service, atomic same-directory replacement, file sync, and parent-directory sync. Do not lock a replaceable data file's inode. All changes validate before publication.
 
-Database requests hold a shared state lock from configuration validation through execution and response preparation. CLI changes take the exclusive lock; bounded queries limit the wait. Once a change command succeeds, no operation using the previous configuration remains active. A separate lifecycle lock serializes start, stop, install, and uninstall.
+Database requests hold a shared state lock from configuration validation through execution and response preparation. CLI changes take the exclusive lock; bounded queries limit the wait. Once a change command succeeds, no operation using the previous configuration remains active. A separate lifecycle lock serializes start, stop, install, and uninstall when those paths are integrated in P8/P11. P1 initialization and its internal purge coordinator already use lifecycle locking. Lock order is lifecycle, admission gate, then state. Readers briefly hold the exclusive admission gate while acquiring a shared state lease; writers retain it through exclusive state access. A process-local writer-preferring queue supplements independently opened OS flock descriptors. Acquisition is context-bounded, and each acquired lease rechecks lock inode and installation identity; a stale waiter cannot mutate a recreated installation.
 
 Configuration and vault are separate files, so writes must remain safe across partial completion:
 
@@ -236,7 +238,7 @@ Before each database tool call, re-read the small configuration snapshot and det
 
 Store all Data Mate-managed passwords, SSH private-key material/passphrases, and proxy credentials in one encrypted vault file. Store a single randomly generated 256-bit vault key in macOS Keychain. The number of Keychain items stays constant as connections are added or removed.
 
-The key is a generic-password item addressed by a fixed application service name plus an account derived from the canonical installation root. Different developer checkouts use different accounts. Use native Keychain APIs through a small platform adapter; never pass key material through the `security` command's arguments, subprocess output, environment variables, or files. OS authorization prompts are permitted; no custom password or biometric UI is introduced. See [Apple Keychain Services](https://developer.apple.com/documentation/security/keychain-services).
+The key is a generic-password item addressed by a fixed application service name plus an account derived from the canonical installation root. Different developer checkouts use different accounts. Use native Keychain APIs through a small platform adapter; never pass key material through the `security` command's arguments, subprocess output, environment variables, or files. P1 uses the file-based default macOS Keychain for checkout-local ad-hoc executables, with exact service/account queries. Native item-reference deletion preserves exact ownership after binary changes. File-based interaction control is serialized and restored around each native call; OS prompts are synchronous and must finish before an interactive native call can return. A changed executable may need fresh OS approval; denial is an error, never permission to replace the item. OS authorization prompts are permitted; no custom password or biometric UI is introduced. See [Apple Keychain Services](https://developer.apple.com/documentation/security/keychain-services).
 
 The vault is a versioned envelope:
 
@@ -245,6 +247,7 @@ The vault is a versioned envelope:
   "version": 1,
   "vault_id": "d5c44511-2435-45cb-b3ee-cbf999ae24e1",
   "cipher": "AES-256-GCM",
+  "write_sequence": 1,
   "nonce": "<base64>",
   "ciphertext": "<base64 ciphertext including authentication tag>"
 }
@@ -252,7 +255,23 @@ The vault is a versioned envelope:
 
 The encrypted plaintext is a versioned map from credential reference to connection ID and its secret fields. Encrypt the whole small document on each mutation. This keeps the format and deletion logic simple without adding SQLite, per-secret Keychain records, or an encryption hierarchy.
 
-Use Go's standard `crypto/aes`, `crypto/cipher`, and `crypto/rand`. Generate a fresh random 96-bit nonce for every write and use the full authentication tag. Authenticate the format version, cipher identifier, vault ID, and installation namespace as associated data with an unambiguous encoding. Bound the envelope size before allocation and validate the decrypted schema before use. Set a conservative maximum of one million writes per key; exceeding it requires a future explicit key-rotation operation rather than nonce reuse. See [Go authenticated encryption APIs](https://pkg.go.dev/crypto/cipher).
+Use Go's standard `crypto/aes`, `crypto/cipher`, and `crypto/rand`. Generate a fresh random 96-bit nonce for every write and use the full authentication tag. Authenticate the format version, cipher identifier, vault ID, full root digest, installation UUID, and write sequence using length-prefixed associated data. Bound the envelope size before allocation and validate the decrypted schema before use. Set a conservative maximum of one million writes per key; exceeding it requires a future explicit key-rotation operation rather than nonce reuse. See [Go authenticated encryption APIs](https://pkg.go.dev/crypto/cipher).
+
+P1 bounds the encrypted envelope to 8 MiB, decrypted document to 4 MiB, and each
+secret/imported key to 128 KiB. Strict decoding rejects duplicate keys, unknown
+fields/versions, null or missing required members, and invalid bundle identities.
+Every bundle binds one credential reference to one connection UUID; lookup checks
+that binding against a freshly validated profile under its active state lease.
+
+`state/vault-usage.json` holds version, installation UUID, root digest, key
+fingerprint and the reserved encryption count. Initialize it durably before
+create-if-absent in Keychain. Reserve and sync the next count before generating
+the nonce and calling Seal; failed publication consumes that count. Authenticate
+the sequence and reject an envelope ahead of its ledger. Removing the last
+connection never resets accounting. A key without accounting, mismatched key,
+or vault without a key is a repair failure. An unused ledger with neither key nor
+vault can safely be reinitialized. This is crash protection, not protection from
+same-user rollback of both files; old backup restoration is unsupported.
 
 ### 6.2 Key and secret lifecycle
 
@@ -460,7 +479,7 @@ Installation runs dependency setup before the application build. `VERBOSE=1` ena
 
 Rebuilding an active service does not hot-swap its executable image. Report that `mcp stop` followed by `mcp start` is needed to run the new version. A stopped bridge reports the ordinary service-not-running diagnostic.
 
-All cleanup uses the installation inventory and verified ownership. Preserve unrelated `.dev` contents and remove the root directory only if empty. A purge failure reports remaining owned artifacts and can be retried; it must not claim success if the vault or OS key remains. Keep enough ownership metadata to retry a partially completed purge. Preserve external agent settings, imported key source files, and user-managed certificates.
+All cleanup uses the installation inventory and verified ownership. Preserve unrelated `.dev` contents and remove the root directory only if empty. P1 implements only the inner credential purge coordinator: mark a durable purge tombstone, delete the exact native item, then remove owned profiles/vault/usage files and their publication siblings. Identity and stable locks remain for retry; ordinary state access is rejected once purge starts. P11 integrates service/registration/binary cleanup and removes identity/locks last. A purge failure reports remaining owned artifacts and can be retried; it must not claim success if the vault or OS key remains. Keep enough ownership metadata to retry a partially completed purge. Preserve external agent settings, imported key source files, and user-managed certificates.
 
 Use `.misc` for retained implementation plans, test evidence, and status reports. `.tmp` remains developer-managed. CI and local tests use isolated roots and fake key providers unless a native test explicitly opts in.
 
