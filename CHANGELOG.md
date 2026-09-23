@@ -4,4 +4,13 @@
 
 ### Added
 
+- Add a checkout-local macOS Apple Silicon CLI with help, build-version reporting, executable-relative roots, and informational `upgrade`/`update` commands.
+- Add Make commands for local installation, atomic rebuilds, formatting, linting, and isolated unit and race tests, plus dependency-only `make setup` and optional `VERBOSE=1` setup/build diagnostics. `make clean` delegates to uninstall with purge disabled; both commands currently fail explicitly without changing files until uninstall is implemented.
+- Add strict nonsecret connection profiles with validated scopes, transport settings, resource limits, and atomic persistence.
+- Add AES-256-GCM credential storage backed by one macOS Keychain item per installation, with durable encryption accounting and recoverable credential cleanup.
+- Add interactive and scripted `db add`, `db edit`, `db remove`/`rm`, and `db list`/`ls`, with nonsecret previews, default-No confirmation, cancellation without saved changes, and versioned JSON listing.
+- Add password and credential input through stdin, explicit secret preservation/clearing, and saved scope, TLS, SSH, proxy, and query-limit settings without opening database connections; SSH/proxy connections remain unavailable.
+- Add internal PostgreSQL direct and verified TLS connections, read-only role checks, scoped catalog pagination and table descriptions, bounded connection pools, and redacted diagnostics.
+- Add a default-deny internal SQL compiler for a finite SELECT subset, including joins, grouping, audited aggregates, CTEs, subqueries, and typed parameters, with PostgreSQL 16/18 catalog verification and parameterized SQL emission. Verify live catalog metadata by semantic identity, ignoring incidental row IDs and numeric planner estimates while preserving implementation and safety checks.
 - Add bounded read-only PostgreSQL query execution to the internal driver, with fresh authorization checks, exact result codecs, row and byte limits, and cancellation cleanup.
+- Add opt-in, isolated Docker integration checks for PostgreSQL 16 and 18 through `make test-integration`; CLI `db test`/`db scope`, MCP delivery, and agent registration remain unavailable.
