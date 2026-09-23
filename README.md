@@ -3,9 +3,9 @@
 A checkout-local Go CLI for sharing PostgreSQL connections with terminal agents
 through a read-only MCP service on macOS with Apple Silicon.
 
-**Current implementation: P6 optional SSH and SOCKS5 transports.**
+**Current implementation: P7 scope selection and connection diagnostics.**
 `db add`, `db edit`,
-`db remove`/`rm`, and `db list`/`ls` use the profile/vault store. Interactive
+`db remove`/`rm`, `db list`/`ls`, `db scope`, and `db test` use the profile/vault store. Interactive
 forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
 encryption accounting, and one native Keychain item per installation are
 implemented. The internal PostgreSQL driver supports direct, SSH and SOCKS5
@@ -13,8 +13,8 @@ routes with optional verified TLS,
 read-only role checks, scoped catalog pages and table descriptions. The internal
 compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
 signatures and executes only emitted, parameterized SQL after relation locking
-and fresh authorization checks. CLI `db test`/`db scope`, MCP service and agent registration remain
-later packages; their commands fail explicitly.
+and fresh authorization checks. The MCP service and agent registration remain later packages; their commands
+fail explicitly.
 `upgrade` and `update` explain how to rebuild locally and make no network request.
 
 Install Go 1.27.1 and Apple's Command Line Tools (`xcode-select --install`). Then:
@@ -39,8 +39,8 @@ The installed binary resolves its root from its executable location, so it works
 from another working directory. An absolute `--root` overrides that location.
 Each checkout has its own `.dev`; installation creates only its private `bin`
 directory and executable. The internal store initializes persistent identity and
-state locks after a confirmed mutation; listing, previews and canceled forms do
-not initialize that store. Install/build do not initialize it either. Service
+state locks after a confirmed mutation or the first `db test` of manually written
+profiles. Listing, previews and canceled forms do not initialize that store. Install/build do not initialize it either. Service
 lifecycle integration arrives in P8. Builds replace the executable
 atomically. No service, agent registration, or Keychain item is created during installation.
 
@@ -50,6 +50,8 @@ Manage connections interactively:
 make dev ARGS="db add"
 make dev ARGS="db edit"                # Select a saved connection.
 make dev ARGS="db list --json"
+make dev ARGS="db scope analytics"      # Optional; new connections default to all.
+make dev ARGS="db test --json"           # Test every saved connection.
 make dev ARGS="db remove analytics"
 ```
 
@@ -101,7 +103,7 @@ pin. The file supports exact host/port public-key entries, without wildcards,
 certificates or ambient known-host files. Unknown and changed keys fail at runtime;
 changed keys are never automatically replaced. Normal saving makes no network
 connection; `--ssh-enroll` only probes the SSH host key, without authentication or
-database access. CLI connection diagnostics remain in P7.
+database access. `db test` exercises the configured route.
 
 `--query-timeout` accepts whole milliseconds from `1ms` to `30s`; `--max-rows`
 accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `10s`,
@@ -109,7 +111,38 @@ accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `
 `--schema`/`--table schema.table`, or `--scope-json`. Structured JSON supports
 identifiers containing dots. Exact selections require no catalog fetch; a new
 connection defaults to all accessible tables, while an empty selection means
-none. Interactive catalog selection remains part of `db scope` in P7.
+none. `db scope analytics --schema public --table other.Exact --yes` replaces the
+whole scope without opening a database connection or accessing credentials.
+
+`db scope [alias]` browses the role's full accessible application catalog,
+including objects outside the saved scope. Up/Down moves, Right expands a schema,
+Left returns to schemas, Space toggles, `/` searches the current level, `n` loads
+the next page and `b` returns to its first page. Only 50 objects are fetched at a
+time. Use `0` to start with none or `a` for all; broad selections cannot express
+individual exclusions. Enter previews the exact selection and a default-No Y/N
+confirmation saves it. Whole schemas include future tables; fixed table names do
+not. Partition roots include their partitions, subject to driver support and
+privileges. Names containing dots retain their exact identity. Renamed names are
+unavailable; recreating a selected name selects the replacement object.
+
+Failed browsing, cancellation and stale previews preserve saved scope. Saving
+waits for existing database operations holding a state lease to finish. For a
+manually written profile with no initialized installation state, run `db test`
+or save with `db edit` before interactive browsing. Scripted scope replacement
+works directly. Scope selection and catalog visibility never authorize otherwise
+unsupported SQL.
+
+`db test [alias]` checks one connection, or every saved connection in alias order.
+It reports config, vault, dial (including TLS/SSH/proxy), authentication, version,
+and policy stages. Policy includes the shared read-only role and semantic catalog
+checks. Tests read no application rows and change no database data. Each profile
+uses its timeout; profiles run sequentially and ordinary failures do not stop the
+batch. JSON is `{"version":1,"results":[...]}`: each result has `alias`, `ok`, the
+last reached `stage`, ordered `stages`, and a safe `error` on failure. Unreached
+stages are omitted. Any failed profile produces a nonzero exit. An invalid whole
+configuration or unknown alias exits 2 before producing a report; interruption
+exits 130. Readiness does not authorize a query: every Query still compiles and
+rechecks the current scope, relation identities and semantic catalog.
 
 Manual profiles follow the same schema without an activation record. Malformed
 configuration is preserved and reported. Editing a profile with a missing

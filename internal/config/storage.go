@@ -76,6 +76,43 @@ type Store struct {
 	fault    Fault
 }
 
+// OpenExisting pins initialized state without creating files or migrating an
+// inventory. Interactive catalog browsing uses it so cancellation cannot leave
+// initialization artifacts. A state lease must still validate each snapshot.
+func OpenExisting(ctx context.Context, root Root) (_ *Store, err error) {
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	actual, err := ResolveRoot(root.Path, "")
+	if err != nil || actual != root {
+		return nil, ErrOwnership
+	}
+	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, ErrOwnership
+	}
+	s := &Store{root: root, dir: os.NewFile(uintptr(fd), root.Path), local: retainLocks(root.Path)}
+	defer func() {
+		if err != nil {
+			s.Close()
+		}
+	}()
+	if err = s.validRoot(); err != nil {
+		return nil, err
+	}
+	raw, err := s.read("state/installation.json", 8192)
+	if err != nil {
+		return nil, err
+	}
+	if err = decodeIdentity(raw, root, &s.identity); err != nil {
+		return nil, err
+	}
+	if s.identity.Purging {
+		return nil, ErrPurging
+	}
+	return s, nil
+}
+
 // Open initializes private state under the lifecycle lock, or verifies an existing
 // identity. A failed initialization is retryable; it never creates a vault key.
 func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {

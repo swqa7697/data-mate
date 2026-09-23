@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,7 +136,7 @@ func (d *Driver) Close() {
 		closePool(p)
 	}
 }
-func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Revision) (*pgx.Conn, context.Context, func(bool), error) {
+func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Revision, trace *diagnosticTrace) (*pgx.Conn, context.Context, func(bool), error) {
 	mac := hmac.New(sha256.New, d.key[:])
 	secrets, hosts := a.TransportCredentials()
 	// Hash exact length-framed bytes, including private transport credentials.
@@ -245,6 +246,11 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 		var errDial error
 		c, errDial = pgx.ConnectConfig(op, cfg)
 		if errDial != nil {
+			var pg *pgconn.PgError
+			if cfg.Tracer.(*wireState).authStarted.Load() || (errors.As(errDial, &pg) && (strings.HasPrefix(pg.Code, "28") || pg.Code == "3D000")) {
+				trace.pass("dial")
+				trace.start("authentication")
+			}
 			release(false)
 			if cfg.Tracer.(*wireState).exceeded.Load() {
 				return nil, nil, nil, database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
@@ -257,11 +263,17 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 
 // run keeps admission through rollback and bounded payload preparation. Every
 // operation rechecks readiness in its own read-only transaction; no cached grants.
-func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Context, pgx.Tx, int) error) (result error) {
+func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Context, pgx.Tx, int) error) error {
+	return d.runObserved(ctx, a, nil, fn)
+}
+func (d *Driver) runObserved(ctx context.Context, a database.Access, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) (result error) {
+	trace.start("config")
 	a, rev, err := normalized(a)
 	if err != nil {
 		return err
 	}
+	trace.pass("config")
+	trace.start("dial")
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
 	defer cancel()
 	leave, err := d.admit(ctx)
@@ -269,10 +281,13 @@ func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Con
 		return err
 	}
 	defer leave()
-	c, ctx, release, err := d.checkout(ctx, a, rev)
+	c, ctx, release, err := d.checkout(ctx, a, rev, trace)
 	if err != nil {
 		return err
 	}
+	trace.pass("dial")
+	trace.pass("authentication")
+	trace.start("version")
 	healthy := false
 	discarded := false
 	defer func() {
@@ -302,7 +317,7 @@ func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Con
 	if err != nil {
 		return safeError(err)
 	}
-	version, err := checkRole(ctx, tx, a.Profile.Connection.Username)
+	version, err := checkRoleObserved(ctx, tx, a.Profile.Connection.Username, trace)
 	if err != nil {
 		return err
 	}
@@ -317,18 +332,6 @@ func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Con
 	return nil
 }
 
-// Test checks connection, server identity/version and read-only role readiness.
-func (d *Driver) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
-	var out database.Readiness
-	err := d.run(ctx, a, func(_ context.Context, _ pgx.Tx, v int) error {
-		out = database.Readiness{ServerVersion: v, TLS: a.Profile.Transport.TLS.Mode == "verify-full"}
-		return nil
-	})
-	if err != nil {
-		return database.Readiness{}, err
-	}
-	return out, nil
-}
 func safeError(err error) error {
 	var known *database.Error
 	if errors.As(err, &known) {

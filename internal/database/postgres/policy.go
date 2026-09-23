@@ -32,6 +32,9 @@ SELECT
  AND pg_catalog.has_function_privilege(r.oid,f.oid,'EXECUTE'))`
 
 func checkRole(ctx context.Context, tx pgx.Tx, expected string) (int, error) {
+	return checkRoleObserved(ctx, tx, expected, nil)
+}
+func checkRoleObserved(ctx context.Context, tx pgx.Tx, expected string, trace *diagnosticTrace) (int, error) {
 	var version int
 	var actual, session string
 	var connect bool
@@ -42,6 +45,8 @@ func checkRole(ctx context.Context, tx pgx.Tx, expected string) (int, error) {
 	if version < 160000 {
 		return 0, database.Fail(contracts.QueryUnsupported, "PostgreSQL 16 or newer is required", false)
 	}
+	trace.pass("version")
+	trace.start("policy")
 	if actual != expected || session != expected || !connect {
 		return 0, database.Fail(contracts.PolicyUnsafe, "authenticated role does not match the configured read-only role", false)
 	}

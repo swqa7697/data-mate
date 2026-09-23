@@ -71,6 +71,9 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, build Build)
 func New(build Build) *cobra.Command { return newCommand(build, nil) }
 
 func newCommand(build Build, keys vault.KeyProvider) *cobra.Command {
+	return commandWithDatabase(build, keys, defaultDatabase)
+}
+func commandWithDatabase(build Build, keys vault.KeyProvider, factory databaseFactory) *cobra.Command {
 	var override string
 	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
@@ -112,10 +115,7 @@ func newCommand(build Build, keys vault.KeyProvider) *cobra.Command {
 		}
 		return &Error{ExitFailure, "SERVICE_UNAVAILABLE: command is not ready"}
 	}
-	db := newDB(&override, keys)
-	for _, name := range []string{"test", "scope"} {
-		db.AddCommand(&cobra.Command{Use: name, Short: "Not ready", Args: cobra.MaximumNArgs(1), RunE: unavailable})
-	}
+	db := newDB(&override, keys, factory)
 	mcp := &cobra.Command{Use: "mcp", Short: "Manage MCP service (not ready)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, name := range []string{"start", "stop", "status", "bridge"} {
 		mcp.AddCommand(&cobra.Command{Use: name, Short: "Not ready", Hidden: name == "bridge", Args: cobra.NoArgs, RunE: unavailable})

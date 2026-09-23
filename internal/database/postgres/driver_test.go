@@ -35,6 +35,7 @@ func TestConnectionBoundary(t *testing.T) {
 		requireCode(t, err, contracts.ResourceLimit)
 		return
 	}
+	diagnosticProtocolAcceptance(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -201,4 +202,150 @@ func TestAdmissionAndCursorLifecycle(t *testing.T) {
 	d2 := driver(t)
 	_, err = d2.decodeCursor(token, c)
 	requireCode(t, err, contracts.StaleCursor)
+}
+
+// Continue the existing synthetic protocol scenario to cover a pre-16 version
+// without adding a third Docker major, and timeout after authentication starts.
+func diagnosticProtocolAcceptance(t *testing.T) {
+	t.Helper()
+	for _, stage := range []string{"authentication", "version"} {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { listener.Close() })
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		done := make(chan error, 1)
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				done <- err
+				return
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			backend := pgproto3.NewBackend(conn, conn)
+			if _, err = backend.ReceiveStartupMessage(); err != nil {
+				done <- err
+				return
+			}
+			if stage == "authentication" {
+				backend.Send(&pgproto3.AuthenticationCleartextPassword{})
+				if err = backend.Flush(); err != nil {
+					done <- err
+					return
+				}
+				_, err = backend.Receive()
+				if err != nil {
+					done <- err
+					return
+				}
+				// The client deadline must close an authentication exchange that stalls.
+				_, err = backend.Receive()
+				if err == nil {
+					done <- errors.New("stalled auth received unexpected message")
+					return
+				}
+				done <- nil
+				return
+			}
+			backend.Send(&pgproto3.AuthenticationOk{})
+			backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "15.0"})
+			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+			if err = backend.Flush(); err != nil {
+				done <- err
+				return
+			}
+			query := ""
+			for {
+				msg, err := backend.Receive()
+				if err != nil {
+					done <- nil
+					return
+				}
+				switch m := msg.(type) {
+				case *pgproto3.Query:
+					if strings.Contains(m.String, "server_version_num") {
+						backend.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{
+							{Name: []byte("version"), DataTypeOID: 23, DataTypeSize: 4},
+							{Name: []byte("current_user"), DataTypeOID: 25, DataTypeSize: -1},
+							{Name: []byte("session_user"), DataTypeOID: 25, DataTypeSize: -1},
+							{Name: []byte("connect"), DataTypeOID: 16, DataTypeSize: 1},
+						}})
+						backend.Send(&pgproto3.DataRow{Values: [][]byte{[]byte("150000"), []byte("reader"), []byte("reader"), []byte("t")}})
+						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'T'})
+						break
+					}
+					tag := "BEGIN"
+					status := byte('T')
+					if strings.Contains(strings.ToUpper(m.String), "ROLLBACK") {
+						tag = "ROLLBACK"
+						status = 'I'
+					}
+					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(tag)})
+					backend.Send(&pgproto3.ReadyForQuery{TxStatus: status})
+				case *pgproto3.Parse:
+					query = m.Query
+					backend.Send(&pgproto3.ParseComplete{})
+				case *pgproto3.Bind:
+					backend.Send(&pgproto3.BindComplete{})
+				case *pgproto3.Describe:
+					if strings.Contains(query, "server_version_num") {
+						fields := []pgproto3.FieldDescription{}
+						for i, name := range []string{"version", "current_user", "session_user", "connect"} {
+							fields = append(fields, pgproto3.FieldDescription{Name: []byte(name), DataTypeOID: []uint32{23, 25, 25, 16}[i], DataTypeSize: -1})
+						}
+						backend.Send(&pgproto3.RowDescription{Fields: fields})
+					} else {
+						backend.Send(&pgproto3.NoData{})
+					}
+				case *pgproto3.Execute:
+					if strings.Contains(query, "server_version_num") {
+						backend.Send(&pgproto3.DataRow{Values: [][]byte{[]byte("150000"), []byte("reader"), []byte("reader"), []byte("t")}})
+					}
+					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+				case *pgproto3.Sync:
+					backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'T'})
+				case *pgproto3.Terminate:
+					done <- nil
+					return
+				}
+				if err = backend.Flush(); err != nil {
+					done <- err
+					return
+				}
+			}
+		}()
+		p := profile()
+		p.Connection.Host = "127.0.0.1"
+		p.Connection.Port = listener.Addr().(*net.TCPAddr).Port
+		limits := config.DefaultLimits()
+		limits.QueryTimeoutMS = 150
+		if stage == "version" {
+			limits.QueryTimeoutMS = 1000
+		}
+		p.Limits = &limits
+		d := driver(t)
+		ready, err := d.Test(ctx, database.NewAccess(p, "synthetic-diagnostic-password"))
+		if stage == "version" {
+			requireCode(t, err, contracts.QueryUnsupported)
+		} else {
+			requireCode(t, err, contracts.QueryTimeout)
+		}
+		if ready.Stage != stage {
+			t.Fatalf("expected %s, got %s: %v", stage, ready.Stage, err)
+		}
+		d.Close()
+		listener.Close()
+		cancel()
+		select {
+		case err = <-done:
+			if err != nil {
+				t.Fatal("protocol fixture", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("protocol fixture cleanup stalled")
+		}
+	}
 }

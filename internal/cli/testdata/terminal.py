@@ -11,7 +11,7 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
-for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel"):
+for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "scope-mixed", "scope-no", "scope-cancel", "scope-fail"):
     root = os.path.join(base, mode)
     os.mkdir(root, 0o700)
     master, slave = pty.openpty()
@@ -42,7 +42,28 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         os.write(master, answer.encode())
 
     try:
-        if mode.startswith("enroll"):
+        if mode.startswith("scope"):
+            if mode != "scope-fail":
+                send_after("Scope selection:", "0")
+                if mode == "scope-mixed":
+                    send_after('Mode: selected', 'n')
+                    send_after('schema0050', ' \x1b[B\x1b[C')
+                    send_after('Level: "schema0051"', 'n')
+                    send_after('table0050', ' \x1b[D/')
+                    send_after('Search (blank clears):', 'Dot\r')
+                    send_after('Level: ""  Search: "Dot"', '\x1b[C')
+                    send_after('Level: "Dot.Schema"', ' \r')
+                    send_after('Save changes? [y/N]:', 'y\r')
+                    for selection in ('a', '0'):
+                        send_after('Connection number or alias:', '1\r')
+                        send_after('Scope selection:', selection + '\r')
+                        send_after('Save changes? [y/N]:', 'y\r')
+                elif mode == "scope-no":
+                    send_after('Mode: selected', '\r')
+                    send_after('Save changes? [y/N]:', '\r')
+                else:
+                    send_after('Mode: selected', '\x03')
+        elif mode.startswith("enroll"):
             send_after("SSH password:", "synthetic\r")
             send_after("Trust this SSH fingerprint? [y/N]:", "\r" if mode == "enroll-no" else "y\r")
             if mode != "enroll-no":
@@ -54,7 +75,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith("enroll"):
+        if mode.startswith(("enroll", "scope")):
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -96,11 +117,15 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode in ("happy", "enroll") else 130), (mode, code, transcript)
+        assert code == (0 if mode in ("happy", "enroll", "scope-mixed") else 1 if mode == "scope-fail" else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
         assert b"\x1b[36m" not in transcript, "NO_COLOR ignored"
-        if mode == "enroll":
+        if mode.startswith("scope"):
+            with open(os.path.join(root, "config/connections.json")) as stream:
+                scope = json.load(stream)["connections"][0]["scope"]
+                assert scope == ({"mode": "selected"} if mode == "scope-mixed" else {"mode": "all"}), scope
+        elif mode == "enroll":
             with open(os.path.join(root, "config/known_hosts")) as stream:
                 assert 'ssh-ed25519' in stream.read(), "confirmed key missing"
             assert b'SHA256:' in transcript, "fingerprint not shown"

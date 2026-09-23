@@ -148,6 +148,11 @@ var basicAdd = []string{"add", "--alias", "analytics", "--host", "localhost", "-
 // No pre-P2 scenario exercised command-to-vault transactions. This scenario owns
 // scripted CRUD, preservation, repair and durable partial outcomes end to end.
 func TestConnectionCRUD(t *testing.T) {
+	if root := os.Getenv("DATA_MATE_SCOPE_LEASE"); root != "" {
+		scopeLeaseChild(t, root)
+		return
+	}
+	scopeLeaseAcceptance(t)
 	root := privateRoot(t)
 	keys := &testKeys{}
 	password := " synthetic-db-secret "
@@ -201,6 +206,37 @@ func TestConnectionCRUD(t *testing.T) {
 	if p.Connections[0].CredentialRef != "" || p.Connections[0].Transport.SSH != nil {
 		t.Fatal("clearing final secrets retained reference")
 	}
+	// P7 scope replacement is nonsecret and requires neither network nor vault.
+	beforeScope := snapshot(t, root).Connections[0]
+	calls = keys.calls
+	keys.denied = true
+	for _, args := range [][]string{
+		{"--all"}, {"--none"}, {"--schema", "public", "--table", "other.Exact"},
+		{"--scope-json", `{"mode":"selected","tables":[{"schema":"a.b","name":"c.d"}]}`},
+	} {
+		command(t, root, keys, "", 0, append([]string{"scope", "renamed", "--yes"}, args...)...)
+	}
+	afterScope := snapshot(t, root).Connections[0]
+	if !afterScope.Scope.ContainsName("a.b", "c.d") || afterScope.Scope.ContainsName("public", "future") || keys.calls != calls {
+		t.Fatal("scope replacement used credentials or lost exact names")
+	}
+	afterScope.Scope = beforeScope.Scope
+	if !reflect.DeepEqual(afterScope, beforeScope) {
+		t.Fatal("scope modified unrelated profile fields")
+	}
+	before = files(t, root)
+	for _, args := range [][]string{
+		{"scope", "renamed", "--yes"}, {"scope", "renamed", "--none"},
+		{"scope", "renamed", "--all", "--none", "--yes"},
+		{"scope", "renamed", "--table", "a.b.c", "--yes"},
+		{"scope", "--all", "--yes"},
+	} {
+		command(t, root, keys, "", 2, args...)
+	}
+	if !reflect.DeepEqual(before, files(t, root)) {
+		t.Fatal("invalid scope changed state")
+	}
+	keys.denied = false
 	// Missing manual bundles are reported and repaired without activation records.
 	manual := privateRoot(t)
 	keys = &testKeys{}
@@ -307,7 +343,7 @@ func TestConnectionInputs(t *testing.T) {
 	cmd := newCommand(Build{}, keys)
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--root", root, "db", "edit", "analytics", "--alias", "stale", "--yes"})
+	cmd.SetArgs([]string{"--root", root, "db", "scope", "analytics", "--none", "--yes"})
 	changedOnce := false
 	cmd.SetErr(writerFunc(func(b []byte) (int, error) {
 		if !changedOnce {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/testsupport/transportfixture"
 )
 
@@ -23,8 +24,13 @@ func TestConnectionTerminal(t *testing.T) {
 		keys := &testKeys{}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
+		fixture := &fixtureDatabase{browseError: mode == "scope-fail"}
+		factory := databaseFactory(defaultDatabase)
+		if strings.HasPrefix(mode, "scope") {
+			factory = func() (cliDatabase, error) { return fixture, nil }
+		}
 		run := func(args ...string) int {
-			cmd := newCommand(Build{}, keys)
+			cmd := commandWithDatabase(Build{}, keys, factory)
 			cmd.SetArgs(append([]string{"--root", root, "db"}, args...))
 			cmd.SetIn(os.Stdin)
 			cmd.SetOut(os.Stdout)
@@ -34,6 +40,32 @@ func TestConnectionTerminal(t *testing.T) {
 				fmt.Fprintln(os.Stderr, err)
 			}
 			return ExitCode(err)
+		}
+		if strings.HasPrefix(mode, "scope") {
+			if code := run(append(basicAdd, "--passwordless")...); code != 0 {
+				os.Exit(code)
+			}
+			before := files(t, root)
+			code := run("scope", "analytics")
+			if mode == "scope-mixed" {
+				p := snapshot(t, root).Connections[0]
+				want := config.Scope{Mode: "selected", Schemas: []string{"schema0050"}, Tables: []config.Table{{Schema: "Dot.Schema", Name: "a.b"}, {Schema: "schema0051", Name: "table0050"}}}
+				if code != 0 || !reflect.DeepEqual(p.Scope, want) || len(fixture.requests) != 7 || !fixture.closed {
+					t.Fatalf("lazy mixed picker: %+v requests=%+v code=%d", p.Scope, fixture.requests, code)
+				}
+				for _, selection := range []string{"all", "none"} {
+					if code = run("scope"); code != 0 {
+						os.Exit(code)
+					}
+					scope := snapshot(t, root).Connections[0].Scope
+					if (selection == "all") != scope.ContainsName("future", "new") {
+						t.Fatal("interactive all/none failed")
+					}
+				}
+			} else if !reflect.DeepEqual(before, files(t, root)) {
+				t.Fatal("failed/canceled picker modified state")
+			}
+			os.Exit(code)
 		}
 		if strings.HasPrefix(mode, "enroll") {
 			peer := transportfixture.New(t, "ssh", transportfixture.Options{User: "fixture", Password: "synthetic"})
@@ -82,7 +114,7 @@ func TestConnectionTerminal(t *testing.T) {
 		}
 		os.Exit(run("ls", "--json"))
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/usr/bin/python3", "testdata/terminal.py", os.Args[0], t.TempDir())
 	cmd.WaitDelay = time.Second

@@ -22,7 +22,7 @@ func profileFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	for _, flag := range []struct{ name, value, help string }{
 		{"driver", "postgres", "Database driver"}, {"alias", "", "Connection alias"}, {"host", "", "Database host"}, {"database", "", "Database name"}, {"username", "", "Database username"},
-		{"tls-ca", "", "Absolute CA certificate path"}, {"ssh-host", "", "SSH jump host"}, {"ssh-user", "", "SSH username"}, {"ssh-key-file", "", "Import private key into the vault"}, {"proxy", "", "SOCKS5 endpoint without credentials"}, {"proxy-user", "", "Proxy username"}, {"scope-json", "", "Exact nonsecret scope JSON"},
+		{"tls-ca", "", "Absolute CA certificate path"}, {"ssh-host", "", "SSH jump host"}, {"ssh-user", "", "SSH username"}, {"ssh-key-file", "", "Import private key into the vault"}, {"proxy", "", "SOCKS5 endpoint without credentials"}, {"proxy-user", "", "Proxy username"},
 	} {
 		f.String(flag.name, flag.value, flag.help)
 	}
@@ -35,14 +35,21 @@ func profileFlags(cmd *cobra.Command) {
 	for _, flag := range []struct{ name, help string }{
 		{"tls", "Enable verified TLS"}, {"password-stdin", "Read one password line from stdin"}, {"credentials-stdin", "Read strict credential JSON from stdin"}, {"passwordless", "Explicitly use no database password"},
 		{"clear-password", "Clear the database password"}, {"clear-ssh-password", "Clear the SSH password"}, {"clear-ssh-key-passphrase", "Clear the SSH key passphrase"}, {"clear-proxy-password", "Clear the proxy password"},
-		{"clear-ssh", "Remove SSH settings and secrets"}, {"clear-proxy", "Remove proxy settings and secrets"}, {"all", "Expose all accessible tables"}, {"none", "Expose no tables"},
+		{"clear-ssh", "Remove SSH settings and secrets"}, {"clear-proxy", "Remove proxy settings and secrets"},
 	} {
 		f.Bool(flag.name, false, flag.help)
 	}
-	f.StringArray("schema", nil, "Exact schema selection (repeatable)")
-	f.StringArray("table", nil, "Exact schema.table selection (repeatable)")
 	cmd.MarkFlagsMutuallyExclusive("password-stdin", "credentials-stdin")
 	cmd.MarkFlagsMutuallyExclusive("password-stdin", "passwordless", "clear-password")
+	scopeFlags(cmd)
+}
+func scopeFlags(cmd *cobra.Command) {
+	f := cmd.Flags()
+	f.Bool("all", false, "Expose all accessible tables")
+	f.Bool("none", false, "Expose no tables")
+	f.String("scope-json", "", "Exact nonsecret scope JSON")
+	f.StringArray("schema", nil, "All current and future tables in an exact schema (repeatable)")
+	f.StringArray("table", nil, "Exact schema.table selection (repeatable)")
 	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "schema")
 	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "table")
 }
@@ -148,6 +155,9 @@ func applyOptions(cmd *cobra.Command, p *config.Profile) error {
 	if changed(cmd, "max-result-bytes") {
 		p.Limits.MaxResultBytes = integer(cmd, "max-result-bytes")
 	}
+	return applyScope(cmd, p)
+}
+func applyScope(cmd *cobra.Command, p *config.Profile) error {
 	if flag(cmd, "all") || flag(cmd, "none") || changed(cmd, "scope-json", "schema", "table") {
 		p.Scope = config.Scope{Mode: "selected"}
 		if flag(cmd, "all") {

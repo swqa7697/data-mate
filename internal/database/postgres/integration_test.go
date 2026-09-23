@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,6 +136,14 @@ func TestPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ready.Stage != "policy" || len(ready.Stages) != 5 {
+		t.Fatalf("readiness stages: %+v", ready)
+	}
+	for _, stage := range ready.Stages {
+		if !stage.OK {
+			t.Fatal("successful readiness has failed stage")
+		}
+	}
 	t.Logf("server_version_num=%d image=%s", ready.ServerVersion, fixture.Image)
 	wantMajor := 16
 	if fixture.Image == "postgres:18" {
@@ -156,10 +165,16 @@ func TestPostgresIntegration(t *testing.T) {
 		} else {
 			bad.Transport.TLS.CAFile = filepath.Join(fixture.Root, "bad.crt")
 		}
-		_, err = d.Test(t.Context(), database.NewAccess(bad, password))
+		ready, err = d.Test(t.Context(), database.NewAccess(bad, password))
+		if ready.Stage != "dial" {
+			t.Fatalf("TLS failed at %s", ready.Stage)
+		}
 		requireCode(t, err, contracts.ConnectFailed)
 	}
-	_, err = d.Test(t.Context(), database.NewAccess(p, "synthetic-wrong-password"))
+	ready, err = d.Test(t.Context(), database.NewAccess(p, "synthetic-wrong-password"))
+	if ready.Stage != "authentication" {
+		t.Fatalf("bad password failed at %s", ready.Stage)
+	}
 	requireCode(t, err, contracts.ConnectFailed)
 	if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "synthetic-wrong-password") {
 		t.Fatal("credential in error")
@@ -267,6 +282,20 @@ func TestPostgresIntegration(t *testing.T) {
 	if err != nil || len(page.Tables) != 0 {
 		t.Fatal("empty scope", err)
 	}
+	// User browsing ignores saved scope but retains role visibility and relation
+	// support. Agents still see none through ListTables above.
+	browse, err := d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{})
+	if err != nil || !slices.Contains(browse.Schemas, "Dot.Schema") || !slices.Contains(browse.Schemas, "hidden") {
+		t.Fatalf("full user catalog: %+v %v", browse, err)
+	}
+	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Schema: "Dot.Schema", Search: "a.b"})
+	if err != nil || len(browse.Tables) != 1 || browse.Tables[0].Name != "a.b" {
+		t.Fatalf("exact catalog identifiers: %+v %v", browse, err)
+	}
+	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Schema: "app", Search: "%"})
+	if err != nil || len(browse.Tables) != 0 {
+		t.Fatal("search interpreted wildcard", err)
+	}
 	for _, r := range []database.PageRequest{{Cursor: firstCursor + "x"}, {Cursor: firstCursor, Schema: "app"}} {
 		_, err = d.ListTables(t.Context(), access, r)
 		requireCode(t, err, contracts.StaleCursor)
@@ -294,6 +323,8 @@ func TestPostgresIntegration(t *testing.T) {
 	if err = admin.QueryRow(t.Context(), "SELECT n FROM hidden.audit").Scan(&count); err != nil || count != 0 {
 		t.Fatal("metadata/test executed application RLS or rows")
 	}
+	scopeAcceptance(t, d, access, password, sql)
+	cliDiagnosticsAcceptance(t, fixture.Root)
 	compilerAcceptance(t, d, access, sql)
 	catalogCompatibilityAcceptance(t, d, access, admin)
 	executorAcceptance(t, d, access, admin, sql)

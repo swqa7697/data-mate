@@ -318,6 +318,11 @@ func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Acc
 	}
 	_, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"})
 	requireCode(t, err, contracts.QueryUnsupported)
+	ready, diagnosticErr := d.Test(t.Context(), access)
+	requireCode(t, diagnosticErr, contracts.QueryUnsupported)
+	if ready.Stage != "policy" {
+		t.Fatal("unsafe semantic catalog reported ready")
+	}
 	restoreFunction()
 	if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 		t.Fatal("restored definition rejected", err)

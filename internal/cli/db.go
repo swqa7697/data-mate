@@ -20,10 +20,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func newDB(override *string, keys vault.KeyProvider) *cobra.Command {
+func newDB(override *string, keys vault.KeyProvider, factory databaseFactory) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, action := range []string{"add", "edit", "remove", "list"} {
-		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections"}[action], Args: cobra.MaximumNArgs(1)}
+	for _, action := range []string{"add", "edit", "remove", "list", "scope"} {
+		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose visible schemas and tables"}[action], Args: cobra.MaximumNArgs(1)}
 		if action == "add" || action == "list" {
 			cmd.Args = cobra.NoArgs
 		}
@@ -39,13 +39,19 @@ func newDB(override *string, keys vault.KeyProvider) *cobra.Command {
 		if action == "add" || action == "edit" {
 			profileFlags(cmd)
 		}
-		cmd.RunE = func(cmd *cobra.Command, args []string) error { return runDB(cmd, args, action, *override, keys) }
+		if action == "scope" {
+			scopeFlags(cmd)
+		}
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			return runDB(cmd, args, action, *override, keys, factory)
+		}
 		db.AddCommand(cmd)
 	}
+	db.AddCommand(newDBTest(override, keys, factory))
 	return db
 }
 
-func runDB(cmd *cobra.Command, args []string, action, override string, keys vault.KeyProvider) (result error) {
+func runDB(cmd *cobra.Command, args []string, action, override string, keys vault.KeyProvider, factory databaseFactory) (result error) {
 	ctx := cmd.Context()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -145,7 +151,19 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 		original = profile
 	}
 	if action != "remove" {
-		profile, patch, err = collectProfile(cmd, action, profile, original, getForm)
+		if action == "scope" {
+			err = applyScope(cmd, &profile)
+			if err == nil && !scopeSelected(cmd) {
+				if flag(cmd, "yes") {
+					return invalid("scope selection flags are required with --yes")
+				}
+				if _, err = getForm(); err == nil {
+					profile.Scope, err = selectScope(cmd, root, revision, profile, keys, ui, factory)
+				}
+			}
+		} else {
+			profile, patch, err = collectProfile(cmd, action, profile, original, getForm)
+		}
 		if err != nil {
 			return err
 		}
@@ -228,6 +246,24 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 		return storageError(err, false)
 	}
 	defer store.Close()
+	if action == "scope" {
+		lease, e := store.WriteLease(ctx)
+		if e != nil {
+			return storageError(e, false)
+		}
+		defer lease.Release()
+		if _, e = lease.SaveProfiles(profiles, revision); e != nil {
+			if errors.Is(e, config.ErrRevision) || errors.Is(e, context.Canceled) {
+				return storageError(e, false)
+			}
+			return failure("scope publication could not be confirmed; run db list before retrying")
+		}
+		lease.Release()
+		if _, e = fmt.Fprintln(cmd.OutOrStdout(), "Connection scope completed."); e != nil {
+			return failure("scope saved; cannot write output")
+		}
+		return nil
+	}
 	if keys == nil {
 		keys = vault.Keychain{Interactive: hasTerminal(cmd)}
 	}

@@ -56,6 +56,23 @@ func profileLease(t *testing.T, s *Store, write bool) *Lease {
 // Parsing/root-resolution regressions cannot exercise durable files or leases.
 // This scenario owns the filesystem safety and fresh-snapshot failure contracts.
 func TestOwnedStorage(t *testing.T) {
+	empty := t.TempDir()
+	if err := os.Chmod(empty, 0700); err != nil {
+		t.Fatal(err)
+	}
+	uninitialized, err := ResolveRoot(empty, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened, err := OpenExisting(t.Context(), uninitialized); err == nil {
+		opened.Close()
+		t.Fatal("inspection initialized state")
+	}
+	entries, err := os.ReadDir(empty)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("inspection created artifacts")
+	}
+
 	s, root := storageFixture(t)
 	l := profileLease(t, s, true)
 	p, rev, err := l.ProfileSnapshot()
@@ -74,6 +91,20 @@ func TestOwnedStorage(t *testing.T) {
 		t.Fatal("stale preview changed profiles", err)
 	}
 	l.Release()
+	readOnly, err := OpenExisting(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readLease, err := readOnly.ReadLease(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, observed, err := readLease.ProfileSnapshot()
+	readLease.Release()
+	readOnly.Close()
+	if err != nil || observed != next {
+		t.Fatal("existing-only snapshot", err)
+	}
 	// P6 extends the exact owned inventory. A pre-P6 installation upgrades under
 	// the lifecycle lock without replacing its identity or credential namespace.
 	legacy := s.identity

@@ -90,6 +90,12 @@ func connectionConfig(a database.Access) (*pgx.ConnConfig, error) {
 	return c, nil
 }
 
+// ValidateProfile checks driver-specific nonsecret settings before vault access.
+func (d *Driver) ValidateProfile(p config.Profile) error {
+	_, _, err := normalized(database.NewAccess(p, ""))
+	return err
+}
+
 // Validate checks the profile and explicit transport without dialing.
 func (d *Driver) Validate(a database.Access) error {
 	a, _, err := normalized(a)

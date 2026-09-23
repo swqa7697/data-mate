@@ -64,12 +64,78 @@
               "retryable"
             ],
             "additionalProperties": false
+          },
+          "stages": {
+            "type": "array",
+            "maxItems": 7,
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage": {
+                  "enum": [
+                    "config",
+                    "vault",
+                    "dial",
+                    "authentication",
+                    "version",
+                    "policy"
+                  ]
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "error": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "CONFIG_INVALID",
+                        "CONNECTION_NOT_FOUND",
+                        "CREDENTIAL_MISSING",
+                        "VAULT_UNAVAILABLE",
+                        "CONNECT_FAILED",
+                        "SCOPE_DENIED",
+                        "QUERY_UNSUPPORTED",
+                        "QUERY_TIMEOUT",
+                        "RESOURCE_LIMIT",
+                        "POLICY_UNSAFE",
+                        "STALE_CURSOR",
+                        "INVALID_ARGUMENT",
+                        "SERVICE_UNAVAILABLE",
+                        "CANCELLED"
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\x00]+$"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "stage",
+                "ok"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
           "alias",
           "ok",
-          "stage"
+          "stage",
+          "stages"
         ],
         "additionalProperties": false
       }

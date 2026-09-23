@@ -14,7 +14,7 @@ import (
 // closed" after peeking. Observe only frame lengths (never bodies) so every path
 // can retain RESOURCE_LIMIT classification. pgproto3 still enforces the hard cap.
 // Each observer belongs to one frontend and has bounded, constant memory.
-type wireState struct{ exceeded atomic.Bool }
+type wireState struct{ exceeded, authStarted atomic.Bool }
 
 func (s *wireState) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
 	return ctx
@@ -44,6 +44,9 @@ func (r *frameReader) Read(p []byte) (int, error) {
 		r.used += take
 		b = b[take:]
 		if r.used == 5 {
+			if r.header[0] == 'R' {
+				r.state.authStarted.Store(true)
+			}
 			size := binary.BigEndian.Uint32(r.header[1:])
 			r.used = 0
 			if size < 4 {

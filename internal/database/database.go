@@ -55,6 +55,26 @@ func Fail(code contracts.Code, message string, retry bool) error {
 type Readiness struct {
 	ServerVersion int
 	TLS           bool
+	Stage         string
+	Stages        []Stage
+}
+
+// Stage records one reached diagnostic stage; skipped stages are omitted.
+type Stage struct {
+	Stage string             `json:"stage"`
+	OK    bool               `json:"ok"`
+	Error *contracts.Failure `json:"error,omitempty"`
+}
+
+// ScopeRequest pages the user's full role-accessible catalog, independently of saved scope.
+// An empty Schema requests schemas; otherwise it requests that schema's tables.
+type ScopeRequest struct{ Schema, After, Search string }
+
+// ScopePage retains at most 50 catalog entries. Next is an exact name, not an agent cursor.
+type ScopePage struct {
+	Schemas []string
+	Tables  []Table
+	Next    string
 }
 
 // Table identifies a visible relation and its query support status.

@@ -14,4 +14,6 @@
 - Add a default-deny internal SQL compiler for a finite SELECT subset, including joins, grouping, audited aggregates, CTEs, subqueries, and typed parameters, with PostgreSQL 16/18 catalog verification and parameterized SQL emission. Verify live catalog metadata by semantic identity, ignoring incidental row IDs and numeric planner estimates while preserving implementation and safety checks.
 - Add bounded read-only PostgreSQL query execution to the internal driver, with fresh authorization checks, exact result codecs, row and byte limits, and cancellation cleanup.
 - Add SSH password/imported-key and SOCKS5 routes with optional verified TLS, remote database DNS, bounded cancellation, and interactive `db add/edit --ssh-enroll` fingerprint confirmation with strict host-key pinning.
-- Add opt-in, isolated Docker integration checks for PostgreSQL 16 and 18 through `make test-integration`; CLI `db test`/`db scope`, MCP delivery, and agent registration remain unavailable.
+- Add interactive, searchable `db scope` with lazy catalog pages, exact scripted scope replacement, and confirmation that waits for existing database work to finish.
+- Add staged `db test [alias]` diagnostics with versioned JSON, safe errors, shared read-only policy checks, and continued testing after individual connection failures.
+- Add opt-in, isolated Docker integration checks for PostgreSQL 16 and 18 through `make test-integration`; MCP delivery and agent registration remain unavailable.

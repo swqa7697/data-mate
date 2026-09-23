@@ -89,6 +89,24 @@ Standard flags for basic fields and `--yes` support scripting. A password may be
 
 `db scope` supports arrow-key navigation, Space to toggle selections, Enter to preview, and a final Y/N confirmation. A schema row offers “all current and future tables”; individual table selections form a fixed list. Search and lazy expansion keep large catalogs usable. Scripted equivalents are `--all`, repeated `--schema`, repeated `--table schema.table`, and `--none`. For identifiers containing dots or other ambiguous characters, `--scope-json` accepts the structured scope object from section 7. It is mutually exclusive with the other selection flags.
 
+The picker fetches at most 50 schemas or tables per page, with literal
+case-insensitive search at the current level. Right expands a schema, Left
+returns to schemas, `/` searches, `n` advances and `b` restarts pagination.
+`a` selects all and `0` clears the selection. To narrow all, start with none;
+to narrow a whole schema, deselect that schema before choosing individual tables.
+Only one catalog page is retained; existing selections absent from the current
+page remain intact. Search is bounded to 256 bytes and interactive selections
+to 4096 schemas/tables and half the profile byte budget. No catalog response is a
+query authorization decision.
+
+Each fetch opens a fresh shared state lease, checks the preview revision and
+loads credentials/host pins under that lease. Database cleanup completes before
+the lease is released; human input retains no lease. Final publication uses an
+exclusive lease with revision comparison, without vault access or orphan cleanup.
+Interactive browsing opens existing state without initialization or migration;
+manually written profiles in a fresh root can first use `db test` or a confirmed
+`db edit` to initialize state. Scripted scope replacement needs no catalog access.
+
 Human output uses restrained color, honors `NO_COLOR`, and disables animation outside a TTY. `--json` on list, test, and status produces stable structured output without color. Errors and progress go to stderr. Exit codes are 0 for success, 1 for operational failure, 2 for invalid usage/configuration, and 130 for user cancellation. Testing multiple profiles continues after individual failures and exits nonzero if any fail.
 
 P2 implements add/edit/remove/list. Forms collect the basic fields in the order
@@ -114,7 +132,7 @@ transports. Missing keys or corrupt vault accounting are not silently recreated.
 Add/edit also accept the scope flags without a catalog fetch. Advanced transport
 and limit flags are persisted in P2. P3 implements internal direct/TLS
 connectivity and catalogs; P6 adds SSH/SOCKS5 and interactive host-key enrollment.
-CLI diagnostics/browsing remain P7. `--query-timeout` accepts whole
+P7 implements CLI diagnostics and scope browsing. `--query-timeout` accepts whole
 milliseconds (`1ms`–`30s`); the other limit flags are `--max-rows` and
 `--max-result-bytes`. `--tls=false` disables TLS and clears its CA path, while an
 omitted CA field is preserved when enabling TLS. SSH key source bytes are imported
@@ -416,6 +434,24 @@ relation kinds/types, but cannot authorize application execution. The compiler
 and executor recheck relation identity, grants and hierarchy after locking.
 
 `db test` exercises profile validation, vault access, network/TLS/SSH/proxy setup, authentication, server version, and policy readiness using the same driver. It does not query application rows or change the database. Report each stage separately, continue through all selected profiles, and redact sensitive upstream messages.
+
+P7 diagnostics run sequentially in alias order with a per-profile deadline that
+includes lease acquisition and vault access. Reports contain one result per
+selected profile and an ordered `stages` array of reached config, vault, dial,
+authentication, version and policy checks. The existing terminal `stage` and
+`ok` fields summarize that result; a failed stage includes the shared safe error
+object and later stages are omitted. `dial` includes route and TLS negotiation;
+an observed PostgreSQL authentication exchange distinguishes authentication
+failures. The driver reuses the compiler's semantic catalog verifier for policy
+readiness, but does not compile or execute application SQL. Role or readiness
+success is never a substitute for Query's fresh authorization.
+
+JSON output uses the version-1 `db-test.output` schema. Ordinary per-profile
+failures continue the batch; invalid whole-document configuration and unknown
+aliases fail before output, because no validated selection exists. Cancellation
+stops the command with exit 130. Result output occurs after releasing state
+leases. The first diagnostic of manual profiles may initialize owned state;
+it never creates or repairs credential bundles, keys or database grants.
 
 ## 9. Read-only PostgreSQL execution
 
