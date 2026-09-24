@@ -234,8 +234,8 @@ func executorMemory(t *testing.T, d *Driver, a database.Access) {
 		if i <= 5 && rss > baselineRSS {
 			baselineRSS = rss
 		}
-		// Eight admitted requests, each allowing two wire buffers and two result
-		// representations, define the warmed RSS headroom (48 MiB).
+		// Keep a conservative 48 MiB warmed RSS headroom for this sequential
+		// fixture, independent of the higher concurrent admission ceiling.
 		if i >= 6 && rss > baselineRSS+8*(2*(2<<20)+2*(1<<20)) {
 			t.Fatal("RSS did not plateau")
 		}
@@ -321,9 +321,19 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 			t.Fatal("query after cancellation", err)
 		}
 	}
+	// A real 40-second query used to exceed both the default and maximum timeout.
+	sql(`CREATE OR REPLACE FUNCTION app.slow_policy() RETURNS boolean LANGUAGE plpgsql AS $$BEGIN PERFORM pg_catalog.pg_sleep(40);RETURN true;END$$`)
+	defaultProfile := a.Profile
+	defaultProfile.Limits = nil
+	started := time.Now()
+	out, err := d.Query(t.Context(), database.NewAccess(defaultProfile, a.Password()), database.QueryRequest{SQL: "SELECT * FROM app.slow"})
+	if err != nil || out.RowCount != 1 || out.Truncated {
+		t.Fatalf("40-second query under default budget: rows=%d error=%v", out.RowCount, err)
+	}
+	t.Logf("long-query regression duration=%s (one 40-second operation per PostgreSQL major)", time.Since(started))
 	// Relation lock deadline is independently bounded to one second.
 	sql("BEGIN;LOCK TABLE app.changing IN ACCESS EXCLUSIVE MODE")
-	_, err := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.changing"})
+	_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.changing"})
 	sql("ROLLBACK")
 	requireCode(t, err, contracts.QueryTimeout)
 }

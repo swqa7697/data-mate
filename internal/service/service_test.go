@@ -493,6 +493,47 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	for len(m.active) > 0 {
 		<-m.active
 	}
+	// The old 35-second outer deadline must not shorten either profile budget.
+	// Observe actual propagated contexts instead of waiting for minute-long timers.
+	for _, tc := range []struct {
+		name          string
+		limits        *config.Limits
+		parentTimeout time.Duration
+		want          time.Duration
+	}{
+		{"default", nil, 0, 60 * time.Second},
+		{"maximum", &config.Limits{QueryTimeoutMS: 300000, MaxRows: 500, MaxResultBytes: 1048576}, 0, 5 * time.Minute},
+		{"earlier caller", nil, 10 * time.Second, 10 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profiles.Connections[0].Limits = tc.limits
+			putProfiles(t, s, profiles)
+			parent := t.Context()
+			if tc.parentTimeout != 0 {
+				var cancel context.CancelFunc
+				parent, cancel = context.WithTimeout(parent, tc.parentTimeout)
+				defer cancel()
+			}
+			before := time.Now()
+			err := m.Work(parent, "fixture", func(ctx context.Context, _ database.Driver, _ database.Access) error {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					t.Error("missing operation deadline")
+				} else if tc.parentTimeout != 0 {
+					pd, _ := parent.Deadline()
+					if !deadline.Equal(pd) {
+						t.Error("earlier caller deadline was changed")
+					}
+				} else if deadline.Before(before.Add(tc.want)) || deadline.After(time.Now().Add(tc.want)) {
+					t.Errorf("wrong propagated deadline for %s: %v", tc.name, deadline)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 	cancelled := make(chan struct{})
 	active := make(chan error, 1)
 	go func() {

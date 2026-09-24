@@ -97,7 +97,7 @@ func TestProfiles(t *testing.T) {
 			tr["proxy"] = map[string]any{"kind": "socks5", "host": "h", "port": 1080}
 		},
 		"timeout high": func(c map[string]any) {
-			c["limits"] = map[string]any{"query_timeout_ms": 30001, "max_rows": 500, "max_result_bytes": 1048576}
+			c["limits"] = map[string]any{"query_timeout_ms": 300001, "max_rows": 500, "max_result_bytes": 1048576}
 		},
 	}
 	for name, change := range changes {
@@ -185,8 +185,23 @@ func TestPartialLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *p.Connections[0].Limits != (Limits{10000, 12, 1048576}) {
+	if *p.Connections[0].Limits != (Limits{60000, 12, 1048576}) {
 		t.Fatal("partial defaults")
+	}
+	// Expanded timeout bounds must survive decoding, including explicit short limits.
+	for _, tc := range []struct {
+		timeout int
+		valid   bool
+	}{{1, true}, {60000, true}, {300000, true}, {0, false}} {
+		c["limits"] = map[string]any{"query_timeout_ms": tc.timeout}
+		b, _ = json.Marshal(v)
+		got, _, err := DecodeProfiles(bytes.NewReader(b))
+		if (err == nil) != tc.valid {
+			t.Fatalf("timeout %d: %v", tc.timeout, err)
+		}
+		if tc.valid && got.Connections[0].Limits.QueryTimeoutMS != tc.timeout {
+			t.Fatalf("explicit timeout %d changed", tc.timeout)
+		}
 	}
 	c["limits"] = map[string]any{"max_rows": 0}
 	b, _ = json.Marshal(v)

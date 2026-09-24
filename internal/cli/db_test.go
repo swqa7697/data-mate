@@ -161,6 +161,9 @@ func TestConnectionCRUD(t *testing.T) {
 		t.Fatal("password leaked")
 	}
 	p := snapshot(t, root)
+	if p.Connections[0].Limits.QueryTimeoutMS != 60000 {
+		t.Fatal("new connection did not save the 60-second default")
+	}
 	id := p.Connections[0].ID
 	ref := p.Connections[0].CredentialRef
 	if p.Connections[0].Scope.Mode != "all" || p.Connections[0].Transport.TLS.Mode != "disabled" || credential(t, root, keys, id).Password != password {
@@ -205,6 +208,11 @@ func TestConnectionCRUD(t *testing.T) {
 	p = snapshot(t, root)
 	if p.Connections[0].CredentialRef != "" || p.Connections[0].Transport.SSH != nil {
 		t.Fatal("clearing final secrets retained reference")
+	}
+	// An operator can save the full five-minute budget through the normal edit flow.
+	command(t, root, keys, "", 0, "edit", "renamed", "--query-timeout", "5m", "--yes")
+	if snapshot(t, root).Connections[0].Limits.QueryTimeoutMS != 300000 {
+		t.Fatal("five-minute timeout was not saved")
 	}
 	// P7 scope replacement is nonsecret and requires neither network nor vault.
 	beforeScope := snapshot(t, root).Connections[0]
@@ -303,6 +311,9 @@ func TestConnectionInputs(t *testing.T) {
 		{"CA without TLS", "", []string{"--passwordless", "--tls-ca", "/tmp/ca.pem"}},
 		{"stdin confirmation", "secret-sentinel", []string{"--password-stdin", "--yes=false"}},
 		{"missing confirmation", "", []string{"--passwordless", "--yes=false"}},
+		{"zero timeout", "", []string{"--passwordless", "--query-timeout", "0ms"}},
+		{"timeout above maximum", "", []string{"--passwordless", "--query-timeout", "300001ms"}},
+		{"fractional millisecond timeout", "", []string{"--passwordless", "--query-timeout", "1.5ms"}},
 		{"invalid limit", "", []string{"--passwordless", "--max-rows", "0"}},
 		{"no alias nonTTY", "", []string{"--passwordless", "--alias", ""}},
 	} {

@@ -10,11 +10,19 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/swqa7697/data-mate/internal/contracts"
 )
 
 const MaxProfileBytes = 1 << 20
+
+const (
+	// DefaultQueryTimeout budgets setup, pool waiting, execution and result reading.
+	DefaultQueryTimeout = 60 * time.Second
+	// MaxQueryTimeout is the largest timeout accepted for a profile.
+	MaxQueryTimeout = 5 * time.Minute
+)
 
 // Profiles is the versioned connections file.
 type Profiles struct {
@@ -91,7 +99,7 @@ func (l *Limits) UnmarshalJSON(b []byte) error {
 }
 
 // DefaultLimits returns independent default settings.
-func DefaultLimits() Limits { return Limits{10000, 500, 1048576} }
+func DefaultLimits() Limits { return Limits{int(DefaultQueryTimeout / time.Millisecond), 500, 1048576} }
 
 // Table is an exact, case-sensitive name, not a glob.
 type Table struct {

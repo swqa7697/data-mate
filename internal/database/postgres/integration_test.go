@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -295,24 +294,71 @@ func TestPostgresIntegration(t *testing.T) {
 	queryAcceptance(t, d, access, sql)
 	executorAcceptance(t, d, access, admin, sql)
 	transportAcceptance(t, p, password, fixture.Root, admin)
-	// Independent concurrent requests share at most two connections per profile.
-	var wg sync.WaitGroup
-	for range 12 {
-		wg.Go(func() {
-			if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT id FROM app.items"}); err != nil {
-				t.Error(err)
-			}
-		})
+	// Observe eight executing queries before admitting a ninth: the old two-slot
+	// pool cannot reach this barrier. The ninth must wait and recover after release.
+	sleepers, stopSleepers := context.WithCancel(t.Context())
+	defer stopSleepers()
+	sleepersFinished := make(chan error, 8)
+	for range 8 {
+		go func() {
+			_, err := d.Query(sleepers, access, database.QueryRequest{SQL: "SELECT 1 FROM pg_catalog.pg_sleep(40)"})
+			sleepersFinished <- err
+		}()
 	}
-	wg.Wait()
+	observation, stopObservation := context.WithTimeout(t.Context(), 10*time.Second)
+	defer stopObservation()
+	for {
+		var active int
+		err := admin.QueryRow(observation, "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename='reader' AND wait_event='PgSleep'").Scan(&active)
+		if err != nil {
+			t.Fatal("eight queries did not execute concurrently", err)
+		}
+		if active == 8 {
+			break
+		}
+		runtime.Gosched()
+	}
+	ninth := make(chan error, 1)
+	go func() {
+		_, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT id FROM app.items"})
+		ninth <- err
+	}()
+	for {
+		d.mu.Lock()
+		pool := d.pools[p.ID]
+		queued := pool != nil && pool.users == 9 && len(pool.slots) == 8
+		d.mu.Unlock()
+		if queued {
+			break
+		}
+		select {
+		case err := <-ninth:
+			t.Fatalf("ninth query did not wait: %v", err)
+		case <-observation.Done():
+			t.Fatal("ninth query did not reach pool")
+		default:
+			runtime.Gosched()
+		}
+	}
+	stopSleepers()
+	for range 8 {
+		requireCode(t, <-sleepersFinished, contracts.Cancelled)
+	}
+	if err := <-ninth; err != nil {
+		t.Fatal("queued query did not recover", err)
+	}
+	// Successful work leaves a reusable connection and no outstanding pool users.
+	if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
+		t.Fatal("pool reuse after saturation", err)
+	}
 	d.mu.Lock()
 	pool := d.pools[p.ID]
-	connections := len(pool.idle)
-	users := pool.users
+	connections, users := len(pool.idle), pool.users
 	d.mu.Unlock()
-	if connections > 2 || users != 0 {
+	if connections == 0 || connections > 8 || users != 0 {
 		t.Fatal("pool leak")
 	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	_, err = d.Test(ctx, access)

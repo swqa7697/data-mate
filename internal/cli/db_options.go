@@ -29,7 +29,7 @@ func profileFlags(cmd *cobra.Command) {
 	f.Int("port", 5432, "Database port")
 	f.Int("ssh-port", 22, "SSH port")
 	f.Bool("ssh-enroll", false, "Interactively verify and save an SSH host fingerprint")
-	f.Duration("query-timeout", 10*time.Second, "Query timeout (1ms to 30s)")
+	f.Duration("query-timeout", config.DefaultQueryTimeout, "Query timeout (1ms to 5m)")
 	f.Int("max-rows", 500, "Maximum rows")
 	f.Int("max-result-bytes", 1048576, "Maximum result bytes")
 	for _, flag := range []struct{ name, help string }{
@@ -144,8 +144,8 @@ func applyOptions(cmd *cobra.Command, p *config.Profile) error {
 	}
 	if changed(cmd, "query-timeout") {
 		d, _ := cmd.Flags().GetDuration("query-timeout")
-		if d < time.Millisecond || d > 30*time.Second || d%time.Millisecond != 0 {
-			return invalid("query timeout must be whole milliseconds from 1ms to 30s")
+		if d < time.Millisecond || d > config.MaxQueryTimeout || d%time.Millisecond != 0 {
+			return invalid("query timeout must be whole milliseconds from 1ms to 5m")
 		}
 		p.Limits.QueryTimeoutMS = int(d / time.Millisecond)
 	}

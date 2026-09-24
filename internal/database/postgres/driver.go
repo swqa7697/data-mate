@@ -26,6 +26,8 @@ import (
 
 const idleTTL = 5 * time.Minute
 
+const maxConnectionsPerProfile = 8
+
 type pool struct {
 	fingerprint string
 	slots       chan struct{}
@@ -36,7 +38,7 @@ type pool struct {
 	timer       *time.Timer
 }
 
-// Driver owns process-local admission, lazy two-connection pools and cursor keys.
+// Driver owns process-local admission, lazy eight-connection pools and cursor keys.
 // A service should share one Driver across profiles. No request result is cached.
 type Driver struct {
 	mu      sync.Mutex
@@ -52,7 +54,7 @@ var _ database.Driver = (*Driver)(nil)
 
 // New creates an idle driver without contacting any database.
 func New() (*Driver, error) {
-	d := &Driver{pools: make(map[string]*pool), active: make(chan struct{}, 8), waiting: make(chan struct{}, 32)}
+	d := &Driver{pools: make(map[string]*pool), active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations)}
 	if _, err := rand.Read(d.key[:]); err != nil {
 		return nil, err
 	}
@@ -73,7 +75,7 @@ func (d *Driver) admit(ctx context.Context) (func(), error) {
 		return nil, database.Fail(contracts.ResourceLimit, "database queue is full", true)
 	}
 	defer func() { <-d.waiting }()
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(database.AdmissionTimeout)
 	defer timer.Stop()
 	select {
 	case d.active <- struct{}{}:
@@ -174,7 +176,7 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 			return nil, nil, nil, database.Fail(contracts.ResourceLimit, "database pool limit reached", true)
 		}
 		pc, cancel := context.WithCancel(context.Background())
-		p = &pool{fingerprint: fp, slots: make(chan struct{}, 2), ctx: pc, cancel: cancel}
+		p = &pool{fingerprint: fp, slots: make(chan struct{}, maxConnectionsPerProfile), ctx: pc, cancel: cancel}
 		d.pools[id] = p
 	}
 	p.users++

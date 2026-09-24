@@ -16,6 +16,8 @@ import (
 	"github.com/swqa7697/data-mate/internal/contracts"
 )
 
+const maxConcurrentRequests = 16
+
 const inboundLimit = 256 << 10
 const outboundLimit = 2 << 20
 
@@ -41,7 +43,7 @@ func Serve(parent context.Context, socket net.Conn, backend Backend, version str
 	return session.Wait()
 }
 
-// guard admits requests before the SDK creates handlers. At most four calls,
+// guard admits requests before the SDK creates handlers. At most sixteen calls,
 // including control requests, retain memory/output. Excess work closes the peer;
 // notifications cannot create an unbounded handler queue.
 type guard struct {
@@ -139,7 +141,7 @@ func (g *guard) Read(ctx context.Context) (jsonrpc.Message, error) {
 			}
 		} else {
 			_, duplicate := g.pending[req.ID]
-			valid = !duplicate && len(g.pending) < 4
+			valid = !duplicate && len(g.pending) < maxConcurrentRequests
 			if req.Method == "initialize" {
 				valid = valid && !g.initSent && len(g.pending) == 0
 			} else {

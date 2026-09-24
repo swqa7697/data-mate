@@ -187,23 +187,23 @@ func TestMCPSessions(t *testing.T) {
 	awaitSignal(t, d.entered)
 	wire.Close()
 	awaitSignal(t, d.exited)
-	// Four accepted calls consume the session; the fifth closes it promptly.
+	// Sixteen accepted calls consume the session; the seventeenth closes it promptly.
 	saturated, _ := sessionClient(t, c)
 	var wg sync.WaitGroup
-	for range 4 {
+	for range 16 {
 		wg.Go(func() {
 			_, _ = saturated.CallTool(t.Context(), &sdk.CallToolParams{Name: "query", Arguments: map[string]any{"connection": "fixture", "sql": "wait"}})
 		})
 	}
-	for range 4 {
+	for range 16 {
 		awaitSignal(t, d.entered)
 	}
 	_, err = saturated.CallTool(t.Context(), &sdk.CallToolParams{Name: "list_connections", Arguments: map[string]any{}})
 	if err == nil {
-		t.Fatal("fifth call admitted")
+		t.Fatal("seventeenth call admitted")
 	}
 	wg.Wait()
-	for range 4 {
+	for range 16 {
 		awaitSignal(t, d.exited)
 	}
 	callTool(t, b, "list_connections", map[string]any{})

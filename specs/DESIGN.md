@@ -110,7 +110,7 @@ Both modes require `--yes`; each secret is limited to 128 KiB. Secrets are never
 
 Omitted edit secrets remain unchanged. `--clear-password`, `--clear-ssh-password`, `--clear-ssh-key-passphrase`, and `--clear-proxy-password` clear individual secrets. `--clear-ssh` and `--clear-proxy` clear both transport settings and their secrets. SSH key files are imported once into the encrypted bundle; their source files remain untouched. A missing bundle can be repaired by explicitly supplying credentials for all configured transports. Missing keys or corrupt vault accounting are never silently recreated.
 
-Advanced options include `--tls`, `--tls-ca`, `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`, `--ssh-enroll`, `--proxy`, and `--proxy-user`. TLS, SSH, and SOCKS5 are off by default. `--tls=false` clears the CA path; enabling TLS preserves an omitted existing CA field. Transport rules are specified in section 8. Limits use `--query-timeout` in whole milliseconds from `1ms` to `30s`, `--max-rows`, and `--max-result-bytes`.
+Advanced options include `--tls`, `--tls-ca`, `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`, `--ssh-enroll`, `--proxy`, and `--proxy-user`. TLS, SSH, and SOCKS5 are off by default. `--tls=false` clears the CA path; enabling TLS preserves an omitted existing CA field. Transport rules are specified in section 8. Limits use `--query-timeout` in whole milliseconds from `1ms` to `5m`, `--max-rows`, and `--max-result-bytes`.
 
 A durably removed profile whose credential cleanup fails produces exit 1 and a partial-outcome diagnostic. Later confirmed profile mutations retry orphan reconciliation.
 
@@ -239,7 +239,7 @@ Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-
 
 | Optional limit     | Default | Accepted range |
 | ------------------ | ------- | -------------- |
-| `query_timeout_ms` | 10000   | 1–30000        |
+| `query_timeout_ms` | 60000   | 1–300000        |
 | `max_rows`         | 500     | 1–5000         |
 | `max_result_bytes` | 1048576 | 1024–1048576   |
 
@@ -343,7 +343,14 @@ Each database connection owns its SSH TCP connection and forwarding channel, or 
 
 ### 8.2 Pools, admission, and cleanup
 
-One shared PostgreSQL driver owns lazy pools with no initial idle connections, at most two connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows eight active operations, 32 waiters, and a five-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Service database work has a 35-second outer deadline and then the profile timeout; connection listing has a five-second deadline.
+One shared PostgreSQL driver owns lazy pools with no initial idle connections, at most eight connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows 32 active operations, 128 waiters, and a 60-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Service database work has a 365-second outer deadline and then the profile timeout; connection listing has a five-second deadline. The outer deadline is the maximum
+profile timeout plus the admission allowance and five seconds of overhead. The
+profile budget starts after service admission and profile resolution and includes
+credentials, driver admission, pool waiting, connection setup, execution and
+result reading. Nested contexts never extend it, and earlier caller deadlines
+win. Sixteen pools of eight connections permit at most 128 pooled connections;
+only 32 operations are admitted at once. PostgreSQL statement timeout uses the
+profile budget, while lock timeout remains one second.
 
 Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache connections, never authorization. PostgreSQL statement and description caches are disabled. Successful operations roll back and run `DISCARD ALL` before pool reuse; cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
 
@@ -437,7 +444,7 @@ Database text is untrusted data, not operational instruction. Scope controls ret
 
 After the authenticated identity preamble, SDK IOTransport negotiates MCP `2025-11-25`. Stateless `server/discover` receives a protocol error so newer SDK clients can fall back to initialization. Subscriptions, sampling, prompts, and persistent resources are not exposed. Each socket owns an independent server session.
 
-The listener caps handshakes plus sessions at sixteen. A pre-dispatch guard admits at most four concurrent requests per session, including control requests, and filters repeated/unknown cancellation IDs. Saturation closes the excess peer instead of creating an unbounded handler or response queue. Service/driver queue exhaustion returns typed tool errors.
+The listener caps handshakes plus sessions at sixteen. A pre-dispatch guard admits at most sixteen concurrent requests per session, including control requests, and filters repeated/unknown cancellation IDs. Saturation closes the excess peer instead of creating an unbounded handler or response queue. Service/driver queue exhaustion returns typed tool errors.
 
 Frames are complete newline-delimited JSON objects, bounded to 256 KiB inbound and 2 MiB outbound including wrapping/newline. Duplicate keys, excess nesting, batches, malformed frames, and work before initialization close the session. Initialization has a ten-second deadline; blocked socket/bridge output has five seconds.
 

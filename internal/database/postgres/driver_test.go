@@ -146,7 +146,7 @@ func TestConnectionBoundary(t *testing.T) {
 func TestAdmissionAndCursorLifecycle(t *testing.T) {
 	d := driver(t)
 	var leave []func()
-	for range 8 {
+	for range 32 {
 		f, err := d.admit(t.Context())
 		if err != nil {
 			t.Fatal(err)
@@ -154,9 +154,9 @@ func TestAdmissionAndCursorLifecycle(t *testing.T) {
 		leave = append(leave, f)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	results := make(chan error, 32)
+	results := make(chan error, 128)
 	var wg sync.WaitGroup
-	for range 32 {
+	for range 128 {
 		wg.Go(func() {
 			f, err := d.admit(ctx)
 			if err == nil {
@@ -167,7 +167,7 @@ func TestAdmissionAndCursorLifecycle(t *testing.T) {
 	}
 	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
-	for len(d.waiting) < 32 {
+	for len(d.waiting) < 128 {
 		select {
 		case <-deadline.C:
 			t.Fatal("waiters did not enter queue")

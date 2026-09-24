@@ -4,10 +4,18 @@ package database
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/transport"
+)
+
+// Shared admission bounds apply independently at the service and driver boundaries.
+const (
+	MaxActiveOperations  = 32
+	MaxWaitingOperations = 128
+	AdmissionTimeout     = 60 * time.Second
 )
 
 // Access carries a validated profile snapshot and private, in-memory credentials.

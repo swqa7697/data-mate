@@ -34,7 +34,7 @@ type Manager struct {
 func newManager(ctx context.Context, s *config.Store, keys vault.KeyProvider, d database.Driver) *Manager {
 	ctx, cancel := context.WithCancel(ctx)
 	sessionKeys := vault.NewSessionKeys(keys)
-	return &Manager{store: s, repo: vault.New(s, sessionKeys), keys: sessionKeys, driver: d, ctx: ctx, cancel: cancel, active: make(chan struct{}, 8), waiting: make(chan struct{}, 32)}
+	return &Manager{store: s, repo: vault.New(s, sessionKeys), keys: sessionKeys, driver: d, ctx: ctx, cancel: cancel, active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations)}
 }
 func (m *Manager) initialize(ctx context.Context) error {
 	l, err := m.store.ReadLease(ctx)
@@ -106,7 +106,7 @@ func (m *Manager) admit(ctx context.Context) (func(), error) {
 		return nil, database.Fail(contracts.ResourceLimit, "service queue is full", true)
 	}
 	defer func() { <-m.waiting }()
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(database.AdmissionTimeout)
 	defer timer.Stop()
 	select {
 	case m.active <- struct{}{}:
@@ -124,7 +124,7 @@ func (m *Manager) admit(ctx context.Context) (func(), error) {
 // The callback must prepare its bounded response and finish cleanup before return.
 // Alias is resolved only after admission; queued callers retain no old snapshots.
 func (m *Manager) Work(parent context.Context, alias string, fn func(context.Context, database.Driver, database.Access) error) error {
-	ctx, cancel := context.WithTimeout(parent, 35*time.Second)
+	ctx, cancel := context.WithTimeout(parent, config.MaxQueryTimeout+database.AdmissionTimeout+5*time.Second)
 	defer cancel()
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer stop()

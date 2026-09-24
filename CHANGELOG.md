@@ -23,6 +23,7 @@
 
 ### Changed
 
+- Raise the default query timeout to 60 seconds (configurable up to five minutes), allow eight database connections per profile and 16 concurrent requests per MCP session, and expand shared admission to 32 active operations and 128 waiters with a 60-second queue deadline.
 - Allow ordinary PostgreSQL read queries, including views, arrays, enums, custom types, generated columns, windows and recursive CTEs, within configured direct-relation scope.
 - Replace exhaustive SQL/catalog and privilege audits with a small read-query guard and PostgreSQL read-only transactions; require an operator-managed read-only account.
 - Use simple JSON value arrays for query parameters, structured array results and PostgreSQL text fallbacks for other types.

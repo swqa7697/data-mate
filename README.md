@@ -206,8 +206,8 @@ changed keys are never automatically replaced. Normal saving makes no network
 connection; `--ssh-enroll` only probes the SSH host key, without authentication or
 database access. `db test` exercises the configured route.
 
-`--query-timeout` accepts whole milliseconds from `1ms` to `30s`; `--max-rows`
-accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `10s`,
+`--query-timeout` accepts whole milliseconds from `1ms` to `5m`; `--max-rows`
+accepts 1–5000 and `--max-result-bytes` accepts 1024–1048576. Defaults are `60s`,
 500 and 1048576. Add/edit can replace scope with `--all`, `--none`, repeated
 `--schema`/`--table schema.table`, or `--scope-json`. Structured JSON supports
 identifiers containing dots. Exact selections require no catalog fetch; a new
@@ -365,12 +365,22 @@ include a safe SQLSTATE but never upstream details, SQL or parameter values.
 Startup discards inherited `PG*` settings; explicit transport configuration and
 credential protection remain unchanged.
 
-Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
-with eight active operations, thirty-two waiters and a five-second queue deadline
+Pools are lazy (eight connections each, sixteen pools, five-minute idle eviction),
+with 32 active operations, 128 waiters and a 60-second queue deadline
 per shared driver. Requests have profile timeouts, a two-MiB protocol body cap,
 bounded catalog results and redacted errors. No application rows are queried by
 connection tests or catalog operations. The service manager uses the same state
-leases and shared driver for all MCP sessions.
+leases and shared driver for all MCP sessions. Each MCP session admits at most
+16 concurrent requests, including control requests; excess requests close that
+session. Up to 16 sessions/handshakes and 16 pools are supported, allowing at most
+128 pooled database connections.
+
+The profile timeout defaults to 60 seconds and can be raised to five minutes with
+`db edit <alias> --query-timeout 5m`. After service admission and profile resolution,
+credentials, driver admission, pool waiting, setup, execution and result reading
+share that budget. The service has a 365-second outer deadline; earlier caller
+deadlines still apply. Connection setup remains capped at ten seconds and lock
+waits at one second. Lock timeouts also return `QUERY_TIMEOUT`.
 
 Actual authenticated Codex/Claude workflows are a separate opt-in:
 
@@ -456,7 +466,7 @@ The complete [profile JSON schema](internal/contracts/schemas/profiles.json) and
 | `transport.ssh` | Optional `host`, `port`, `user`, `auth:"password"` or `"key"`; secret key material stays in the vault |
 | `transport.proxy` | Optional `kind:"socks5"`, `host`, `port`, optional `username`; mutually exclusive with SSH |
 | `scope` | `mode:"all"`, or `"selected"` with optional `schemas` and `tables:[{"schema":"public","name":"example"}]`; empty selection exposes nothing |
-| `limits` | Optional `query_timeout_ms` (1–30000), `max_rows` (1–5000), `max_result_bytes` (1024–1048576); omitted values default to 10000, 500, 1048576 |
+| `limits` | Optional `query_timeout_ms` (1–300000), `max_rows` (1–5000), `max_result_bytes` (1024–1048576); omitted values default to 60000, 500, 1048576 |
 
 Profile and MCP contracts are embedded in `internal/contracts/schemas`, with
 examples in `internal/contracts/testdata` and a decoder fixture in
