@@ -3,6 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/spf13/cobra"
+	"github.com/swqa7697/data-mate/internal/service"
+	"github.com/swqa7697/data-mate/internal/vault"
 	"strconv"
 	"strings"
 
@@ -79,4 +82,56 @@ func (d *fixtureDatabase) BrowseScope(_ context.Context, _ database.Access, r da
 		p.Next = p.Tables[len(p.Tables)-1].Name
 	}
 	return p, nil
+}
+
+// The external management seam runs the real service orchestrator with isolated
+// fake providers. Socket identity/framing is exercised by service regressions.
+type cliDatabase interface {
+	ValidateProfile(config.Profile) error
+	Test(context.Context, database.Access) (database.Readiness, error)
+	BrowseScope(context.Context, database.Access, database.ScopeRequest) (database.ScopePage, error)
+	Close()
+}
+type databaseFactory func() (cliDatabase, error)
+
+func defaultDatabase() (cliDatabase, error) { return postgres.New() }
+
+type testDriver struct {
+	database.Driver
+	cliDatabase
+}
+
+func (d testDriver) ValidateProfile(p config.Profile) error { return d.cliDatabase.ValidateProfile(p) }
+func (d testDriver) Test(c context.Context, a database.Access) (database.Readiness, error) {
+	return d.cliDatabase.Test(c, a)
+}
+func (d testDriver) Close()            { d.cliDatabase.Close() }
+func (d testDriver) Invalidate(string) {}
+
+type localManagement struct {
+	manager *service.Manager
+	store   *config.Store
+}
+
+func (c *localManagement) Request(ctx context.Context, q service.ManagementRequest) (service.ManagementReply, error) {
+	r := c.manager.HandleManagement(ctx, q)
+	return r, service.ManagementError(r.Error)
+}
+func (c *localManagement) Close() { c.manager.Close(); c.store.Close() }
+func newCommand(build Build, keys vault.KeyProvider) *cobra.Command {
+	return commandWithDatabase(build, keys, defaultDatabase)
+}
+func commandWithDatabase(build Build, keys vault.KeyProvider, factory databaseFactory) *cobra.Command {
+	return commandWithManagement(build, keys, func(ctx context.Context, root config.Root) (managementClient, error) {
+		s, e := config.Open(ctx, root, nil)
+		if e != nil {
+			return nil, e
+		}
+		d, e := factory()
+		if e != nil {
+			s.Close()
+			return nil, e
+		}
+		return &localManagement{service.NewManager(ctx, s, keys, testDriver{cliDatabase: d}), s}, nil
+	})
 }

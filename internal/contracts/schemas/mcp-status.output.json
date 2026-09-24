@@ -42,12 +42,25 @@
         ],
         "additionalProperties": false
       }
+    },
+    "mcp_enabled": {
+      "type": "boolean"
+    },
+    "keyset_state": {
+      "enum": [
+        "absent",
+        "locked",
+        "ready",
+        "unavailable"
+      ]
     }
   },
   "required": [
     "version",
     "state",
-    "agents"
+    "agents",
+    "mcp_enabled",
+    "keyset_state"
   ],
   "additionalProperties": false
 }

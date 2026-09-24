@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -35,7 +36,7 @@ func Serve(ctx context.Context, root config.Root, build Build, nonce string, key
 		return ErrStartup
 	}
 	if keys == nil {
-		keys = vault.Keychain{Interactive: true}
+		keys = vault.Keychain{}
 	}
 	m := newManager(ctx, s, keys, d)
 	defer m.Close()
@@ -47,6 +48,7 @@ func Serve(ctx context.Context, root config.Root, build Build, nonce string, key
 		return ErrState
 	}
 	defer runtime.file.Close()
+	runtime.name = "m"
 	// Only the lifecycle controller removes stale sockets before publishing intent.
 	if err = runtime.checkSocket(); !os.IsNotExist(err) {
 		return ErrConflict
@@ -69,12 +71,66 @@ func Serve(ctx context.Context, root config.Root, build Build, nonce string, key
 func serveListener(parent context.Context, listener *net.UnixListener, r record, m *Manager) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	management := filepath.Base(listener.Addr().String()) == "m"
 	var wg sync.WaitGroup
-	// Bound pending handshakes and established sessions together.
+	var enableMu sync.Mutex
+	if management {
+		m.enable = func(op context.Context) error {
+			enableMu.Lock()
+			defer enableMu.Unlock()
+			if err := op.Err(); err != nil {
+				return err
+			}
+			m.mu.Lock()
+			enabled := m.enabled
+			m.mu.Unlock()
+			if enabled {
+				return nil
+			}
+			root, err := config.ResolveRoot(r.Identity.Root, "")
+			if err != nil {
+				return ErrState
+			}
+			runtime, err := openRuntime(root, r.Identity, false)
+			if err != nil {
+				return err
+			}
+			fail := func(e error) error { runtime.file.Close(); return e }
+			if err = runtime.checkSocket(); !os.IsNotExist(err) {
+				return fail(ErrConflict)
+			}
+			session, err := net.ListenUnix("unix", &net.UnixAddr{Name: runtime.socket(), Net: "unix"})
+			if err != nil {
+				return fail(ErrStartup)
+			}
+			session.SetUnlinkOnClose(false)
+			if err = runtime.protectSocket(); err != nil {
+				session.Close()
+				return fail(err)
+			}
+			if err = op.Err(); err != nil {
+				session.Close()
+				runtime.removeSocket()
+				return fail(err)
+			}
+			m.mu.Lock()
+			m.enabled = true
+			m.mu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer runtime.file.Close()
+				defer runtime.removeSocket()
+				defer session.Close()
+				_ = serveListener(ctx, session, r, m)
+			}()
+			return nil
+		}
+	}
 	slots := make(chan struct{}, 16)
-	stop := context.AfterFunc(ctx, func() { listener.Close(); m.cancel() })
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
 	defer stop()
-	defer func() { cancel(); m.Close(); wg.Wait() }()
+	defer func() { cancel(); wg.Wait() }()
 	for {
 		c, err := listener.AcceptUnix()
 		if err != nil {
@@ -96,7 +152,7 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 			defer c.Close()
 			stop := context.AfterFunc(ctx, func() { c.Close() })
 			defer stop()
-			_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+			_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 			pid, err := peer(c, uint32(os.Geteuid()))
 			if err != nil {
 				return
@@ -105,22 +161,35 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 			if err != nil {
 				return
 			}
-			if h.Identity != r.Identity || h.Nonce != r.Nonce || h.PID != pid || (h.Purpose != "probe" && h.Purpose != "session") || h.State != "" || h.Error != "" {
+			validPurpose := (management && (h.Purpose == "probe" || h.Purpose == "management")) || (!management && h.Purpose == "session")
+			if h.Identity != r.Identity || h.Nonce != r.Nonce || h.PID != pid || !validPurpose || h.State != "" || h.Error != "" || h.MCPEnabled || h.KeysetState != "" {
 				return
 			}
-			reply := hello{1, h.Purpose, r.Identity, r.Build, os.Getpid(), r.Nonce, "starting", ""}
-			if h.Protocol != 1 || h.Build != r.Build {
+			reply := hello{Protocol: 2, Purpose: h.Purpose, Identity: r.Identity, Build: r.Build, PID: os.Getpid(), Nonce: r.Nonce, State: "starting"}
+			if h.Protocol != 2 || h.Build != r.Build {
 				reply.Error = "restart"
 			} else {
-				check, cancel := context.WithTimeout(ctx, time.Second)
+				check, finish := context.WithTimeout(ctx, time.Second)
 				reply.State = m.state(check)
-				cancel()
+				reply.KeysetState = m.keysetState(check)
+				finish()
+				m.mu.Lock()
+				reply.MCPEnabled = m.enabled
+				m.mu.Unlock()
+			}
+			if h.Purpose == "management" && reply.Error == "" && !executablePeer(pid, r.Build.Fingerprint) {
+				return
 			}
 			if writeHello(c, reply) != nil {
 				return
 			}
-			if h.Purpose == "session" && reply.Error == "" {
-				_ = c.SetDeadline(time.Time{})
+			if reply.Error != "" {
+				return
+			}
+			_ = c.SetDeadline(time.Time{})
+			if h.Purpose == "management" {
+				serveManagement(ctx, c, m)
+			} else if h.Purpose == "session" {
 				_ = mcp.Serve(ctx, c, m, r.Build.Version)
 			}
 		}()

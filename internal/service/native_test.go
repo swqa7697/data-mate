@@ -65,7 +65,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	}
 	build := func(revision, path string) {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-trimpath", "-ldflags=-X main.version=native -X main.revision="+revision, "-o", path, "../../cmd/data-mate")
+		cmd := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-trimpath", "-ldflags=-X main.version=native -X main.revision="+revision, "-o", path, "../vault/testdata/native")
 		if out, e := cmd.CombinedOutput(); e != nil {
 			t.Fatalf("native build: %v %s", e, out)
 		}
@@ -99,6 +99,17 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		store, e := config.OpenExisting(ctx, root)
+		if e != nil {
+			t.Fatal(e)
+		}
+		lease, e := store.ReadLease(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		account := lease.Identity().KeyAccount
+		lease.Release()
+		store.Close()
 		c := New(root, Build{"native", "p8-native", hash})
 		c.Agents = agent.New(root)
 		controllers = append(controllers, c)
@@ -124,7 +135,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 				clean = false
 				t.Error("native registration cleanup", e)
 			}
-			if e := (vault.Keychain{}).Delete(cleanup, root.Digest); e != nil {
+			if e := (vault.Keychain{}).Delete(cleanup, account); e != nil {
 				clean = false
 				t.Error("native exact key cleanup", e)
 			}
@@ -162,7 +173,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		if _, e = os.Lstat(filepath.Join(root.Path, "state/vault.json")); !os.IsNotExist(e) {
 			t.Fatal("empty startup created vault", e)
 		}
-		if _, e = c.Start(ctx); e != nil {
+		if _, e = nativeStart(t, ctx, c); e != nil {
 			t.Fatal("reuse", e)
 		}
 	}
@@ -171,7 +182,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	var wg sync.WaitGroup
 	starts := make(chan error, 4)
 	for range 4 {
-		wg.Go(func() { _, e := c.Start(ctx); starts <- e })
+		wg.Go(func() { _, e := nativeStart(t, ctx, c); starts <- e })
 	}
 	wg.Wait()
 	close(starts)
@@ -247,10 +258,30 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	if out, e := save.CombinedOutput(); e != nil {
 		t.Fatalf("native synthetic credential save: %v %s", e, out)
 	}
-	if _, e = c.Start(ctx); e != nil {
+	// Separate CLI processes reuse one loaded keyset in management-only mode.
+	accesses, e := os.ReadFile(c.Root.Path + ".key-access")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, alias := range []string{"another", "third"} {
+		add := exec.CommandContext(ctx, binary, "db", "add", "--alias", alias, "--host", "127.0.0.1", "--port", port, "--database", "synthetic", "--username", "reader", "--password-stdin", "--yes")
+		add.Stdin = strings.NewReader("synthetic-extra-password\n")
+		if out, e := add.CombinedOutput(); e != nil {
+			t.Fatalf("independent native save: %v %s", e, out)
+		}
+	}
+	again, e := os.ReadFile(c.Root.Path + ".key-access")
+	if e != nil || !bytes.Equal(accesses, again) {
+		t.Fatal("independent saves accessed OS store", e)
+	}
+	if state, e := c.Inspect(ctx); e != nil || state.MCPEnabled || state.KeysetState != "ready" {
+		t.Fatal("management-only saves", state, e)
+	}
+	if _, e = nativeStart(t, ctx, c); e != nil {
 		t.Fatal("native existing vault readiness", e)
 	}
-	path := filepath.Join(c.Root.Path, "config/connections.json")
+
+	path := filepath.Join(c.Root.Path, "state/data-mate.db")
 	profiles, e := os.ReadFile(path)
 	if e != nil {
 		t.Fatal(e)
@@ -284,7 +315,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	if result, e := c.Inspect(ctx); e != nil || result.State != "stale" {
 		t.Fatal("crashed service", result, e)
 	}
-	if _, e = c.Start(ctx); e != nil {
+	if _, e = nativeStart(t, ctx, c); e != nil {
 		t.Fatal("explicit crash restart", e)
 	}
 	// A byte-changing rebuild is published through the actual hidden install entry.
@@ -311,8 +342,8 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	}
 	// Keychain may grant an already approved identity or deny the changed ad-hoc
 	// executable. Either way startup must be explicit and leave no partial job.
-	result, changedErr := newer.Start(ctx)
-	if changedErr != nil && !errors.Is(changedErr, ErrStartup) {
+	result, changedErr := nativeStart(t, ctx, newer)
+	if changedErr != nil && !errors.Is(changedErr, ErrStartup) && !errors.Is(changedErr, vault.ErrDenied) && !errors.Is(changedErr, vault.ErrLocked) {
 		t.Fatal("changed native key identity", changedErr)
 	}
 	t.Logf("changed executable readiness: state=%s error=%v", result.State, changedErr)
@@ -324,7 +355,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Fatal(e)
 	}
 	run(restore, "__install", "--root", c.Root.Path)
-	if _, e = c.Start(ctx); e != nil {
+	if _, e = nativeStart(t, ctx, c); e != nil {
 		t.Fatal("original identity restart", e)
 	}
 	run(binary, "mcp", "stop", "--json")
@@ -375,7 +406,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	foreignPresent = false
 	run(binary, "mcp", "start", "--json")
 	retained := map[string][]byte{}
-	for _, path := range []string{"config/connections.json", "state/vault.json", "state/vault-usage.json", "state/installation.json"} {
+	for _, path := range []string{"state/data-mate.db", "state/installation.json"} {
 		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
 		if err != nil {
 			t.Fatal(err)
@@ -431,4 +462,27 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	run(original, "__uninstall", "--root", c.Root.Path, "--purge")
 	t.Log("native default uninstall/reinstall authenticated retained credentials; integrated purge removed exact key, registrations and files while preserving unrelated and second-root resources")
 	t.Log("native two-root, long-path, concurrent/repeated start, zero-dial readiness, existing vault, reload, crash, rebuild, stop and stopped bridge passed")
+}
+
+func nativeStart(t *testing.T, ctx context.Context, c *Controller) (Status, error) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, filepath.Join(c.Root.Path, "bin/data-mate"), "mcp", "start", "--json")
+	var out, diag bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &diag
+	err := cmd.Run()
+	var s Status
+	if out.Len() > 0 && json.Unmarshal(out.Bytes(), &s) != nil {
+		t.Fatalf("native start invalid response: %s", &out)
+	}
+	if err != nil {
+		if strings.Contains(diag.String(), "interaction") || strings.Contains(diag.String(), "unlock") {
+			return s, vault.ErrLocked
+		}
+		if strings.Contains(diag.String(), "denied") {
+			return s, vault.ErrDenied
+		}
+		return s, ErrStartup
+	}
+	return s, nil
 }

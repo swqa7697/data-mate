@@ -16,6 +16,7 @@ var revision = "unknown"
 var dirty = "unknown"
 
 func main() {
+	syscall.Umask(0077)
 	postgres.SanitizeEnvironment()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, cli.Build{Version: version, Revision: revision, Dirty: dirty})

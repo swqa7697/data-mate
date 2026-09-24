@@ -66,12 +66,10 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, build Build)
 }
 
 // New creates the CLI without touching configuration, credentials, or agents.
-func New(build Build) *cobra.Command { return newCommand(build, nil) }
-
-func newCommand(build Build, keys vault.KeyProvider) *cobra.Command {
-	return commandWithDatabase(build, keys, defaultDatabase)
+func New(build Build) *cobra.Command {
+	return commandWithManagement(build, nil, nativeManagement(build))
 }
-func commandWithDatabase(build Build, keys vault.KeyProvider, factory databaseFactory) *cobra.Command {
+func commandWithManagement(build Build, keys vault.KeyProvider, factory managementFactory) *cobra.Command {
 	var override string
 	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
@@ -100,7 +98,7 @@ func commandWithDatabase(build Build, keys vault.KeyProvider, factory databaseFa
 		}
 		return nil
 	}})
-	db := newDB(&override, keys, factory)
+	db := newDB(&override, factory)
 	root.AddCommand(db, newMCP(&override, build))
 	root.AddCommand(internalServiceCommands(&override, build, keys)...)
 	return root

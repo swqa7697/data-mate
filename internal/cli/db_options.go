@@ -265,19 +265,3 @@ func readSecrets(cmd *cobra.Command) (secretPatch, error) {
 	}
 	return patch, nil
 }
-func (p secretPatch) apply(s *vault.Secrets) {
-	for k, v := range p {
-		switch k {
-		case "password":
-			s.Password = v
-		case "ssh_password":
-			s.SSHPassword = v
-		case "ssh_private_key":
-			s.SSHPrivateKey = v
-		case "ssh_key_passphrase":
-			s.SSHKeyPassphrase = v
-		case "proxy_password":
-			s.ProxyPassword = v
-		}
-	}
-}

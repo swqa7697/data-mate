@@ -52,7 +52,7 @@ func (l *LifecycleLease) CleanupLease(ctx context.Context) (_ *Lease, err error)
 		return nil, err
 	}
 	s := l.lease.store
-	n := &Lease{store: s, write: true, purge: true, parent: l.lease}
+	n := &Lease{store: s, write: true, purge: true, parent: l.lease, ctx: ctx}
 	defer func() {
 		if err != nil {
 			n.Release()

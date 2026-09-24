@@ -104,7 +104,7 @@ func readRecord(read func(string, int) ([]byte, error), root config.Root, id con
 		return record{}, err
 	}
 	var r record
-	if config.DecodeStrict(b, 4096, &r) != nil || r.Protocol != 1 || r.Identity != installation(root, id) || !config.ValidUUID(r.Nonce) || r.PID < 0 || r.Build.Version == "" || r.Build.Revision == "" || len(r.Build.Fingerprint) != 64 {
+	if config.DecodeStrict(b, 4096, &r) != nil || r.Protocol != 2 || r.Identity != installation(root, id) || !config.ValidUUID(r.Nonce) || r.PID < 0 || r.Build.Version == "" || r.Build.Revision == "" || len(r.Build.Fingerprint) != 64 {
 		return record{}, ErrState
 	}
 	return r, nil

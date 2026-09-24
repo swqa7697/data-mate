@@ -3,72 +3,35 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/vault"
+	"github.com/swqa7697/data-mate/internal/service"
 )
 
 func scopeSelected(cmd *cobra.Command) bool {
 	return flag(cmd, "all") || flag(cmd, "none") || changed(cmd, "scope-json", "schema", "table")
 }
-func selectScope(cmd *cobra.Command, root config.Root, revision config.Revision, p config.Profile, keys vault.KeyProvider, f *form, factory databaseFactory) (config.Scope, error) {
-	store, err := config.OpenExisting(cmd.Context(), root)
+func selectScope(cmd *cobra.Command, root config.Root, revision config.Revision, p config.Profile, f *form, factory managementFactory) (config.Scope, error) {
+	client, err := factory(cmd.Context(), root)
 	if err != nil {
-		if cmd.Context().Err() != nil {
-			return config.Scope{}, cmd.Context().Err()
-		}
-		return config.Scope{}, failure("cannot open saved connection state; save the profile with db edit before browsing scope")
+		return config.Scope{}, serviceError(err)
 	}
-	defer store.Close()
-	if keys == nil {
-		keys = vault.Keychain{Interactive: true}
-	}
-	repo := vault.New(store, keys)
-	d, err := factory()
-	if err != nil {
-		return config.Scope{}, failure("cannot initialize database driver")
-	}
-	defer d.Close()
+	defer client.Close()
 	fetch := func(req database.ScopeRequest) (database.ScopePage, error) {
-		timeout := config.DefaultLimits().QueryTimeoutMS
-		if p.Limits != nil {
-			timeout = p.Limits.QueryTimeoutMS
-		}
-		ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(timeout)*time.Millisecond)
-		defer cancel()
-		l, err := store.ReadLease(ctx)
+		reply, err := client.Request(cmd.Context(), service.ManagementRequest{Operation: "browse", Interactive: true, Expected: revision, ProfileID: p.ID, Alias: p.Alias, Scope: &req})
 		if err != nil {
-			return database.ScopePage{}, storageError(err, true)
-		}
-		defer l.Release()
-		_, current, err := l.ProfileSnapshot()
-		if err != nil {
-			return database.ScopePage{}, storageError(err, true)
-		}
-		if current != revision {
-			return database.ScopePage{}, storageError(config.ErrRevision, false)
-		}
-		a, err := accessUnderLease(ctx, l, repo, p)
-		if err != nil {
-			var safe *database.Error
-			if errors.As(err, &safe) {
-				return database.ScopePage{}, databaseError(err)
-			}
 			return database.ScopePage{}, storageError(err, false)
 		}
-		page, err := d.BrowseScope(ctx, a, req)
-		if err != nil {
-			return database.ScopePage{}, databaseError(err)
+		if reply.Page == nil {
+			return database.ScopePage{}, failure("catalog response unavailable")
 		}
-		return page, nil
+		return *reply.Page, nil
 	}
 	return scopePicker(cmd, f, p.Scope, fetch)
 }

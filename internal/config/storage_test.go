@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"sync"
 	"testing"
@@ -38,7 +37,7 @@ func storageFixture(t *testing.T) (*Store, Root) {
 func profileLease(t *testing.T, s *Store, write bool) *Lease {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	var l *Lease
 	var err error
 	if write {
@@ -105,37 +104,21 @@ func TestOwnedStorage(t *testing.T) {
 	if err != nil || observed != next {
 		t.Fatal("existing-only snapshot", err)
 	}
-	// P6/P8/P10 extend the exact inventory. Historical installations upgrade under
-	// the lifecycle lock without replacing its identity or credential namespace.
-	for _, count := range []int{11, 13, 17, 19} {
-		legacy := s.identity
-		legacy.Owned = append([]string(nil), ownedPaths[:count]...)
-		raw, err := json.Marshal(legacy)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = os.WriteFile(filepath.Join(root.Path, "state/installation.json"), raw, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err = Preview(t.Context(), root); err != nil {
-			t.Fatal("legacy preview", err)
-		}
-		s2, err := Open(context.Background(), root, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		l2 := profileLease(t, s2, false)
-		if l2.Identity().ID != s.identity.ID {
-			t.Fatal("restart changed identity")
-		}
-		if !reflect.DeepEqual(l2.Identity().Owned, ownedPaths) {
-			t.Fatal("legacy owned inventory was not upgraded")
-		}
-		l2.Release()
-		s2.Close()
+	// Development-only identities are rejected without upgrading their inventory.
+	originalIdentity, _ := os.ReadFile(filepath.Join(root.Path, "state/installation.json"))
+	legacy := s.identity
+	legacy.Version = 1
+	raw, _ := json.Marshal(legacy)
+	if err = os.WriteFile(filepath.Join(root.Path, "state/installation.json"), raw, 0600); err != nil {
+		t.Fatal(err)
 	}
-	path := filepath.Join(root.Path, "config/connections.json")
+	if _, _, err = Preview(t.Context(), root); !errors.Is(err, ErrObsolete) {
+		t.Fatal("obsolete state accepted", err)
+	}
+	if err = os.WriteFile(filepath.Join(root.Path, "state/installation.json"), originalIdentity, 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root.Path, "state/data-mate.db")
 	for _, kind := range []string{"mode", "symlink", "hardlink", "directory", "missing", "malformed"} {
 		original, err := os.ReadFile(path)
 		if err != nil {
@@ -188,6 +171,35 @@ func TestOwnedStorage(t *testing.T) {
 			t.Fatal(kind, err)
 		}
 	}
+	// Interrupted initialization must not create tables in an existing foreign DB.
+	isolated, foreignRoot := storageFixture(t)
+	held := profileLease(t, isolated, true)
+	db, e := held.database()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec("UPDATE installation SET root_digest='foreign'; DROP TABLE keyset"); e != nil {
+		t.Fatal(e)
+	}
+	held.Release()
+	identity := isolated.identity
+	identity.ProfilesEstablished = false
+	rawIdentity, _ := json.Marshal(identity)
+	if e = os.WriteFile(filepath.Join(foreignRoot.Path, "state/installation.json"), rawIdentity, 0600); e != nil {
+		t.Fatal(e)
+	}
+	databaseBefore, e := os.ReadFile(filepath.Join(foreignRoot.Path, databasePath))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if retry, e := Open(t.Context(), foreignRoot, nil); e == nil {
+		retry.Close()
+		t.Fatal("foreign initialization resumed")
+	}
+	databaseAfter, e := os.ReadFile(filepath.Join(foreignRoot.Path, databasePath))
+	if e != nil || !bytes.Equal(databaseBefore, databaseAfter) {
+		t.Fatal("foreign database mutated", e)
+	}
 	// A lock removed by purge/recreation cannot silently confer authority.
 	lease := profileLease(t, s, true)
 	lockPath := filepath.Join(root.Path, "state/state.lock")
@@ -206,7 +218,7 @@ func TestOwnedStorage(t *testing.T) {
 // A crash between any publication boundaries leaves a whole old/new document.
 // There are no new per-boundary subtests; each failure names its boundary.
 func TestPublicationRecovery(t *testing.T) {
-	for _, point := range []string{"before-file-sync", "after-file-sync", "before-rename", "after-rename", "before-directory-sync", "after-directory-sync"} {
+	for _, point := range []string{"before-commit", "after-commit"} {
 		s, root := storageFixture(t)
 		l := profileLease(t, s, true)
 		_, rev, err := l.ProfileSnapshot()
@@ -219,7 +231,7 @@ func TestPublicationRecovery(t *testing.T) {
 		}
 		hit := false
 		s.fault = func(op, path string) error {
-			if !hit && op == point && path == "config/connections.json" {
+			if !hit && op == point && path == "state/data-mate.db" {
 				hit = true
 				return errors.New("injected boundary failure")
 			}
@@ -241,6 +253,52 @@ func TestPublicationRecovery(t *testing.T) {
 		if err != nil || len(got.Connections) > 1 {
 			t.Fatal(point, "torn publication", err)
 		}
+	}
+	// Force dirty pages out before an abrupt exit: passive reads must preserve the
+	// hot journal, and an explicit writer must let SQLite roll it back.
+	s, root := storageFixture(t)
+	lease := profileLease(t, s, true)
+	_, rev, e := lease.ProfileSnapshot()
+	if e != nil {
+		t.Fatal(e)
+	}
+	profiles, _, e := DecodeProfiles(bytes.NewReader(profileFixture(t)))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = lease.SaveProfiles(profiles, rev); e != nil {
+		t.Fatal(e)
+	}
+	lease.Release()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStateLeases$")
+	child.Env = append(os.Environ(), "DATA_MATE_LOCK_HELPER=sqlite-crash", "DATA_MATE_LOCK_ROOT="+root.Path)
+	output, e := child.CombinedOutput()
+	cancel()
+	var exit *exec.ExitError
+	if !errors.As(e, &exit) || exit.ExitCode() != 77 {
+		t.Fatalf("SQLite crash fixture: %v %s", e, output)
+	}
+	journal := filepath.Join(root.Path, databasePath+"-journal")
+	before, e := os.ReadFile(journal)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = Preview(t.Context(), root); !errors.Is(e, ErrRecovery) {
+		t.Fatal("passive hot journal recovery", e)
+	}
+	after, e := os.ReadFile(journal)
+	if e != nil || !bytes.Equal(before, after) {
+		t.Fatal("passive read changed hot journal", e)
+	}
+	reopened, e := Open(t.Context(), root, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	reopened.Close()
+	restored, _, e := Preview(t.Context(), root)
+	if e != nil || len(restored.Connections) != 1 {
+		t.Fatal("SQLite recovery", e)
 	}
 	// Final cleanup must reopen across identity and lock deletion, using the
 	// terminal receipt when the primary identity has already disappeared.
@@ -631,6 +689,28 @@ func lockHelper(t *testing.T, mode string) {
 		return
 	}
 
+	if mode == "sqlite-crash" {
+		lease, e := s.WriteLease(t.Context())
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer lease.Release()
+		db, e := lease.database()
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = db.Exec("PRAGMA cache_size=1"); e != nil {
+			t.Fatal(e)
+		}
+		tx, e := db.Begin()
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = tx.Exec("UPDATE profiles SET settings=?", bytes.Repeat([]byte("x"), 900000)); e != nil {
+			t.Fatal(e)
+		}
+		os.Exit(77)
+	}
 	if mode == "write" {
 		fmt.Println("ready")
 		l, err := s.WriteLease(context.Background())

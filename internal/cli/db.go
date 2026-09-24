@@ -15,12 +15,13 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/transport"
 	"github.com/swqa7697/data-mate/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
-func newDB(override *string, keys vault.KeyProvider, factory databaseFactory) *cobra.Command {
+func newDB(override *string, factory managementFactory) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, action := range []string{"add", "edit", "remove", "list", "scope"} {
 		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose visible schemas and tables"}[action], Args: cobra.MaximumNArgs(1)}
@@ -43,15 +44,15 @@ func newDB(override *string, keys vault.KeyProvider, factory databaseFactory) *c
 			scopeFlags(cmd)
 		}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			return runDB(cmd, args, action, *override, keys, factory)
+			return runDB(cmd, args, action, *override, factory)
 		}
 		db.AddCommand(cmd)
 	}
-	db.AddCommand(newDBTest(override, keys, factory))
+	db.AddCommand(newDBTest(override, factory))
 	return db
 }
 
-func runDB(cmd *cobra.Command, args []string, action, override string, keys vault.KeyProvider, factory databaseFactory) (result error) {
+func runDB(cmd *cobra.Command, args []string, action, override string, factory managementFactory) (result error) {
 	ctx := cmd.Context()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -158,7 +159,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 					return invalid("scope selection flags are required with --yes")
 				}
 				if _, err = getForm(); err == nil {
-					profile.Scope, err = selectScope(cmd, root, revision, profile, keys, ui, factory)
+					profile.Scope, err = selectScope(cmd, root, revision, profile, ui, factory)
 				}
 			}
 		} else {
@@ -241,73 +242,33 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	store, err := config.Open(ctx, root, nil)
+	client, err := factory(ctx, root)
 	if err != nil {
-		return storageError(err, false)
+		return serviceError(err)
 	}
-	defer store.Close()
-	if action == "scope" {
-		lease, e := store.WriteLease(ctx)
-		if e != nil {
-			return storageError(e, false)
-		}
-		defer lease.Release()
-		if _, e = lease.SaveProfiles(profiles, revision); e != nil {
-			if errors.Is(e, config.ErrRevision) || errors.Is(e, context.Canceled) {
-				return storageError(e, false)
-			}
-			return failure("scope publication could not be confirmed; run db list before retrying")
-		}
-		lease.Release()
-		if _, e = fmt.Fprintln(cmd.OutOrStdout(), "Connection scope completed."); e != nil {
-			return failure("scope saved; cannot write output")
-		}
-		return nil
+	defer client.Close()
+	mutation := vault.Mutation{Expected: revision, Profiles: profiles}
+	if len(patch) > 0 {
+		mutation.Patches = map[string]vault.Patch{profile.ID: vault.Patch(patch)}
 	}
-	if keys == nil {
-		keys = vault.Keychain{Interactive: hasTerminal(cmd)}
+	request := service.ManagementRequest{Operation: "mutate", Interactive: hasTerminal(cmd), Mutation: &mutation}
+	if hostKey != nil {
+		request.Pin = &service.HostPin{Address: hostKey.Address, Key: hostKey.Key.Marshal()}
 	}
-	repo := vault.New(store, keys)
-	mutation := vault.Mutation{Expected: revision, Profiles: profiles, HostKey: hostKey}
-	if action == "edit" || len(patch) > 0 {
-		var secrets vault.Secrets
-		if original.CredentialRef != "" {
-			lease, e := store.ReadLease(ctx)
-			if e != nil {
-				return storageError(e, false)
-			}
-			_, current, e := lease.ProfileSnapshot()
-			if e == nil && current != revision {
-				e = config.ErrRevision
-			}
-			if e == nil {
-				secrets, e = repo.Credential(ctx, lease, original.ID)
-			}
-			lease.Release()
-			if errors.Is(e, vault.ErrCredentialMissing) && repairComplete(profile, patch) {
-				e = nil
-			}
-			if e != nil {
-				return storageError(e, false)
-			}
-		}
-		patch.apply(&secrets)
-		if len(patch) > 0 {
-			if secrets == (vault.Secrets{}) {
-				for i := range mutation.Profiles.Connections {
-					if mutation.Profiles.Connections[i].ID == profile.ID {
-						mutation.Profiles.Connections[i].CredentialRef = ""
-					}
-				}
-			} else {
-				mutation.Replacements = map[string]vault.Secrets{profile.ID: secrets}
-			}
+	reply, err := client.Request(ctx, request)
+	if err != nil && reply.Outcome == nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("mutation outcome unknown; run db list before retrying: %w", ctx.Err())
 		}
 	}
-	outcome, err := repo.Apply(ctx, mutation)
+	var outcome vault.Outcome
+	if reply.Outcome != nil {
+		outcome = *reply.Outcome
+	}
+
 	if err != nil {
 		if outcome.ProfilesSaved {
-			return failure("profile change saved; credential cleanup failed and remains pending; the next confirmed add/edit/remove will retry cleanup")
+			return failure("profile change committed; operation completion could not be confirmed; run db list before retrying")
 		}
 		if outcome.PublicationUncertain {
 			return failure("profile publication could not be confirmed; run db list before retrying")
@@ -320,27 +281,10 @@ func runDB(cmd *cobra.Command, args []string, action, override string, keys vaul
 	return nil
 }
 
-func repairComplete(p config.Profile, patch secretPatch) bool {
-	if _, ok := patch["password"]; !ok {
-		return false
-	}
-	if p.Transport.SSH != nil {
-		key := "ssh_password"
-		if p.Transport.SSH.Auth == "key" {
-			key = "ssh_private_key"
-		}
-		if _, ok := patch[key]; !ok {
-			return false
-		}
-	}
-	if p.Transport.Proxy != nil && p.Transport.Proxy.Username != "" {
-		if _, ok := patch["proxy_password"]; !ok {
-			return false
-		}
-	}
-	return true
-}
 func storageError(err error, input bool) error {
+	if input && (errors.Is(err, config.ErrState) || errors.Is(err, config.ErrRecovery) || errors.Is(err, config.ErrObsolete)) {
+		return invalid(err.Error())
+	}
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
@@ -350,7 +294,7 @@ func storageError(err error, input bool) error {
 	if errors.Is(err, vault.ErrCredentialMissing) {
 		return failure(string(contracts.CredentialMissing) + ": " + vault.ErrCredentialMissing.Error())
 	}
-	for _, safe := range []error{vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, config.ErrOwnership, config.ErrStale, config.ErrPurging, transport.ErrChangedHost, transport.ErrKnownHosts} {
+	for _, safe := range []error{config.ErrObsolete, config.ErrRecovery, config.ErrState, vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, config.ErrOwnership, config.ErrStale, config.ErrPurging, transport.ErrChangedHost, transport.ErrKnownHosts} {
 		if errors.Is(err, safe) {
 			return failure(safe.Error())
 		}

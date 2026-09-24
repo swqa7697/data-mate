@@ -1,5 +1,7 @@
 {
   "version": 1,
   "state": "stopped",
-  "agents": []
+  "agents": [],
+  "mcp_enabled": false,
+  "keyset_state": "absent"
 }

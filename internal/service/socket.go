@@ -21,6 +21,7 @@ type runtimeDir struct {
 	path   string
 	marker unix.Stat_t
 	marked bool
+	name   string
 }
 
 func openRuntime(root config.Root, id identity, create bool) (*runtimeDir, error) {
@@ -92,13 +93,19 @@ func (d *runtimeDir) valid() bool {
 	}
 	return unix.Fstat(int(d.file.Fd()), &st) == nil && unix.Lstat(d.path, &named) == nil && st.Dev == named.Dev && st.Ino == named.Ino && st.Uid == uint32(os.Geteuid()) && st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Mode&07777 == 0700
 }
-func (d *runtimeDir) socket() string { return filepath.Join(d.path, "s") }
+func (d *runtimeDir) socketName() string {
+	if d.name != "" {
+		return d.name
+	}
+	return "s"
+}
+func (d *runtimeDir) socket() string { return filepath.Join(d.path, d.socketName()) }
 func (d *runtimeDir) checkSocket() error {
 	if !d.valid() {
 		return ErrState
 	}
 	var st unix.Stat_t
-	err := unix.Fstatat(int(d.file.Fd()), "s", &st, unix.AT_SYMLINK_NOFOLLOW)
+	err := unix.Fstatat(int(d.file.Fd()), d.socketName(), &st, unix.AT_SYMLINK_NOFOLLOW)
 	if errors.Is(err, unix.ENOENT) {
 		return os.ErrNotExist
 	}
@@ -113,10 +120,10 @@ func (d *runtimeDir) protectSocket() error {
 	}
 	var st unix.Stat_t
 	fd := int(d.file.Fd())
-	if unix.Fstatat(fd, "s", &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFSOCK {
+	if unix.Fstatat(fd, d.socketName(), &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFSOCK {
 		return ErrState
 	}
-	if unix.Fchmodat(fd, "s", 0600, unix.AT_SYMLINK_NOFOLLOW) != nil {
+	if unix.Fchmodat(fd, d.socketName(), 0600, unix.AT_SYMLINK_NOFOLLOW) != nil {
 		return ErrState
 	}
 	return d.checkSocket()
@@ -129,7 +136,7 @@ func (d *runtimeDir) removeSocket() error {
 	if err != nil {
 		return err
 	}
-	return unix.Unlinkat(int(d.file.Fd()), "s", 0)
+	return unix.Unlinkat(int(d.file.Fd()), d.socketName(), 0)
 }
 
 // removeStaleSocket requires a refused connection, not merely a missing launchd
@@ -153,6 +160,11 @@ func (d *runtimeDir) removeStaleSocket() error {
 	return d.removeSocket()
 }
 func (d *runtimeDir) cleanup() error {
+	d.name = "m"
+	if err := d.removeStaleSocket(); err != nil {
+		return err
+	}
+	d.name = "s"
 	if err := d.removeStaleSocket(); err != nil {
 		return err
 	}
@@ -197,14 +209,16 @@ func peer(conn *net.UnixConn, uid uint32) (int, error) {
 }
 
 type hello struct {
-	Protocol int      `json:"protocol"`
-	Purpose  string   `json:"purpose"`
-	Identity identity `json:"identity"`
-	Build    Build    `json:"build"`
-	PID      int      `json:"pid"`
-	Nonce    string   `json:"nonce"`
-	State    string   `json:"state"`
-	Error    string   `json:"error"`
+	Protocol    int      `json:"protocol"`
+	Purpose     string   `json:"purpose"`
+	Identity    identity `json:"identity"`
+	Build       Build    `json:"build"`
+	PID         int      `json:"pid"`
+	Nonce       string   `json:"nonce"`
+	State       string   `json:"state"`
+	Error       string   `json:"error"`
+	MCPEnabled  bool     `json:"mcp_enabled"`
+	KeysetState string   `json:"keyset_state"`
 }
 
 func writeHello(w io.Writer, h hello) error {
@@ -242,6 +256,9 @@ func connect(ctx context.Context, root config.Root, r record, build Build, purpo
 		return nil, hello{}, ErrUnavailable
 	}
 	defer d.file.Close()
+	if purpose != "session" {
+		d.name = "m"
+	}
 	if err = d.checkSocket(); err != nil {
 		return nil, hello{}, ErrUnavailable
 	}
@@ -256,14 +273,14 @@ func connect(ctx context.Context, root config.Root, r record, build Build, purpo
 	if err != nil {
 		return fail(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
 		deadline = limit
 	}
 	_ = conn.SetDeadline(deadline)
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
-	h := hello{1, purpose, r.Identity, build, os.Getpid(), r.Nonce, "", ""}
+	h := hello{Protocol: 2, Purpose: purpose, Identity: r.Identity, Build: build, PID: os.Getpid(), Nonce: r.Nonce}
 	if err = writeHello(conn, h); err != nil {
 		return fail(ErrUnavailable)
 	}
@@ -274,8 +291,11 @@ func connect(ctx context.Context, root config.Root, r record, build Build, purpo
 	if reply.Identity != r.Identity || reply.Nonce != r.Nonce || reply.PID != pid || (r.PID != 0 && r.PID != pid) || reply.Purpose != purpose {
 		return fail(ErrConflict)
 	}
-	if reply.Protocol != 1 || reply.Build != build || reply.Error == "restart" {
+	if reply.Protocol != 2 || reply.Build != build || reply.Error == "restart" {
 		return fail(ErrRestart)
+	}
+	if purpose == "management" && !executablePeer(pid, reply.Build.Fingerprint) {
+		return fail(ErrConflict)
 	}
 	if reply.Error != "" {
 		return fail(ErrUnavailable)

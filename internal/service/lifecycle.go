@@ -18,22 +18,25 @@ type AgentStatus = agent.Status
 
 // Status is the versioned passive lifecycle report.
 type Status struct {
-	Version int           `json:"version"`
-	State   string        `json:"state"`
-	Agents  []AgentStatus `json:"agents"`
+	Version     int           `json:"version"`
+	State       string        `json:"state"`
+	Agents      []AgentStatus `json:"agents"`
+	MCPEnabled  bool          `json:"mcp_enabled"`
+	KeysetState string        `json:"keyset_state"`
 }
 
 func status(state string) Status {
-	return Status{1, state, []AgentStatus{{Name: "codex", State: "pending"}, {Name: "claude", State: "pending"}}}
+	return Status{Version: 1, State: state, KeysetState: "absent", Agents: []AgentStatus{{Name: "codex", State: "pending"}, {Name: "claude", State: "pending"}}}
 }
 
 // Controller serializes lifecycle mutations through the installation store.
 type Controller struct {
-	Root      config.Root
-	Build     Build
-	launcher  launchManager
-	readiness time.Duration
-	Agents    *agent.Manager
+	Root        config.Root
+	Build       Build
+	launcher    launchManager
+	readiness   time.Duration
+	Agents      *agent.Manager
+	Interactive bool
 }
 
 // New constructs a native lifecycle controller without accessing state.
@@ -113,7 +116,7 @@ func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r
 }
 
 // Start starts or reuses this exact installation, then ensures CLI agent registrations.
-func (c *Controller) Start(parent context.Context) (Status, error) {
+func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
 	defer cancel()
 	if !safePath(c.Root) {
@@ -155,7 +158,7 @@ func (c *Controller) Start(parent context.Context) (Status, error) {
 				if h.State != "running" {
 					return status(h.State), ErrStartup
 				}
-				return c.ensureAgents(ctx, l, h.State)
+				return helloStatus(h), nil
 			}
 			// Never replace a live but unresponsive process on a repeated start.
 			return status("stale"), e
@@ -178,12 +181,17 @@ func (c *Controller) Start(parent context.Context) (Status, error) {
 	if err != nil {
 		return status("stopped"), ErrStartup
 	}
-	r = record{1, installation(c.Root, l.Identity()), c.Build, nonce, 0}
+	r = record{2, installation(c.Root, l.Identity()), c.Build, nonce, 0}
 	runtime, err := openRuntime(c.Root, r.Identity, true)
 	if err != nil {
 		return status("stale"), err
 	}
+	runtime.name = "m"
 	err = runtime.removeStaleSocket()
+	if err == nil {
+		runtime.name = "s"
+		err = runtime.removeStaleSocket()
+	}
 	runtime.file.Close()
 	if err != nil {
 		return status("stale"), err
@@ -219,7 +227,7 @@ func (c *Controller) Start(parent context.Context) (Status, error) {
 					if h.State == "running" {
 						r.PID = h.PID
 						if e = saveRecord(l, r); e == nil {
-							return c.ensureAgents(ctx, l, "running")
+							return helloStatus(h), nil
 						}
 						bootErr = e
 						break
@@ -281,7 +289,7 @@ func (c *Controller) Stop(ctx context.Context) (Status, error) {
 		if j.Present {
 			return status("stale"), ErrConflict
 		}
-		return status("stopped"), nil
+		return stoppedStatus(ctx, s), nil
 	}
 	if err != nil {
 		return status("stale"), err
@@ -289,7 +297,7 @@ func (c *Controller) Stop(ctx context.Context) (Status, error) {
 	if err = c.stopLocked(ctx, l, r); err != nil {
 		return status("stale"), err
 	}
-	return status("stopped"), nil
+	return stoppedStatus(ctx, s), nil
 }
 
 // Inspect reads profiles and probes an already-running job. No secrets, database
@@ -327,6 +335,16 @@ func (c *Controller) Inspect(ctx context.Context) (result Status, resultErr erro
 	if err != nil {
 		return status("stale"), ErrState
 	}
+	k, keyErr := l.Keyset()
+	defer func() {
+		if result.State == "stopped" {
+			if keyErr != nil {
+				result.KeysetState = "unavailable"
+			} else if k.Phase != "" {
+				result.KeysetState = "locked"
+			}
+		}
+	}()
 	r, recordErr := readRecord(l.Read, c.Root, l.Identity())
 	l.Release()
 	j, err := c.launcher.Inspect(ctx, c.Root)
@@ -362,7 +380,7 @@ func (c *Controller) Inspect(ctx context.Context) (result Status, resultErr erro
 	if h.State != "running" && h.State != "degraded" && h.State != "stopped" {
 		return status("stale"), ErrState
 	}
-	return status(h.State), nil
+	return helloStatus(h), nil
 }
 
 // OpenSession authenticates a socket without starting a stopped service.
@@ -394,12 +412,58 @@ func (c *Controller) ProbeSession(ctx context.Context) error {
 	return err
 }
 
-func (c *Controller) ensureAgents(ctx context.Context, l *config.LifecycleLease, state string) (Status, error) {
-	result := status(state)
-	if c.Agents == nil {
-		return result, nil
+func helloStatus(h hello) Status {
+	s := status(h.State)
+	s.MCPEnabled = h.MCPEnabled
+	s.KeysetState = h.KeysetState
+	return s
+}
+
+// Start enables MCP on the persistent management process, then ensures registrations.
+func (c *Controller) Start(ctx context.Context) (Status, error) {
+	state, err := c.EnsureManagement(ctx)
+	if err != nil {
+		return state, err
 	}
-	var err error
-	result.Agents, err = c.Agents.Ensure(ctx, l)
-	return result, err
+	reply, err := c.Request(ctx, ManagementRequest{Operation: "enable", Interactive: c.Interactive})
+	if reply.KeysetState != "" {
+		state.MCPEnabled = reply.MCPEnabled
+		state.KeysetState = reply.KeysetState
+	}
+	if err != nil {
+		return state, err
+	}
+	state.MCPEnabled = reply.MCPEnabled
+	state.KeysetState = reply.KeysetState
+	s, err := config.OpenExisting(ctx, c.Root)
+	if err != nil {
+		return state, err
+	}
+	defer s.Close()
+	l, err := s.Lifecycle(ctx)
+	if err != nil {
+		return state, err
+	}
+	defer l.Release()
+	if c.Agents != nil {
+		state.Agents, err = c.Agents.Ensure(ctx, l)
+	}
+	return state, err
+}
+
+func stoppedStatus(ctx context.Context, s *config.Store) Status {
+	result := status("stopped")
+	l, e := s.ReadLease(ctx)
+	if e != nil {
+		result.KeysetState = "unavailable"
+		return result
+	}
+	defer l.Release()
+	k, e := l.Keyset()
+	if e != nil {
+		result.KeysetState = "unavailable"
+	} else if k.Phase != "" {
+		result.KeysetState = "locked"
+	}
+	return result
 }

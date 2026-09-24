@@ -24,7 +24,7 @@ func TestNativeKeychainLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	keys := Keychain{}
-	dir, e := os.MkdirTemp("", "data-mate-p1-native-")
+	dir, e := os.MkdirTemp("/tmp", "data-mate-p1-native-")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -37,6 +37,17 @@ func TestNativeKeychainLifecycle(t *testing.T) {
 		t.Fatal(e)
 	}
 
+	store, e := config.Open(ctx, root, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	lease, e := store.ReadLease(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	account := lease.Identity().KeyAccount
+	lease.Release()
+	store.Close()
 	binary := filepath.Join(dir, "native-helper")
 	result := filepath.Join(dir, "result")
 	run := func(name string, args ...string) {
@@ -51,7 +62,7 @@ func TestNativeKeychainLifecycle(t *testing.T) {
 	run("clang", "-x", "c", "-Wno-deprecated-declarations", "-framework", "Security", "-framework", "CoreFoundation", "testdata/native/metadata.c.txt", "-o", metadata)
 	count := func(expected string) {
 		t.Helper()
-		out, e := exec.CommandContext(ctx, metadata, "count", root.Digest).CombinedOutput()
+		out, e := exec.CommandContext(ctx, metadata, "count", account).CombinedOutput()
 		if e != nil || strings.TrimSpace(string(out)) != expected {
 			t.Fatalf("native exact item count: %v %s", e, out)
 		}
@@ -141,7 +152,7 @@ func TestNativeKeychainLifecycle(t *testing.T) {
 	}
 	run(binary, "purge", root.Path, result)
 	count("0")
-	if _, e := keys.Load(ctx, root.Digest); !errors.Is(e, ErrMissing) {
+	if _, e := keys.Load(ctx, account); !errors.Is(e, ErrMissing) {
 		t.Fatal("native exact-key purge", e)
 	}
 	t.Logf("native restart, changed-binary denial handling, launchd and exact purge passed; isolated digest %s", root.Digest)

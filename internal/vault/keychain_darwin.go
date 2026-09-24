@@ -13,7 +13,7 @@ import (
 	"unsafe"
 )
 
-// Keychain uses one generic-password item per full root digest. Interactive
+// Keychain uses one generic-password item per installation-bound account. Interactive
 // callers may permit native prompts; background/native unattended probes can
 // disallow interaction and receive ErrLocked instead. OS prompts are synchronous.
 type Keychain struct{ Interactive bool }
@@ -35,7 +35,7 @@ func (k Keychain) interaction(ctx context.Context) (func(), error) {
 	var previous C.Boolean
 	status := C.SecKeychainGetUserInteractionAllowed(&previous)
 	if status == C.errSecSuccess {
-		status = C.SecKeychainSetUserInteractionAllowed(k.interactive())
+		status = C.SecKeychainSetUserInteractionAllowed(k.interactive(ctx))
 	}
 	if err := keychainStatus(status); err != nil {
 		<-nativeGate
@@ -58,14 +58,15 @@ func keychainStatus(status C.OSStatus) error {
 		return fmt.Errorf("%w (OSStatus %d)", ErrUnavailable, int32(status))
 	}
 }
-func (k Keychain) interactive() C.Boolean {
-	if k.Interactive {
+func (k Keychain) interactive(ctx context.Context) C.Boolean {
+	allowed, specified := ctx.Value(interactionKey{}).(bool)
+	if (specified && allowed) || (!specified && k.Interactive) {
 		return 1
 	}
 	return 0
 }
 
-// Load retrieves exactly one 256-bit key. Errors contain no native data.
+// Load retrieves exactly one bounded serialized Tink keyset. Errors contain no native data.
 func (k Keychain) Load(ctx context.Context, account string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -75,13 +76,14 @@ func (k Keychain) Load(ctx context.Context, account string) ([]byte, error) {
 	}
 	a := C.CString(account)
 	defer C.free(unsafe.Pointer(a))
-	key := make([]byte, 32)
+	key := make([]byte, MaxKeysetBytes)
+	var length C.size_t
 	restore, err := k.interaction(ctx)
 	if err != nil {
 		clear(key)
 		return nil, err
 	}
-	status := C.dm_load(0, a, k.interactive(), (*C.uchar)(unsafe.Pointer(&key[0])))
+	status := C.dm_load(0, a, k.interactive(ctx), (*C.uchar)(unsafe.Pointer(&key[0])), C.size_t(len(key)), &length)
 	restore()
 	err = keychainStatus(status)
 	if err == nil {
@@ -91,7 +93,7 @@ func (k Keychain) Load(ctx context.Context, account string) ([]byte, error) {
 		clear(key)
 		return nil, err
 	}
-	return key, nil
+	return key[:int(length)], nil
 }
 
 // CreateIfAbsent never updates an existing item; duplicates are loaded and checked
@@ -100,7 +102,7 @@ func (k Keychain) CreateIfAbsent(ctx context.Context, account string, key []byte
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if !validFingerprint(account) || len(key) != 32 {
+	if !validFingerprint(account) || len(key) == 0 || len(key) > MaxKeysetBytes {
 		return nil, ErrUnavailable
 	}
 	a := C.CString(account)
@@ -109,7 +111,7 @@ func (k Keychain) CreateIfAbsent(ctx context.Context, account string, key []byte
 	if err != nil {
 		return nil, err
 	}
-	status := C.dm_create(0, a, k.interactive(), (*C.uchar)(unsafe.Pointer(&key[0])))
+	status := C.dm_create(0, a, k.interactive(ctx), (*C.uchar)(unsafe.Pointer(&key[0])), C.size_t(len(key)))
 	restore()
 	if status == C.errSecDuplicateItem {
 		return k.Load(ctx, account)
@@ -137,7 +139,7 @@ func (k Keychain) Delete(ctx context.Context, account string) error {
 	if err != nil {
 		return err
 	}
-	status := C.dm_delete(0, a, k.interactive())
+	status := C.dm_delete(0, a, k.interactive(ctx))
 	restore()
 	if status == C.errSecItemNotFound {
 		return nil

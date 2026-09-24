@@ -133,6 +133,7 @@ func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 		s.Close()
 		return err
 	}
+	runtime.name = "m"
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: runtime.socket(), Net: "unix"})
 	if err != nil {
 		runtime.file.Close()
@@ -191,7 +192,12 @@ func controllerFixture(t *testing.T) (*Controller, *fakeLaunch, *config.Store) {
 	if err := os.Mkdir(filepath.Join(root.Path, "bin"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root.Path, "bin/data-mate"), []byte("fixture executable"), 0700); err != nil {
+	exe, _ := os.Executable()
+	binary, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root.Path, "bin/data-mate"), binary, 0700); err != nil {
 		t.Fatal(err)
 	}
 	hash, err := binaryHash(filepath.Join(root.Path, "bin/data-mate"))

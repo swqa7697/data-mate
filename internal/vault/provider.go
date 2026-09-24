@@ -34,3 +34,10 @@ func providerError(err error) error {
 	}
 	return ErrUnavailable
 }
+
+type interactionKey struct{}
+
+// WithInteraction explicitly authorizes or forbids prompting for this operation.
+func WithInteraction(ctx context.Context, allowed bool) context.Context {
+	return context.WithValue(ctx, interactionKey{}, allowed)
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -98,12 +99,17 @@ func credential(t *testing.T, root string, k *testKeys, id string) vault.Secrets
 		t.Fatal(e)
 	}
 	defer s.Close()
+	repo := vault.New(s, k)
+	if e = repo.Unlock(t.Context(), false, ""); e != nil {
+		t.Fatal(e)
+	}
+	defer repo.Close()
 	l, e := s.ReadLease(t.Context())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer l.Release()
-	v, e := vault.New(s, k).Credential(t.Context(), l, id)
+	v, e := repo.Credential(t.Context(), l, id)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -131,14 +137,48 @@ func files(t *testing.T, root string) map[string]string {
 }
 func saveProfiles(t *testing.T, root string, p config.Profiles) {
 	t.Helper()
-	b, e := json.Marshal(p)
+	r, e := config.ResolveRoot(root, "")
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = os.MkdirAll(filepath.Join(root, "config"), 0700); e != nil {
+	store, e := config.Open(t.Context(), r, nil)
+	if e != nil {
 		t.Fatal(e)
 	}
-	if e = os.WriteFile(filepath.Join(root, "config/connections.json"), b, 0600); e != nil {
+	defer store.Close()
+	l, e := store.WriteLease(t.Context())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Release()
+	// Deliberately bypass constraints only in this corruption fixture.
+	db, e := sql.Open("sqlite3", filepath.Join(root, "state/data-mate.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	tx, e := db.Begin()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer tx.Rollback()
+	if _, e = tx.Exec("DELETE FROM profiles"); e != nil {
+		t.Fatal(e)
+	}
+	for _, profile := range p.Connections {
+		raw, _ := json.Marshal(profile)
+		var ref any
+		if profile.CredentialRef != "" {
+			ref = profile.CredentialRef
+		}
+		if _, e = tx.Exec("INSERT INTO profiles VALUES(?,?,?,?)", profile.ID, profile.Alias, raw, ref); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e = tx.Exec("UPDATE installation SET generation=generation+1"); e != nil {
+		t.Fatal(e)
+	}
+	if e = tx.Commit(); e != nil {
 		t.Fatal(e)
 	}
 }
@@ -265,8 +305,8 @@ func TestConnectionCRUD(t *testing.T) {
 	}
 	// A durable removal must remain visible even when the OS denies cleanup.
 	keys.denied = true
-	_, diag = command(t, manual, keys, "", 1, "rm", "manual", "--yes")
-	if len(snapshot(t, manual).Connections) != 0 || !strings.Contains(diag, "change saved") {
+	command(t, manual, keys, "", 0, "rm", "manual", "--yes")
+	if len(snapshot(t, manual).Connections) != 0 {
 		t.Fatal("partial removal not reported")
 	}
 	keys.denied = false
@@ -276,7 +316,7 @@ func TestConnectionCRUD(t *testing.T) {
 		t.Fatal("remove failed")
 	}
 	// Reject malformed established bytes, leaving them available for manual repair.
-	if err := os.WriteFile(filepath.Join(manual, "config/connections.json"), []byte(`{"version":1,"password":"synthetic-bad-secret"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(manual, "state/data-mate.db"), []byte(`{"version":1,"password":"synthetic-bad-secret"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	before = files(t, manual)

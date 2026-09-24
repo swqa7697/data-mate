@@ -21,20 +21,21 @@ import (
 type Manager struct {
 	store           *config.Store
 	repo            *vault.Repository
-	keys            *vault.SessionKeys
 	driver          database.Driver
 	ctx             context.Context
 	cancel          context.CancelFunc
 	active, waiting chan struct{}
 	mu              sync.Mutex
+	enabled         bool
+	enable          func(context.Context) error
+	management      chan struct{}
 	profiles        config.Profiles
 	revision        config.Revision
 }
 
 func newManager(ctx context.Context, s *config.Store, keys vault.KeyProvider, d database.Driver) *Manager {
 	ctx, cancel := context.WithCancel(ctx)
-	sessionKeys := vault.NewSessionKeys(keys)
-	return &Manager{store: s, repo: vault.New(s, sessionKeys), keys: sessionKeys, driver: d, ctx: ctx, cancel: cancel, active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations)}
+	return &Manager{store: s, repo: vault.New(s, keys), driver: d, ctx: ctx, cancel: cancel, active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations), management: make(chan struct{}, 4)}
 }
 func (m *Manager) initialize(ctx context.Context) error {
 	l, err := m.store.ReadLease(ctx)
@@ -45,7 +46,8 @@ func (m *Manager) initialize(ctx context.Context) error {
 	if _, err = m.refresh(l); err != nil {
 		return err
 	}
-	return m.repo.ValidateExisting(ctx, l)
+	_, err = l.Keyset()
+	return err
 }
 func (m *Manager) refresh(l *config.Lease) (config.Profiles, error) {
 	p, rev, err := l.ProfileSnapshot()
@@ -170,7 +172,7 @@ func (m *Manager) Work(parent context.Context, alias string, fn func(context.Con
 }
 
 // Close rejects admission, cancels active work and retires pools and tunnels.
-func (m *Manager) Close() { m.cancel(); m.driver.Close(); m.keys.Close() }
+func (m *Manager) Close() { m.cancel(); m.driver.Close(); m.repo.Close() }
 
 // Connections prepares a bounded public snapshot without loading credentials.
 func (m *Manager) Connections(parent context.Context, prepare func([]mcp.Connection) error) error {
@@ -197,4 +199,9 @@ func (m *Manager) Connections(parent context.Context, prepare func([]mcp.Connect
 		items = append(items, mcp.Connection{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database, Scope: p.Scope})
 	}
 	return prepare(items)
+}
+
+// NewManager binds the service orchestration to external driver and key providers.
+func NewManager(ctx context.Context, s *config.Store, keys vault.KeyProvider, d database.Driver) *Manager {
+	return newManager(ctx, s, keys, d)
 }

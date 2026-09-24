@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -80,6 +81,7 @@ func (q *rwQueue) acquire(ctx context.Context, write bool) (func(), error) {
 type localLocks struct {
 	lifecycle, state rwQueue
 	refs             int
+	databaseSlots    chan struct{}
 }
 
 var lockRegistry = struct {
@@ -92,7 +94,8 @@ func retainLocks(root string) *localLocks {
 	defer lockRegistry.Unlock()
 	l := lockRegistry.roots[root]
 	if l == nil {
-		l = &localLocks{}
+		// Allow all 32 admitted database operations plus management/status readers.
+		l = &localLocks{databaseSlots: make(chan struct{}, 64)}
 		lockRegistry.roots[root] = l
 	}
 	l.refs++
@@ -178,6 +181,9 @@ func (s *Store) verifyLock(path string, f *os.File) error {
 // share a lease across goroutines; Release is idempotent. Lifecycle is acquired
 // only for purge, before admission and state. Ordinary mutations need only Write.
 type Lease struct {
+	ctx                          context.Context
+	db                           *sql.DB
+	databasePermit               bool
 	store                        *Store
 	parent                       *Lease
 	lifecycle, gate, state       *os.File
@@ -195,7 +201,7 @@ func (s *Store) WriteLease(ctx context.Context) (*Lease, error) { return s.acqui
 // purge coordinator should request this capability. It accepts a purge tombstone.
 func (s *Store) PurgeLease(ctx context.Context) (*Lease, error) { return s.acquire(ctx, true, true) }
 func (s *Store) acquire(ctx context.Context, write, purge bool) (_ *Lease, err error) {
-	l := &Lease{store: s, write: write, purge: purge}
+	l := &Lease{store: s, write: write, purge: purge, ctx: ctx}
 	defer func() {
 		if err != nil {
 			l.Release()
@@ -242,6 +248,14 @@ func (l *Lease) Release() {
 		return
 	}
 	l.released = true
+	if l.db != nil {
+		l.db.Close()
+		l.db = nil
+	}
+	if l.databasePermit {
+		<-l.store.local.databaseSlots
+		l.databasePermit = false
+	}
 	releaseFile(l.state)
 	releaseFile(l.gate)
 	if l.unlockState != nil {
@@ -298,7 +312,7 @@ func (l *Lease) Read(path string, limit int) ([]byte, error) {
 
 // Replace durably publishes an owned data document under an exclusive lease.
 func (l *Lease) Replace(path string, b []byte) error {
-	if !l.write || (path != "config/connections.json" && path != "state/vault.json" && path != "state/vault-usage.json" && path != "config/known_hosts") || len(b) > 8<<20 {
+	if !l.write || path != "config/known_hosts" || len(b) > 8<<20 {
 		return ErrOwnership
 	}
 	if err := l.check(); err != nil {
@@ -310,7 +324,7 @@ func (l *Lease) Replace(path string, b []byte) error {
 // Remove is restricted to owned data files; FinishPurge owns terminal cleanup.
 func (l *Lease) Remove(path string) error {
 	base := strings.TrimSuffix(path, ".tmp")
-	if !l.write || (base != "config/connections.json" && base != "state/vault.json" && base != "state/vault-usage.json" && base != "config/known_hosts") {
+	if !l.write || (base != "state/data-mate.db" && base != "state/data-mate.db-journal" && base != "config/known_hosts") {
 		return ErrOwnership
 	}
 	if err := l.check(); err != nil {

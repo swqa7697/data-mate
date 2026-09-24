@@ -31,7 +31,7 @@ func serviceError(err error) error {
 			return invalid("invalid or unsafe installation/service state")
 		}
 	}
-	for _, safe := range []error{agent.ErrPartial, agent.ErrConflict, service.ErrRestart, service.ErrUnavailable, service.ErrConflict, service.ErrStartup} {
+	for _, safe := range []error{vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, agent.ErrPartial, agent.ErrConflict, service.ErrRestart, service.ErrUnavailable, service.ErrConflict, service.ErrStartup} {
 		if errors.Is(err, safe) {
 			return failure(safe.Error())
 		}
@@ -86,6 +86,7 @@ func newMCP(override *string, build Build) *cobra.Command {
 				return serviceError(mcprelay.Bridge(cmd.Context(), conn, input, output))
 			}
 			c.Agents = agent.New(c.Root)
+			c.Interactive = hasTerminal(cmd)
 			var result service.Status
 			switch name {
 			case "start":
@@ -108,7 +109,7 @@ func newMCP(override *string, build Build) *cobra.Command {
 			if flag(cmd, "json") {
 				outputErr = json.NewEncoder(cmd.OutOrStdout()).Encode(result)
 			} else {
-				_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "Service: %s\nRegistration: %s\nRoot: %s\n", result.State, agent.Name(c.Root), c.Root.Path)
+				_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "Service: %s (MCP enabled: %t, keyset: %s)\nRegistration: %s\nRoot: %s\n", result.State, result.MCPEnabled, result.KeysetState, agent.Name(c.Root), c.Root.Path)
 				for _, a := range result.Agents {
 					if outputErr == nil {
 						_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", a.Name, a.State)
@@ -185,6 +186,7 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 		defer cancel()
 		c.Agents = agent.New(c.Root)
+		c.Interactive = hasTerminal(cmd)
 		if err = c.Uninstall(ctx, flag(cmd, "purge"), keys); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err

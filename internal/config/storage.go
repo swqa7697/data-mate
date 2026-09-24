@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,10 +22,14 @@ import (
 )
 
 var (
-	ErrOwnership = errors.New("installation ownership or file safety check failed")
-	ErrStale     = errors.New("installation changed; reopen before retrying")
-	ErrPurging   = errors.New("installation purge is pending")
-	ErrRevision  = errors.New("profiles changed; preview again")
+	ErrOwnership     = errors.New("installation ownership or file safety check failed")
+	ErrStale         = errors.New("installation changed; reopen before retrying")
+	ErrPurging       = errors.New("installation purge is pending")
+	ErrCommitUnknown = errors.New("SQLite commit outcome uncertain; read current state before retrying")
+	ErrObsolete      = errors.New("obsolete development state; preserve it and recreate this installation with re-entered credentials")
+	ErrRecovery      = errors.New("SQLite recovery required; run an explicit management operation")
+	ErrState         = errors.New("invalid SQLite installation state")
+	ErrRevision      = errors.New("profiles changed; preview again")
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -51,14 +57,13 @@ type Identity struct {
 	ProfilesEstablished bool     `json:"profiles_established"`
 	Purging             bool     `json:"purging"`
 	Owned               []string `json:"owned"`
+	KeyAccount          string   `json:"key_account"`
 }
 
 var ownedPaths = []string{
-	"config/connections.json", "config/connections.json.tmp",
+	"state/data-mate.db", "state/data-mate.db-journal",
 	"state/installation.json", "state/installation.json.tmp",
 	"state/lifecycle.lock", "state/state-gate.lock", "state/state.lock",
-	"state/vault-usage.json", "state/vault-usage.json.tmp",
-	"state/vault.json", "state/vault.json.tmp",
 	"config/known_hosts", "config/known_hosts.tmp",
 	"state/service.json", "state/service.json.tmp",
 	"state/service.plist", "state/service.plist.tmp",
@@ -175,6 +180,9 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 	if err = checkFD(fd, true); err != nil {
 		return nil, err
 	}
+	if err = s.checkObsolete(); err != nil {
+		return nil, err
+	}
 	for _, name := range []string{"state", "config"} {
 		if e := unix.Mkdirat(fd, name, 0700); e != nil && !errors.Is(e, unix.EEXIST) {
 			return nil, ErrOwnership
@@ -210,17 +218,17 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 	}
 	raw, err := s.read("state/installation.json", 8192)
 	if errors.Is(err, os.ErrNotExist) {
-		// Existing secret state without identity must never receive a new namespace.
-		for _, p := range []string{"state/vault.json", "state/vault-usage.json"} {
-			if _, e := s.read(p, 8<<20); !errors.Is(e, os.ErrNotExist) {
-				return nil, ErrOwnership
-			}
+		var existing unix.Stat_t
+		if e := unix.Fstatat(int(s.dir.Fd()), databasePath, &existing, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(e, unix.ENOENT) {
+			return nil, ErrOwnership
 		}
+
 		id, e := NewID()
 		if e != nil {
 			return nil, e
 		}
-		s.identity = Identity{Version: 1, ID: id, RootDigest: root.Digest, Owned: slices.Clone(ownedPaths)}
+		sum := sha256.Sum256([]byte(root.Digest + ":" + id))
+		s.identity = Identity{Version: 2, ID: id, RootDigest: root.Digest, KeyAccount: hex.EncodeToString(sum[:]), Owned: slices.Clone(ownedPaths)}
 		if err = s.writeIdentity(); err != nil {
 			return nil, err
 		}
@@ -260,19 +268,22 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 	if err != nil {
 		return nil, errors.New("cannot sync lock directory")
 	}
-	if !s.identity.ProfilesEstablished && !s.identity.Purging {
-		if _, e := s.read("config/connections.json", MaxProfileBytes); errors.Is(e, os.ErrNotExist) {
-			if err = s.replace("config/connections.json", []byte(`{"version":1,"connections":[]}`)); err != nil {
+	if !s.identity.Purging {
+		var journal unix.Stat_t
+		journalErr := unix.Fstatat(int(s.dir.Fd()), databasePath+"-journal", &journal, unix.AT_SYMLINK_NOFOLLOW)
+		if !s.identity.ProfilesEstablished || !errors.Is(journalErr, unix.ENOENT) {
+			if err = s.initializeDatabase(ctx); err != nil {
 				return nil, err
 			}
-		} else if e != nil {
-			return nil, e
 		}
-		s.identity.ProfilesEstablished = true
-		if err = s.writeIdentity(); err != nil {
-			return nil, err
+		if !s.identity.ProfilesEstablished {
+			s.identity.ProfilesEstablished = true
+			if err = s.writeIdentity(); err != nil {
+				return nil, err
+			}
 		}
 	}
+
 	return s, nil
 }
 
@@ -280,9 +291,14 @@ func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
 		return ErrOwnership
 	}
-	if id.Version != 1 || !ValidUUID(id.ID) || id.RootDigest != root.Digest || (!slices.Equal(id.Owned, ownedPaths) && !slices.Equal(id.Owned, ownedPaths[:11]) && !slices.Equal(id.Owned, ownedPaths[:13]) && !slices.Equal(id.Owned, ownedPaths[:17]) && !slices.Equal(id.Owned, ownedPaths[:19])) {
+	if id.Version != 2 {
+		return ErrObsolete
+	}
+	sum := sha256.Sum256([]byte(root.Digest + ":" + id.ID))
+	if !ValidUUID(id.ID) || id.RootDigest != root.Digest || id.KeyAccount != hex.EncodeToString(sum[:]) || !slices.Equal(id.Owned, ownedPaths) {
 		return ErrOwnership
 	}
+
 	return nil
 }
 
@@ -598,40 +614,6 @@ func (s *Store) verifyIdentity() error {
 		return ErrStale
 	}
 	return nil
-}
-
-// ProfileSnapshot freshly validates profiles. Missing established files fail.
-func (l *Lease) ProfileSnapshot() (Profiles, Revision, error) {
-	b, err := l.Read("config/connections.json", MaxProfileBytes)
-	if err != nil {
-		return Profiles{}, "", err
-	}
-	return DecodeProfiles(bytes.NewReader(b))
-}
-
-// SaveProfiles publishes only if the preview revision still matches. The vault
-// orchestrator is responsible for publishing credentials first.
-func (l *Lease) SaveProfiles(p Profiles, expected Revision) (Revision, error) {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return "", errors.New("invalid profiles")
-	}
-	canonical, revision, err := DecodeProfiles(bytes.NewReader(b))
-	if err != nil {
-		return "", err
-	}
-	_, current, err := l.ProfileSnapshot()
-	if err != nil {
-		return "", err
-	}
-	if current != expected {
-		return "", ErrRevision
-	}
-	b, err = json.Marshal(canonical)
-	if err != nil {
-		return "", err
-	}
-	return revision, l.Replace("config/connections.json", b)
 }
 
 // Path returns the canonical root for nonsecret diagnostics and owned fixtures.

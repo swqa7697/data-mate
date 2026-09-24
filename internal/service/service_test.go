@@ -20,6 +20,9 @@ import (
 // native socket preamble. This exercises real sockets with only launchd faked.
 func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	c, f, s := controllerFixture(t)
+	lease, _ := s.ReadLease(t.Context())
+	expectedAccount := lease.Identity().KeyAccount
+	lease.Release()
 	for _, action := range []func(context.Context) (Status, error){c.Inspect, c.Stop} {
 		r, e := action(t.Context())
 		if e != nil || r.State != "stopped" {
@@ -96,7 +99,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			binary.BigEndian.PutUint32(header[:], 4097)
 			_, _ = conn.Write(header[:])
 		} else {
-			h := hello{1, "probe", rec.Identity, c.Build, os.Getpid(), rec.Nonce, "", ""}
+			h := hello{2, "session", rec.Identity, c.Build, os.Getpid(), rec.Nonce, "", "", false, ""}
 			if kind == "pid" {
 				h.PID++
 			} else {
@@ -156,7 +159,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 		t.Fatal("session cap admitted every incomplete handshake")
 	}
 	// Invalid manual reload becomes degraded without a last-known-good fallback.
-	path := filepath.Join(c.Root.Path, "config/connections.json")
+	path := filepath.Join(c.Root.Path, "state/data-mate.db")
 	valid, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +256,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	if f.job.Present {
 		t.Fatal("cleanup did not stop service before waiting")
 	}
-	files := []string{"config/connections.json", "state/vault.json", "state/vault-usage.json", "config/known_hosts", "unrelated", "state/unrelated"}
+	files := []string{"state/data-mate.db", "config/known_hosts", "unrelated", "state/unrelated"}
 	for _, path := range files {
 		if e = os.WriteFile(filepath.Join(c.Root.Path, path), []byte("sentinel"), 0600); e != nil {
 			t.Fatal(e)
@@ -363,7 +366,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 		t.Fatal("purge retry", e)
 	}
 	for _, digest := range keys.digests {
-		if digest != c.Root.Digest {
+		if digest != expectedAccount {
 			t.Fatal("foreign key deleted")
 		}
 	}
@@ -378,7 +381,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	}
 
 	// Missing identity cannot disguise an orphaned vault as a completed purge.
-	orphan := filepath.Join(c.Root.Path, "state/vault.json")
+	orphan := filepath.Join(c.Root.Path, "state/data-mate.db")
 	if e = os.WriteFile(orphan, []byte("orphan sentinel"), 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -443,7 +446,7 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	if d.retired() != 1 {
 		t.Fatal("changed pool not retired")
 	}
-	path := filepath.Join(root.Path, "config/connections.json")
+	path := filepath.Join(root.Path, "state/data-mate.db")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

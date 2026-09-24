@@ -80,7 +80,7 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	if len(leftovers) != 0 {
 		t.Fatal("temporary build output leaked")
 	}
-	for _, name := range []string{".dev/config/connections.json", ".dev/state/vault.json", ".dev/unrelated", ".misc/evidence"} {
+	for _, name := range []string{".dev/unrelated", ".misc/evidence"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
@@ -89,8 +89,16 @@ func TestInstallIsolationAndClean(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	databaseBefore, err := os.ReadFile(filepath.Join(root, ".dev/state/data-mate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	run(t, root, true, "make", "clean", "PURGE=1")
-	for _, name := range []string{".dev/config/connections.json", ".dev/state/vault.json", ".dev/unrelated", ".misc/evidence"} {
+	databaseAfter, err := os.ReadFile(filepath.Join(root, ".dev/state/data-mate.db"))
+	if err != nil || !bytes.Equal(databaseBefore, databaseAfter) {
+		t.Fatal("clean changed database", err)
+	}
+	for _, name := range []string{".dev/unrelated", ".misc/evidence"} {
 		b, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil || string(b) != "sentinel" {
 			t.Fatal("clean changed retained data", name)

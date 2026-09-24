@@ -20,6 +20,7 @@ static OSStatus dm_query(SecKeychainRef selected, const char *account, Boolean i
  CFDictionarySetValue(*out, kSecClass, kSecClassGenericPassword);
  CFDictionarySetValue(*out, kSecAttrService, CFSTR("com.data-mate.vault"));
  CFDictionarySetValue(*out, kSecAttrAccount, a);
+ CFDictionarySetValue(*out, kSecAttrSynchronizable, kCFBooleanFalse);
  CFRelease(a);
 
  return errSecSuccess;
@@ -30,29 +31,42 @@ static void dm_search(CFMutableDictionaryRef q, SecKeychainRef keychain) {
  CFDictionarySetValue(q, kSecMatchSearchList, list);
  CFRelease(list);
 }
-static OSStatus dm_load(SecKeychainRef selected, const char *account, Boolean interactive, unsigned char *out) {
+static OSStatus dm_unique(CFMutableDictionaryRef q) {
+ CFDictionarySetValue(q, kSecReturnRef, kCFBooleanTrue);
+ CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitAll);
+ CFTypeRef matches = NULL;
+ OSStatus status = SecItemCopyMatching(q, &matches);
+ if (status == errSecSuccess && (!matches || CFGetTypeID(matches) != CFArrayGetTypeID() || CFArrayGetCount((CFArrayRef)matches) != 1)) status = errSecDecode;
+ if (matches) CFRelease(matches);
+ CFDictionaryRemoveValue(q, kSecReturnRef);
+ CFDictionaryRemoveValue(q, kSecMatchLimit);
+ return status;
+}
+static OSStatus dm_load(SecKeychainRef selected, const char *account, Boolean interactive, unsigned char *out, size_t capacity, size_t *length) {
  CFMutableDictionaryRef q = NULL; SecKeychainRef keychain = NULL;
  OSStatus status = dm_query(selected, account, interactive, &q, &keychain);
  if (status != errSecSuccess) return status;
  dm_search(q, keychain);
+ status = dm_unique(q);
+ if (status != errSecSuccess) { CFRelease(q); CFRelease(keychain); return status; }
  CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
  CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
  CFTypeRef result = NULL;
  status = SecItemCopyMatching(q, &result);
  if (status == errSecSuccess) {
-  if (!result || CFGetTypeID(result) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)result) != 32) status = errSecDecode;
-  else memcpy(out, CFDataGetBytePtr((CFDataRef)result), 32);
+  if (!result || CFGetTypeID(result) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)result) <= 0 || CFDataGetLength((CFDataRef)result) > capacity) status = errSecDecode;
+  else { *length = CFDataGetLength((CFDataRef)result); memcpy(out, CFDataGetBytePtr((CFDataRef)result), *length); }
  }
  if (result) CFRelease(result);
  CFRelease(q); CFRelease(keychain);
  return status;
 }
-static OSStatus dm_create(SecKeychainRef selected, const char *account, Boolean interactive, const unsigned char *key) {
+static OSStatus dm_create(SecKeychainRef selected, const char *account, Boolean interactive, const unsigned char *key, size_t length) {
  CFMutableDictionaryRef q = NULL; SecKeychainRef keychain = NULL;
  OSStatus status = dm_query(selected, account, interactive, &q, &keychain);
  if (status != errSecSuccess) return status;
  CFDictionarySetValue(q, kSecUseKeychain, keychain);
- CFDataRef data = CFDataCreate(NULL, key, 32);
+ CFDataRef data = CFDataCreate(NULL, key, length);
  CFDictionarySetValue(q, kSecValueData, data);
  status = SecItemAdd(q, NULL);
  CFRelease(data); CFRelease(q); CFRelease(keychain);
@@ -63,6 +77,8 @@ static OSStatus dm_delete(SecKeychainRef selected, const char *account, Boolean 
  OSStatus status = dm_query(selected, account, interactive, &q, &keychain);
  if (status != errSecSuccess) return status;
  dm_search(q, keychain);
+ status = dm_unique(q);
+ if (status != errSecSuccess) { CFRelease(q); CFRelease(keychain); return status; }
  // File-based Keychain deletion through the exact native reference avoids
  // SecItemDelete's invalid-owner-edit failure after an ad-hoc binary rebuild.
  CFDictionarySetValue(q, kSecReturnRef, kCFBooleanTrue);
