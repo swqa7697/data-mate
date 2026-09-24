@@ -3,6 +3,7 @@ package devtools_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,14 +45,19 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		// No root is passed: this proves root inference from a different cwd.
 		run(t, temp, true, bin, "db", "list", "--json")
 		entries, err := os.ReadDir(filepath.Join(root, ".dev"))
-		if err != nil || len(entries) != 3 {
-			t.Fatal("install must create bin plus owned config/state", err)
+		if err != nil || len(entries) != 2 {
+			t.Fatal("install must create bin plus owned data-mate directory", err)
 		}
-		// Lifecycle initialization must not create credentials or a running job.
-		if _, err := os.Lstat(filepath.Join(root, ".dev/state/vault.json")); !os.IsNotExist(err) {
-			t.Fatal("install created vault", err)
+		// Inspect the installed process contract: initialization creates neither
+		// a keyset nor a service, and passive status must keep it that way.
+		var status struct {
+			State  string `json:"state"`
+			Keyset string `json:"keyset_state"`
 		}
-		run(t, temp, true, bin, "mcp", "status", "--json")
+		output := run(t, temp, true, bin, "mcp", "status", "--json")
+		if err = json.Unmarshal([]byte(output), &status); err != nil || status.State != "stopped" || status.Keyset != "absent" {
+			t.Fatal("installation initialized credentials or service", output, err)
+		}
 		run(t, temp, false, bin, "mcp", "bridge")
 		info, err := os.Stat(bin)
 		if err != nil || info.Mode().Perm() != 0700 {
@@ -80,7 +86,7 @@ func TestInstallIsolationAndClean(t *testing.T) {
 	if len(leftovers) != 0 {
 		t.Fatal("temporary build output leaked")
 	}
-	for _, name := range []string{".dev/unrelated", ".misc/evidence"} {
+	for _, name := range []string{".dev/unrelated", ".dev/data-mate/unrelated", ".dev/bin/unrelated", ".misc/evidence"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
@@ -89,16 +95,16 @@ func TestInstallIsolationAndClean(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	databaseBefore, err := os.ReadFile(filepath.Join(root, ".dev/state/data-mate.db"))
+	databaseBefore, err := os.ReadFile(filepath.Join(root, ".dev/data-mate/data-mate.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	run(t, root, true, "make", "clean", "PURGE=1")
-	databaseAfter, err := os.ReadFile(filepath.Join(root, ".dev/state/data-mate.db"))
+	databaseAfter, err := os.ReadFile(filepath.Join(root, ".dev/data-mate/data-mate.db"))
 	if err != nil || !bytes.Equal(databaseBefore, databaseAfter) {
 		t.Fatal("clean changed database", err)
 	}
-	for _, name := range []string{".dev/unrelated", ".misc/evidence"} {
+	for _, name := range []string{".dev/unrelated", ".dev/data-mate/unrelated", ".dev/bin/unrelated", ".misc/evidence"} {
 		b, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil || string(b) != "sentinel" {
 			t.Fatal("clean changed retained data", name)
@@ -152,4 +158,25 @@ func TestBuildRefusesSymlinkOutput(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatal("build wrote through symlink")
 	}
+	if err = os.Remove(filepath.Join(root, ".dev")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(filepath.Join(root, ".dev"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"bin", "data-mate"} {
+		path := filepath.Join(root, ".dev", name)
+		if err = os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		run(t, root, false, "make", "build")
+		if err = os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		entries, err = os.ReadDir(outside)
+		if err != nil || len(entries) != 0 {
+			t.Fatal("build wrote through sibling symlink", name, err)
+		}
+	}
+
 }

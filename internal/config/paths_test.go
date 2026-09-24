@@ -10,12 +10,15 @@ func TestRoots(t *testing.T) {
 	parent := t.TempDir()
 	var last Root
 	for _, name := range []string{"first checkout", "second checkout"} {
-		path := filepath.Join(parent, name, ".dev")
-		bin := filepath.Join(path, "bin", "data-mate")
+		path := filepath.Join(parent, name, ".dev", "data-mate")
+		bin := filepath.Join(filepath.Dir(path), "bin", "data-mate")
 		if err := os.MkdirAll(filepath.Dir(bin), 0700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(bin, nil, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 		root, err := ResolveRoot("", bin)

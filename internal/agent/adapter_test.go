@@ -33,7 +33,13 @@ func writeDocument(t *testing.T, a adapter, doc map[string]any) {
 }
 func agentFixture(t *testing.T) (*Manager, *config.LifecycleLease, *int) {
 	t.Helper()
-	path := t.TempDir()
+	path := filepath.Join(t.TempDir(), "data-mate")
+	if err := os.Chmod(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(path, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +57,15 @@ func agentFixture(t *testing.T) (*Manager, *config.LifecycleLease, *int) {
 		t.Fatal(err)
 	}
 	t.Cleanup(l.Release)
+	if err = os.Mkdir(filepath.Dir(config.DevelopmentExecutable(root)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(filepath.Dir(config.DevelopmentExecutable(root)), ".data-mate.fixture"), []byte("fixture"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = l.InstallBinary(t.Context(), ".data-mate.fixture"); err != nil {
+		t.Fatal(err)
+	}
 	m := &Manager{root: root}
 	calls := new(int)
 	for _, name := range []string{"codex", "claude"} {
@@ -188,7 +203,7 @@ func TestRegistrationOwnership(t *testing.T) {
 	if err == nil || states[0].State != "conflict" || states[1].State != "ready" || *calls != 2 {
 		t.Fatal(states, err)
 	}
-	s.other["mcp_servers"] = map[string]any{Name(m.root): m.desired(a)}
+	s.other["mcp_servers"] = map[string]any{Name(m.root): m.desired(a, l.Identity().Executable)}
 	writeDocument(t, a, s.other)
 	// Config relocation must not strand authority or delete a different user's entry.
 	m.adapters[0].path = filepath.Join(t.TempDir(), "different")
@@ -204,7 +219,7 @@ func TestRegistrationOwnership(t *testing.T) {
 		t.Fatal("remove count", *calls)
 	}
 	// Matching manual registration is usable without acquiring deletion ownership.
-	writeDocument(t, a, map[string]any{"mcp_servers": map[string]any{Name(m.root): m.desired(a)}})
+	writeDocument(t, a, map[string]any{"mcp_servers": map[string]any{Name(m.root): m.desired(a, l.Identity().Executable)}})
 	if _, err = m.Ensure(t.Context(), l); err != nil {
 		t.Fatal(err)
 	}

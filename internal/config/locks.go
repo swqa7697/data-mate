@@ -212,7 +212,7 @@ func (s *Store) acquire(ctx context.Context, write, purge bool) (_ *Lease, err e
 		if err != nil {
 			return nil, err
 		}
-		l.lifecycle, err = s.lock(ctx, "state/lifecycle.lock", true, false)
+		l.lifecycle, err = s.lock(ctx, "lifecycle.lock", true, false)
 		if err != nil {
 			return nil, err
 		}
@@ -221,11 +221,11 @@ func (s *Store) acquire(ctx context.Context, write, purge bool) (_ *Lease, err e
 	if err != nil {
 		return nil, err
 	}
-	l.gate, err = s.lock(ctx, "state/state-gate.lock", true, false)
+	l.gate, err = s.lock(ctx, "state-gate.lock", true, false)
 	if err != nil {
 		return nil, err
 	}
-	l.state, err = s.lock(ctx, "state/state.lock", write, false)
+	l.state, err = s.lock(ctx, "state.lock", write, false)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (l *Lease) check() error {
 	for _, item := range []struct {
 		path string
 		f    *os.File
-	}{{"state/lifecycle.lock", l.lifecycle}, {"state/state-gate.lock", l.gate}, {"state/state.lock", l.state}} {
+	}{{"lifecycle.lock", l.lifecycle}, {"state-gate.lock", l.gate}, {"state.lock", l.state}} {
 		if item.f != nil {
 			if err := l.store.verifyLock(item.path, item.f); err != nil {
 				return err
@@ -312,7 +312,7 @@ func (l *Lease) Read(path string, limit int) ([]byte, error) {
 
 // Replace durably publishes an owned data document under an exclusive lease.
 func (l *Lease) Replace(path string, b []byte) error {
-	if !l.write || path != "config/known_hosts" || len(b) > 8<<20 {
+	if !l.write || path != "known_hosts" || len(b) > 8<<20 {
 		return ErrOwnership
 	}
 	if err := l.check(); err != nil {
@@ -324,14 +324,11 @@ func (l *Lease) Replace(path string, b []byte) error {
 // Remove is restricted to owned data files; FinishPurge owns terminal cleanup.
 func (l *Lease) Remove(path string) error {
 	base := strings.TrimSuffix(path, ".tmp")
-	if !l.write || (base != "state/data-mate.db" && base != "state/data-mate.db-journal" && base != "config/known_hosts") {
+	if !l.write || (base != "data-mate.db" && base != "data-mate.db-journal" && base != "known_hosts") {
 		return ErrOwnership
 	}
 	if err := l.check(); err != nil {
 		return err
-	}
-	if l.purge {
-		return l.store.removeOptionalDirectoryFile(path)
 	}
 	return l.store.remove(path)
 }
@@ -351,7 +348,7 @@ func (l *Lease) BeginPurge() error {
 	if err != nil {
 		return err
 	}
-	if err = l.store.replace("state/installation.json", b); err != nil {
+	if err = l.store.replace("installation.json", b); err != nil {
 		return err
 	}
 	l.store.identity = id

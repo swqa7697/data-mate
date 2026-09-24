@@ -319,7 +319,7 @@ func TestOwnedHostEnrollment(t *testing.T) {
 			t.Fatal("malformed pins accepted")
 		}
 	}
-	knownPath := filepath.Join(path, "config", "known_hosts")
+	knownPath := filepath.Join(path, "known_hosts")
 	if err = os.Remove(knownPath); err != nil {
 		t.Fatal(err)
 	}

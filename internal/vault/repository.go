@@ -513,7 +513,7 @@ func (r *Repository) PurgeLocked(ctx context.Context, l *config.Lease) error {
 	if err := r.point("after-key-delete"); err != nil {
 		return err
 	}
-	for _, path := range []string{"state/data-mate.db-journal", "state/data-mate.db"} {
+	for _, path := range []string{"data-mate.db-journal", "data-mate.db"} {
 		if err := l.Remove(path); err != nil {
 			return err
 		}

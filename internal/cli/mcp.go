@@ -144,7 +144,7 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		if err != nil {
 			return invalid("invalid installation root")
 		}
-		if filepath.Dir(exe) != filepath.Join(root.Path, "bin") {
+		if filepath.Dir(exe) != filepath.Dir(config.DevelopmentExecutable(root)) {
 			return invalid("build output must be an installation sibling")
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 40*time.Second)
@@ -159,10 +159,10 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 			return serviceError(err)
 		}
 		defer l.Release()
-		if err = l.InstallBinary(filepath.Base(exe)); err != nil {
+		if err = l.InstallBinary(ctx, filepath.Base(exe)); err != nil {
 			return serviceError(err)
 		}
-		if _, err = l.Read("state/service.json", 4096); err == nil {
+		if _, err = l.Read("service.json", 4096); err == nil {
 			_, err = fmt.Fprintln(cmd.ErrOrStderr(), "Service restart required: run mcp stop then mcp start.")
 			if err != nil {
 				return failure("cannot write restart diagnostic")
@@ -179,7 +179,7 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		if err != nil {
 			return failure("cannot locate cleanup helper")
 		}
-		rel, err := filepath.Rel(c.Root.Path, exe)
+		rel, err := filepath.Rel(filepath.Dir(c.Root.Path), exe)
 		if err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
 			return invalid("cleanup must run from a helper outside the installation")
 		}

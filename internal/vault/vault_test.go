@@ -200,7 +200,7 @@ func TestVaultTransactions(t *testing.T) {
 	pin := &transport.HostKey{Address: "jump.invalid:22", Key: signer.PublicKey()}
 	p, rev = snapshot(t, f.repo)
 	f.fault = func(op, path string) error {
-		if op == "before-rename" && path == "config/known_hosts" {
+		if op == "before-rename" && path == "known_hosts" {
 			return errors.New("host publication failure")
 		}
 		return nil
@@ -285,7 +285,7 @@ func TestVaultTransactions(t *testing.T) {
 	if e = f.repo.PurgeCredentials(ctx); !errors.Is(e, ErrDenied) {
 		t.Fatal("purge denial", e)
 	}
-	if _, e = os.Stat(filepath.Join(f.root.Path, "state/data-mate.db")); e != nil {
+	if _, e = os.Stat(filepath.Join(f.root.Path, "data-mate.db")); e != nil {
 		t.Fatal("denial lost database")
 	}
 	if _, _, e = f.repo.Snapshot(ctx); !errors.Is(e, config.ErrPurging) {
@@ -312,7 +312,7 @@ func sqlFixture(t *testing.T, f *fixture, fn func(*sql.DB)) {
 		t.Fatal(e)
 	}
 	defer l.Release()
-	db, e := sql.Open("sqlite3", filepath.Join(f.root.Path, "state/data-mate.db"))
+	db, e := sql.Open("sqlite3", filepath.Join(f.root.Path, "data-mate.db"))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -506,7 +506,7 @@ func TestVaultCrashRecovery(t *testing.T) {
 		}
 		f.repo.fault = fault
 		f.fault = func(op, path string) error {
-			if path == "state/data-mate.db" {
+			if path == "data-mate.db" {
 				return fault(op)
 			}
 			return nil
@@ -567,7 +567,7 @@ func TestVaultCleanupAndConcurrentWriters(t *testing.T) {
 	p, rev := snapshot(t, f.repo)
 	p.Connections = []config.Profile{}
 	f.fault = func(op, path string) error {
-		if op == "before-commit" && path == "state/data-mate.db" {
+		if op == "before-commit" && path == "data-mate.db" {
 			return errors.New("failed deletion")
 		}
 		return nil
@@ -649,7 +649,7 @@ func testPurgeRecovery(t *testing.T) {
 		if err := f.repo.PurgeCredentials(context.Background()); err == nil || !hit {
 			t.Fatal("missing purge injection", point)
 		}
-		if _, err := os.Stat(filepath.Join(f.root.Path, "state/data-mate.db")); err != nil {
+		if _, err := os.Stat(filepath.Join(f.root.Path, "data-mate.db")); err != nil {
 			t.Fatal("key boundary lost ledger", point, err)
 		}
 		f.repo.fault = nil
@@ -663,7 +663,7 @@ func testPurgeRecovery(t *testing.T) {
 			t.Fatal("purge restart", point, err)
 		}
 	}
-	for _, path := range []string{"state/data-mate.db"} {
+	for _, path := range []string{"data-mate.db"} {
 		for _, point := range []string{"before-unlink", "after-unlink", "before-directory-sync", "after-directory-sync"} {
 			f := newFixture(t)
 			addSecret(t, f, 1)
@@ -698,7 +698,7 @@ func crashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	store, err := config.Open(context.Background(), root, func(op, path string) error {
-		if path == "state/data-mate.db" && op == os.Getenv("DATA_MATE_CRASH_POINT") {
+		if path == "data-mate.db" && op == os.Getenv("DATA_MATE_CRASH_POINT") {
 			os.Exit(77)
 		}
 		return nil

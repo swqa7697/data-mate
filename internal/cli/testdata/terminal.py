@@ -123,16 +123,16 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         assert b"hidden-cancel-secret" not in transcript, transcript
         assert b"\x1b[36m" not in transcript, "NO_COLOR ignored"
         if mode.startswith("scope"):
-            with sqlite3.connect(os.path.join(root, "state/data-mate.db")) as db:
+            with sqlite3.connect(os.path.join(root, "data-mate.db")) as db:
                 scope = json.loads(db.execute("SELECT settings FROM profiles ORDER BY alias").fetchone()[0])["scope"]
                 assert scope == ({"mode": "selected"} if mode == "scope-mixed" else {"mode": "all"}), scope
         elif mode == "enroll":
-            with open(os.path.join(root, "config/known_hosts")) as stream:
+            with open(os.path.join(root, "known_hosts")) as stream:
                 assert 'ssh-ed25519' in stream.read(), "confirmed key missing"
             assert b'SHA256:' in transcript, "fingerprint not shown"
             assert b'synthetic' not in transcript, "SSH password echoed"
         elif mode == "happy":
-            with sqlite3.connect(os.path.join(root, "state/data-mate.db")) as db:
+            with sqlite3.connect(os.path.join(root, "data-mate.db")) as db:
                 assert db.execute("SELECT count(*) FROM profiles").fetchone()[0] == 0
             assert b'reader' in transcript, "username must remain visible"
             # Raw-mode review must emit CRLF so subsequent lines start at column 0.

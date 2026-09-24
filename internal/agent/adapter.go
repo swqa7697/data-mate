@@ -194,15 +194,15 @@ func fingerprint(entry map[string]any) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
-func (m *Manager) desired(a adapter) map[string]any {
-	entry := map[string]any{"command": filepath.Join(m.root.Path, "bin/data-mate"), "args": []string{"mcp", "bridge", "--root", m.root.Path}}
+func (m *Manager) desired(a adapter, executable string) map[string]any {
+	entry := map[string]any{"command": executable, "args": []string{"mcp", "bridge", "--root", m.root.Path}}
 	if a.name == "claude" {
 		entry["type"] = "stdio"
 		entry["env"] = map[string]any{}
 	}
 	return entry
 }
-func (m *Manager) state(a adapter, s snapshot) string {
+func (m *Manager) state(a adapter, s snapshot, executable string) string {
 	if a.executable == "" {
 		return "unavailable"
 	}
@@ -210,7 +210,7 @@ func (m *Manager) state(a adapter, s snapshot) string {
 		return "pending"
 	}
 	// Canonical JSON compares TOML/JSON array representations identically.
-	expected := m.desired(a)
+	expected := m.desired(a, executable)
 	disabled := false
 	for k, v := range s.entry {
 		if a.name == "codex" && k == "enabled" {
@@ -235,10 +235,12 @@ func (m *Manager) state(a adapter, s snapshot) string {
 // whose get/list commands would otherwise health-check a bridge.
 func (m *Manager) Inspect(ctx context.Context) ([]Status, error) {
 	var owned ownership
+	var executable string
 	store, stateErr := config.OpenExisting(ctx, m.root)
 	if stateErr == nil {
 		lease, err := store.ReadLease(ctx)
 		if err == nil {
+			executable = lease.Identity().Executable
 			owned, stateErr = m.readOwnership(lease.Read, lease.Identity())
 			lease.Release()
 		} else {
@@ -267,7 +269,7 @@ func (m *Manager) Inspect(ctx context.Context) ([]Status, error) {
 				state = "failed"
 				result = ErrInspection
 			} else {
-				state = m.state(a, s)
+				state = m.state(a, s, executable)
 				if i := owned.find(a.name); i >= 0 && (owned.Entries[i].Config != a.path || (s.entry != nil && fingerprint(s.entry) != owned.Entries[i].Fingerprint && state != "disabled")) {
 					state = "conflict"
 				}

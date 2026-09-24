@@ -113,7 +113,7 @@ func (launchd) Inspect(ctx context.Context, root config.Root) (job, error) {
 	return j, nil
 }
 func (launchd) Bootstrap(ctx context.Context, root config.Root) error {
-	if _, err := launch(ctx, "bootstrap", domain(), filepath.Join(root.Path, "state/service.plist")); err != nil {
+	if _, err := launch(ctx, "bootstrap", domain(), filepath.Join(root.Path, "service.plist")); err != nil {
 		return ErrStartup
 	}
 	return nil
@@ -125,7 +125,7 @@ func (launchd) Bootout(ctx context.Context, root config.Root) error {
 	return nil
 }
 func matching(j job, r record) bool {
-	return j.Present && j.Path == filepath.Join(r.Identity.Root, "state/service.plist") && slices.Equal(j.Args, r.args())
+	return j.Present && j.Path == filepath.Join(r.Identity.Root, "service.plist") && slices.Equal(j.Args, r.args())
 }
 func plist(root config.Root, r record) []byte {
 	quote := func(s string) string { var b strings.Builder; _ = xml.EscapeText(&b, []byte(s)); return b.String() }

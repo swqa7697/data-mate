@@ -152,7 +152,7 @@ func saveProfiles(t *testing.T, root string, p config.Profiles) {
 	}
 	defer l.Release()
 	// Deliberately bypass constraints only in this corruption fixture.
-	db, e := sql.Open("sqlite3", filepath.Join(root, "state/data-mate.db"))
+	db, e := sql.Open("sqlite3", filepath.Join(root, "data-mate.db"))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -316,7 +316,7 @@ func TestConnectionCRUD(t *testing.T) {
 		t.Fatal("remove failed")
 	}
 	// Reject malformed established bytes, leaving them available for manual repair.
-	if err := os.WriteFile(filepath.Join(manual, "state/data-mate.db"), []byte(`{"version":1,"password":"synthetic-bad-secret"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(manual, "data-mate.db"), []byte(`{"version":1,"password":"synthetic-bad-secret"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	before = files(t, manual)

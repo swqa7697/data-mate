@@ -159,7 +159,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 		t.Fatal("session cap admitted every incomplete handshake")
 	}
 	// Invalid manual reload becomes degraded without a last-known-good fallback.
-	path := filepath.Join(c.Root.Path, "state/data-mate.db")
+	path := filepath.Join(c.Root.Path, "data-mate.db")
 	valid, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +256,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	if f.job.Present {
 		t.Fatal("cleanup did not stop service before waiting")
 	}
-	files := []string{"state/data-mate.db", "config/known_hosts", "unrelated", "state/unrelated"}
+	files := []string{"data-mate.db", "known_hosts", "unrelated", "unrelated-second"}
 	for _, path := range files {
 		if e = os.WriteFile(filepath.Join(c.Root.Path, path), []byte("sentinel"), 0600); e != nil {
 			t.Fatal(e)
@@ -271,7 +271,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			t.Fatal("preserved data changed", path, err)
 		}
 	}
-	if _, e = os.Lstat(filepath.Join(c.Root.Path, "bin/data-mate")); !os.IsNotExist(e) {
+	if _, e = os.Lstat(filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate")); !os.IsNotExist(e) {
 		t.Fatal("binary not removed", e)
 	}
 	if e = c.Uninstall(t.Context(), false, noKeys{}); e != nil {
@@ -302,20 +302,20 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 		t.Fatal(e)
 	}
 	// Put back a private executable to prove external failures retain it.
-	if e = os.Mkdir(filepath.Join(c.Root.Path, "bin"), 0700); e != nil {
+	if e = os.Mkdir(filepath.Join(filepath.Dir(c.Root.Path), "bin"), 0700); e != nil {
 		t.Fatal(e)
 	}
-	if e = os.WriteFile(filepath.Join(c.Root.Path, "bin/data-mate"), []byte("retry executable"), 0700); e != nil {
+	if e = os.WriteFile(filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate"), []byte("retry executable"), 0700); e != nil {
 		t.Fatal(e)
 	}
-	registration := filepath.Join(c.Root.Path, "state/registrations.json")
+	registration := filepath.Join(c.Root.Path, "registrations.json")
 	if e = os.WriteFile(registration, []byte("broken ownership"), 0600); e != nil {
 		t.Fatal(e)
 	}
 	if e = c.Uninstall(t.Context(), true, noKeys{}); e == nil {
 		t.Fatal("invalid registration ownership accepted")
 	}
-	if _, e = os.Stat(filepath.Join(c.Root.Path, "bin/data-mate")); e != nil {
+	if _, e = os.Stat(filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate")); e != nil {
 		t.Fatal("registration failure removed executable", e)
 	}
 	if e = os.Remove(registration); e != nil {
@@ -337,7 +337,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			t.Fatal("key denial lost retry data", path, err)
 		}
 	}
-	if _, e = os.Stat(filepath.Join(c.Root.Path, "bin/data-mate")); e != nil {
+	if _, e = os.Stat(filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate")); e != nil {
 		t.Fatal("key denial removed executable", e)
 	}
 	if _, e = os.Lstat(socketDir(c.Root)); !os.IsNotExist(e) {
@@ -348,7 +348,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	}
 	// An unsafe owned path blocks local deletion after key removal and retains
 	// the tombstone. A repaired path lets the same exact-key operation retry.
-	hostPath := filepath.Join(c.Root.Path, "config/known_hosts")
+	hostPath := filepath.Join(c.Root.Path, "known_hosts")
 	if e = os.Remove(hostPath); e != nil {
 		t.Fatal(e)
 	}
@@ -370,18 +370,18 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			t.Fatal("foreign key deleted")
 		}
 	}
-	for _, path := range []string{"unrelated", "state/unrelated"} {
+	for _, path := range []string{"unrelated", "unrelated-second"} {
 		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
 		if err != nil || string(b) != "sentinel" {
 			t.Fatal("purge lost unrelated file", path, err)
 		}
 	}
-	if _, e = os.Lstat(filepath.Join(c.Root.Path, "state/installation.json")); !os.IsNotExist(e) {
+	if _, e = os.Lstat(filepath.Join(c.Root.Path, "installation.json")); !os.IsNotExist(e) {
 		t.Fatal("purge identity retained", e)
 	}
 
 	// Missing identity cannot disguise an orphaned vault as a completed purge.
-	orphan := filepath.Join(c.Root.Path, "state/data-mate.db")
+	orphan := filepath.Join(c.Root.Path, "data-mate.db")
 	if e = os.WriteFile(orphan, []byte("orphan sentinel"), 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -390,6 +390,23 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	}
 	if b, err := os.ReadFile(orphan); err != nil || string(b) != "orphan sentinel" {
 		t.Fatal("unowned vault changed", err)
+	}
+	// With no identity, even the expected sibling executable remains unowned.
+	if e = os.Remove(orphan); e != nil {
+		t.Fatal(e)
+	}
+	executable := config.DevelopmentExecutable(c.Root)
+	if e = os.Mkdir(filepath.Dir(executable), 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(executable, []byte("orphan executable"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Uninstall(t.Context(), true, noKeys{}); !errors.Is(e, ErrState) {
+		t.Fatal("orphan executable reported success", e)
+	}
+	if b, err := os.ReadFile(executable); err != nil || string(b) != "orphan executable" {
+		t.Fatal("unowned executable changed", err)
 	}
 
 }
@@ -446,7 +463,7 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	if d.retired() != 1 {
 		t.Fatal("changed pool not retired")
 	}
-	path := filepath.Join(root.Path, "state/data-mate.db")
+	path := filepath.Join(root.Path, "data-mate.db")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

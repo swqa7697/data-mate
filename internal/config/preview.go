@@ -24,11 +24,7 @@ func PreviewKnownHosts(ctx context.Context, root Root) ([]byte, error) {
 	if err := s.validRoot(); err != nil {
 		return nil, err
 	}
-	var st unix.Stat_t
-	if err := unix.Fstatat(fd, "config", &st, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
-		return nil, nil
-	}
-	b, err := s.read("config/known_hosts", 1<<20)
+	b, err := s.read("known_hosts", 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -53,7 +49,7 @@ func Preview(ctx context.Context, root Root) (Profiles, Revision, error) {
 		if e = temporary.checkObsolete(); e != nil {
 			return Profiles{}, "", e
 		}
-		if _, e = os.Lstat(root.Path + "/state/data-mate.db"); !errors.Is(e, os.ErrNotExist) {
+		if _, e = os.Lstat(root.Path + "/data-mate.db"); !errors.Is(e, os.ErrNotExist) {
 			return Profiles{}, "", ErrOwnership
 		}
 		p, digest, e := DecodeProfiles(bytes.NewReader([]byte(`{"version":1,"connections":[]}`)))

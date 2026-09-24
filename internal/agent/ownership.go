@@ -11,7 +11,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 )
 
-const recordPath = "state/registrations.json"
+const recordPath = "registrations.json"
 
 type ownedEntry struct {
 	Agent       string   `json:"agent"`
@@ -51,10 +51,10 @@ func (m *Manager) readOwnership(read func(string, int) ([]byte, error), id confi
 	}
 	seen := map[string]bool{}
 	for _, e := range o.Entries {
-		if e.Fingerprint != fingerprint(m.desired(adapter{name: e.Agent})) {
+		if e.Fingerprint != fingerprint(m.desired(adapter{name: e.Agent}, id.Executable)) {
 			return want, ErrInspection
 		}
-		if (e.Agent != "codex" && e.Agent != "claude") || seen[e.Agent] || e.Name != Name(m.root) || !filepath.IsAbs(e.Config) || e.Command != filepath.Join(m.root.Path, "bin/data-mate") || !slices.Equal(e.Args, []string{"mcp", "bridge", "--root", m.root.Path}) || len(e.Fingerprint) != 64 || (e.Phase != "intent" && e.Phase != "owned") {
+		if (e.Agent != "codex" && e.Agent != "claude") || seen[e.Agent] || e.Name != Name(m.root) || !filepath.IsAbs(e.Config) || e.Command != id.Executable || !slices.Equal(e.Args, []string{"mcp", "bridge", "--root", m.root.Path}) || len(e.Fingerprint) != 64 || (e.Phase != "intent" && e.Phase != "owned") {
 			return want, ErrInspection
 		}
 		seen[e.Agent] = true
@@ -81,7 +81,7 @@ func (o *ownership) find(agent string) int {
 // adapter succeeds independently; failures never undo a healthy service or peer.
 func (m *Manager) Ensure(ctx context.Context, l *config.LifecycleLease) ([]Status, error) {
 	o, err := m.load(l)
-	if err != nil || l.Identity().Purging {
+	if err != nil || l.Identity().Purging || l.Identity().Executable == "" {
 		return []Status{{"codex", "failed"}, {"claude", "failed"}}, ErrPartial
 	}
 	var out []Status
@@ -109,7 +109,7 @@ func (m *Manager) ensure(ctx context.Context, l *config.LifecycleLease, o *owner
 	if err != nil {
 		return "failed", err
 	}
-	state := m.state(a, before)
+	state := m.state(a, before, l.Identity().Executable)
 	i := o.find(a.name)
 	if i >= 0 && o.Entries[i].Config != a.path {
 		return "conflict", ErrConflict
@@ -136,7 +136,7 @@ func (m *Manager) ensure(ctx context.Context, l *config.LifecycleLease, o *owner
 		}
 		return "ready", nil
 	}
-	desired := m.desired(a)
+	desired := m.desired(a, l.Identity().Executable)
 	intent := ownedEntry{Agent: a.name, Config: a.path, Name: Name(m.root), Command: desired["command"].(string), Args: desired["args"].([]string), Fingerprint: fingerprint(desired), Phase: "intent"}
 	if i < 0 {
 		o.Entries = append(o.Entries, intent)

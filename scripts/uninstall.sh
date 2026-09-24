@@ -8,8 +8,14 @@ case "${PURGE:-0}" in
   exit 2
   ;;
 esac
-root="$project_dir/.dev"
-if [[ ! -e "$root" && ! -L "$root" ]]; then exit 0; fi
+root="$project_dir/.dev/data-mate"
+if [[ ! -e "$root" && ! -L "$root" ]]; then
+  if [[ -e "$project_dir/.dev/bin/data-mate" || -L "$project_dir/.dev/bin/data-mate" ]]; then
+    echo 'Cleanup cannot verify executable ownership without its data directory; preserved executable.' >&2
+    exit 1
+  fi
+  exit 0
+fi
 private_dir "$root"
 # Always compile outside the root: a default uninstall may already have removed
 # the executable, and a purge tombstone deliberately prevents reinstalling it.

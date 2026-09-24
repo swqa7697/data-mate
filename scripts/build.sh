@@ -17,6 +17,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 private_dir "$project_dir/.dev"
 private_dir "$project_dir/.dev/bin"
+private_dir "$project_dir/.dev/data-mate"
 target="$project_dir/.dev/bin/data-mate"
 if [[ -e "$target" || -L "$target" ]]; then
   if [[ -L "$target" || ! -f "$target" || ! -O "$target" ]]; then
@@ -31,5 +32,5 @@ build_args=(build -mod=readonly -trimpath)
 if [[ "${VERBOSE:-0}" == 1 ]]; then build_args+=(-x); fi
 go "${build_args[@]}" -ldflags "$flags" -o "$temporary" ./cmd/data-mate
 chmod 700 "$temporary"
-"$temporary" __install --root "$project_dir/.dev"
+"$temporary" __install --root "$project_dir/.dev/data-mate"
 printf 'Installed %s\n' "$target"

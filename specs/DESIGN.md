@@ -74,7 +74,7 @@ Implementation dependencies are pinned in [go.mod](../go.mod) and `go.sum`. The 
 
 ## 3. CLI contract
 
-During development, `make dev ARGS="..."` invokes the installed binary with the checkout's absolute `.dev` root.
+During development, `make dev ARGS="..."` invokes the installed binary with the checkout's absolute `.dev/data-mate` data root.
 
 | Command                              | Behavior                                                                            |
 | ------------------------------------ | ----------------------------------------------------------------------------------- |
@@ -148,7 +148,7 @@ The registration name is `data-mate-dev-<root-hash>`, using the first 16 hexadec
 
 Inspection reads Codex TOML and Claude user-scope JSON directly, without invoking client health checks. Codex uses `$CODEX_HOME/config.toml` or `~/.codex/config.toml`; Claude uses `$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`. Overrides must be absolute. Reads are capped at 4 MiB and reject unsafe files, duplicate keys, and unsupported layouts. Only absolute PATH directories participate in detection and child PATH. Registration subprocesses run from `/` with eight-second and 64-KiB output bounds; their output is discarded.
 
-`state/registrations.json` binds its version, installation UUID, full root/digest, client/config location, name, expected command/arguments, canonical entry fingerprint, and intent/owned phase. Add intent is durable before the client write. A retry reconciles an interrupted add only when the entry matches exactly. Matching unrecorded entries are usable without granting deletion authority. Removal requires recorded ownership and an unchanged fingerprint. A relocated config override or unrelated same-name entry is a conflict.
+`registrations.json` binds its version, installation UUID, full root/digest, client/config location, name, expected command/arguments, canonical entry fingerprint, and intent/owned phase. Add intent is durable before the client write. A retry reconciles an interrupted add only when the entry matches exactly. Matching unrecorded entries are usable without granting deletion authority. Removal requires recorded ownership and an unchanged fingerprint. A relocated config override or unrelated same-name entry is a conflict.
 
 Configuration is inspected immediately before and after client writes; unrelated values must remain unchanged. External client edits are not transactionally locked by Data Mate. Observed changes produce a conflict, and Data Mate does not overwrite user changes through wholesale rollback.
 
@@ -196,24 +196,25 @@ Only an explicit interactive management operation or `mcp start` can authorize a
 ```text
 .dev/
   bin/data-mate
-  config/known_hosts          # Enrolled SSH host pins, when present
-  state/data-mate.db          # Nonsecret profiles, encrypted bundles, and keyset metadata
-  state/data-mate.db-journal  # SQLite-owned transient rollback journal
-  state/installation.json
-  state/state.lock
-  state/state-gate.lock
-  state/lifecycle.lock
-  state/registrations.json
-  state/service.plist
-  state/service.json
-  state/purge.json            # Terminal receipt during interrupted purge
+  data-mate/                   # Data root; production equivalent: ~/.local/share/data-mate/
+    data-mate.db               # Nonsecret profiles, encrypted bundles, keyset metadata
+    data-mate.db-journal       # SQLite-owned transient rollback journal
+    known_hosts                # Enrolled SSH host pins, when present
+    installation.json
+    state.lock
+    state-gate.lock
+    lifecycle.lock
+    registrations.json
+    service.plist
+    service.json
+    purge.json                 # Terminal receipt during interrupted purge
 ```
 
 Files are created when their owning operation needs them. Install/build initialize the nonsecret identity, empty SQLite schema, and stable locks without creating a keyset, service job, or registration. Directories are mode 0700; SQLite, journal, and other state files are mode 0600. A restrictive process umask also covers files SQLite creates.
 
-The installation identity records its UUID, full root digest, established-profile state, purge tombstone, and exact owned paths, including the SQLite database/journal and fixed publication siblings for remaining JSON metadata. Only the corresponding exclusive writer can recover interrupted publication; unknown files remain untouched. Verify directories, database, and sidecars for ownership and symlink safety before SQLite opens them. SQLite schema changes require exclusive lifecycle/state ownership and transactional migration; unknown schema versions fail closed. An ownership-checked database must also match the installation UUID/root in its metadata. Do not replace a live database by rename or manually delete a hot journal; recovery belongs to SQLite under exclusive state ownership.
+The installation identity records its UUID, full root digest, established-profile state, purge tombstone, and a separately recorded absolute executable path. The data-file inventory contains exact root-relative names, including the SQLite database/journal and fixed publication siblings for remaining JSON metadata. Only the corresponding exclusive writer can recover interrupted publication; unknown files remain untouched. Verify directories, database, and sidecars for ownership and symlink safety before SQLite opens them. SQLite schema changes require exclusive lifecycle/state ownership and transactional migration; unknown schema versions fail closed. An ownership-checked database must also match the installation UUID/root in its metadata. Do not replace a live database by rename or manually delete a hot journal; recovery belongs to SQLite under exclusive state ownership.
 
-The installed binary resolves its canonical root from its executable location or an explicit absolute `--root`, independently of the caller's working directory. Agent registrations pin that root. Installations never fall back to shared user configuration or another checkout's Keychain namespace. No distributed installation layout is provided.
+`--root` identifies the canonical data directory. Without an override, the development executable resolves the sibling `data-mate/` directory from its real executable location, independently of the caller's working directory. The developer installer creates that directory and accepts only a verified sibling `bin/data-mate` executable, recording its absolute path before atomic publication. Runtime launch and agent registration use the recorded executable path and pin the data root. Cleanup verifies the executable directory separately and retains its binding in the purge receipt; missing identity never grants deletion authority. Installations never fall back to shared user configuration or another checkout's Keychain namespace. `~/.local/share/data-mate/` is the future production equivalent of the data directory; production root defaults and installation tooling are not implemented.
 
 ### 5.2 Profile schema and revisions
 
@@ -357,7 +358,7 @@ TLS can layer over any route. Failure never falls back to plaintext or direct ac
 
 Connection configuration uses explicit profile/vault values. Startup removes inherited `PG*` variables before application goroutines; a missed sanitation fails closed. The initialized pgx template uses explicit placeholders and `/dev/null` password/service files, then validated settings and an allowlisted session configuration. Only TCP hostnames/IPs are accepted. No ambient SSH agent/configuration, proxy environment, password/service file, or helper process supplies fallback behavior.
 
-SSH enrollment uses interactive `db add/edit --ssh-enroll`: a TTY, explicit SHA-256 fingerprint confirmation, and final default-No profile confirmation are required. `--yes` and stdin credential modes cannot enroll. The probe sends no authentication material. The candidate stays in memory until the confirmed writer rechecks revision and current pin, then atomically publishes mode-0600 `config/known_hosts` before the profile. Cancellation publishes nothing; a later save failure may leave an unused owned pin.
+SSH enrollment uses interactive `db add/edit --ssh-enroll`: a TTY, explicit SHA-256 fingerprint confirmation, and final default-No profile confirmation are required. `--yes` and stdin credential modes cannot enroll. The probe sends no authentication material. The candidate stays in memory until the confirmed writer rechecks revision and current pin, then atomically publishes mode-0600 `known_hosts` before the profile. Cancellation publishes nothing; a later save failure may leave an unused owned pin.
 
 The known-host file is bounded to 1 MiB and accepts exact endpoint public-key entries only. Duplicate endpoints, wildcards, certificates, and markers are rejected. Unknown/changed keys fail at runtime, and enrollment cannot overwrite a changed pin. Background operations cannot enroll hosts.
 
@@ -506,7 +507,7 @@ The Make wrapper builds a private helper under `/tmp` so cleanup/retry remains a
 
 Explicit purge marks a durable tombstone before deleting the exact OS keyset, then removes SQLite and its verified owned journal, known hosts, and owned publication siblings. The cleanup helper is the exception to service-only OS access: it may delete the exact owned keyset after the service has stopped, without loading it for encryption or replacing it. The OS item identity is also retained in the independent installation inventory so corrupt SQLite cannot force broad keyring deletion. Failure to delete the keyset preserves the tombstone, database, and retry authority. A retry treats an already-deleted exact item as success. No SQLite transaction is claimed to cover OS deletion.
 
-A terminal `state/purge.json` receipt preserves root/installation identity through final identity and lock removal. Startup/publication rejects that receipt; only cleanup can recreate missing terminal locks. Deleting the receipt commits terminal cleanup. All lock waiters recheck named inodes and identity. Obsolete development-only JSON state requires its own verified inventory or explicit user-managed removal; its presence never authorizes automatic conversion or deletion.
+A terminal `purge.json` receipt preserves root/installation identity through final identity and lock removal. Startup/publication rejects that receipt; only cleanup can recreate missing terminal locks. Deleting the receipt commits terminal cleanup. All lock waiters recheck named inodes and identity. Obsolete development-only JSON state requires its own verified inventory or explicit user-managed removal; its presence never authorizes automatic conversion or deletion.
 
 Unrelated `.dev` contents, external agent settings, source keys, certificates, unrecognized logs/build files, and shared Go caches remain untouched. Directories are removed only when empty. Ownership is never inferred from a filename prefix.
 

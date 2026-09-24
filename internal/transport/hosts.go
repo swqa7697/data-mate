@@ -68,7 +68,7 @@ func checkHost(hosts map[string]ssh.PublicKey, address string, key ssh.PublicKey
 
 // ReadKnownHosts reads only the owner-checked installation file under a lease.
 func ReadKnownHosts(l *config.Lease) ([]byte, error) {
-	raw, err := l.Read("config/known_hosts", MaxKnownHostsBytes)
+	raw, err := l.Read("known_hosts", MaxKnownHostsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -113,7 +113,7 @@ func SaveHostKey(l *config.Lease, pin HostKey) error {
 	if len(raw) > MaxKnownHostsBytes {
 		return ErrKnownHosts
 	}
-	return l.Replace("config/known_hosts", raw)
+	return l.Replace("known_hosts", raw)
 }
 
 // ProbeHostKey obtains a fingerprint candidate without sending credentials. The

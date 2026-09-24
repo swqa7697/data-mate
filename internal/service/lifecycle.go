@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/swqa7697/data-mate/internal/agent"
@@ -52,7 +51,7 @@ func (c *Controller) inspect(ctx context.Context, r record, l *config.LifecycleL
 		if !matching(j, r) {
 			return j, ErrConflict
 		}
-		b, err := l.Read("state/service.plist", 16384)
+		b, err := l.Read("service.plist", 16384)
 		if err != nil || !bytes.Equal(b, plist(c.Root, r)) {
 			return j, ErrConflict
 		}
@@ -107,7 +106,7 @@ func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r
 	if err = c.clearRuntime(r); err != nil {
 		return err
 	}
-	for _, path := range []string{"state/service.plist.tmp", "state/service.plist", "state/service.json.tmp", "state/service.json"} {
+	for _, path := range []string{"service.plist.tmp", "service.plist", "service.json.tmp", "service.json"} {
 		if err = l.Remove(path); err != nil {
 			return err
 		}
@@ -135,7 +134,7 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 		return status("stale"), err
 	}
 	defer l.Release()
-	hash, err := binaryHash(filepath.Join(c.Root.Path, "bin/data-mate"))
+	hash, err := binaryHash(l.Identity().Executable)
 	if err != nil {
 		return status("stale"), err
 	}
@@ -181,7 +180,7 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 	if err != nil {
 		return status("stopped"), ErrStartup
 	}
-	r = record{2, installation(c.Root, l.Identity()), c.Build, nonce, 0}
+	r = record{2, installation(c.Root, l.Identity()), c.Build, nonce, 0, l.Identity().Executable}
 	runtime, err := openRuntime(c.Root, r.Identity, true)
 	if err != nil {
 		return status("stale"), err
@@ -199,7 +198,7 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 	if err = saveRecord(l, r); err != nil {
 		return status("stopped"), err
 	}
-	if err = l.Replace("state/service.plist", plist(c.Root, r)); err != nil {
+	if err = l.Replace("service.plist", plist(c.Root, r)); err != nil {
 		return status("stopped"), err
 	}
 	bootErr := c.launcher.Bootstrap(ctx, c.Root)

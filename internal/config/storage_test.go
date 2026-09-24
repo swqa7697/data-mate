@@ -105,20 +105,33 @@ func TestOwnedStorage(t *testing.T) {
 		t.Fatal("existing-only snapshot", err)
 	}
 	// Development-only identities are rejected without upgrading their inventory.
-	originalIdentity, _ := os.ReadFile(filepath.Join(root.Path, "state/installation.json"))
+	originalIdentity, _ := os.ReadFile(filepath.Join(root.Path, "installation.json"))
 	legacy := s.identity
 	legacy.Version = 1
 	raw, _ := json.Marshal(legacy)
-	if err = os.WriteFile(filepath.Join(root.Path, "state/installation.json"), raw, 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(root.Path, "installation.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err = Preview(t.Context(), root); !errors.Is(err, ErrObsolete) {
 		t.Fatal("obsolete state accepted", err)
 	}
-	if err = os.WriteFile(filepath.Join(root.Path, "state/installation.json"), originalIdentity, 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(root.Path, "installation.json"), originalIdentity, 0600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root.Path, "state/data-mate.db")
+	// An absolute executable field cannot grant authority over arbitrary files.
+	foreignExecutable := s.identity
+	foreignExecutable.Executable = filepath.Join(t.TempDir(), "data-mate")
+	raw, _ = json.Marshal(foreignExecutable)
+	if err = os.WriteFile(filepath.Join(root.Path, "installation.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenLifecycle(t.Context(), root); !errors.Is(err, ErrOwnership) {
+		t.Fatal("foreign executable binding accepted", err)
+	}
+	if err = os.WriteFile(filepath.Join(root.Path, "installation.json"), originalIdentity, 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root.Path, "data-mate.db")
 	for _, kind := range []string{"mode", "symlink", "hardlink", "directory", "missing", "malformed"} {
 		original, err := os.ReadFile(path)
 		if err != nil {
@@ -185,7 +198,7 @@ func TestOwnedStorage(t *testing.T) {
 	identity := isolated.identity
 	identity.ProfilesEstablished = false
 	rawIdentity, _ := json.Marshal(identity)
-	if e = os.WriteFile(filepath.Join(foreignRoot.Path, "state/installation.json"), rawIdentity, 0600); e != nil {
+	if e = os.WriteFile(filepath.Join(foreignRoot.Path, "installation.json"), rawIdentity, 0600); e != nil {
 		t.Fatal(e)
 	}
 	databaseBefore, e := os.ReadFile(filepath.Join(foreignRoot.Path, databasePath))
@@ -202,7 +215,7 @@ func TestOwnedStorage(t *testing.T) {
 	}
 	// A lock removed by purge/recreation cannot silently confer authority.
 	lease := profileLease(t, s, true)
-	lockPath := filepath.Join(root.Path, "state/state.lock")
+	lockPath := filepath.Join(root.Path, "state.lock")
 	if err := os.Rename(lockPath, lockPath+".old"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +244,7 @@ func TestPublicationRecovery(t *testing.T) {
 		}
 		hit := false
 		s.fault = func(op, path string) error {
-			if !hit && op == point && path == "state/data-mate.db" {
+			if !hit && op == point && path == "data-mate.db" {
 				hit = true
 				return errors.New("injected boundary failure")
 			}
@@ -302,9 +315,9 @@ func TestPublicationRecovery(t *testing.T) {
 	}
 	// Final cleanup must reopen across identity and lock deletion, using the
 	// terminal receipt when the primary identity has already disappeared.
-	for _, path := range []string{"state/state.lock", "state/state-gate.lock", "state/installation.json", "state/lifecycle.lock", "state/purge.json"} {
+	for _, path := range []string{"state.lock", "state-gate.lock", "installation.json", "lifecycle.lock", "purge.json"} {
 		for _, point := range []string{"before-unlink", "after-unlink"} {
-			if path == "state/purge.json" && point == "after-unlink" {
+			if path == "purge.json" && point == "after-unlink" {
 				continue
 			} // receipt deletion commits terminal cleanup
 			s, root := storageFixture(t)
@@ -512,7 +525,7 @@ func TestStateLeases(t *testing.T) {
 	}
 	done()
 	waiter := startLockHelper(t, root, "lifecycle-stale")
-	lifePath := filepath.Join(root.Path, "state/lifecycle.lock")
+	lifePath := filepath.Join(root.Path, "lifecycle.lock")
 	if err := os.Rename(lifePath, lifePath+".retired"); err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +539,7 @@ func TestStateLeases(t *testing.T) {
 	held := profileLease(t, s, false)
 	stale := startLockHelper(t, root, "stale")
 	// Wait for child to hold admission: it has opened state.lock and is waiting.
-	statePath := filepath.Join(root.Path, "state/state.lock")
+	statePath := filepath.Join(root.Path, "state.lock")
 	if err := os.Rename(statePath, statePath+".retired"); err != nil {
 		t.Fatal(err)
 	}
@@ -563,14 +576,14 @@ func TestStateLeases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = publication.InstallBinary(".data-mate.fixture"); !errors.Is(err, ErrPurging) {
+	if err = publication.InstallBinary(t.Context(), ".data-mate.fixture"); !errors.Is(err, ErrPurging) {
 		t.Fatal("build bypassed purge tombstone", err)
 	}
 	publication.Release()
 	// Real final purge, not a renamed-lock simulation: both an installer and a
 	// writer captured old descriptors and must refuse a recreated installation.
 	cleanupStore, cleanupRoot := storageFixture(t)
-	if err = os.WriteFile(filepath.Join(cleanupRoot.Path, "state/unrelated"), []byte("keep"), 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(cleanupRoot.Path, "unrelated"), []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cleanupLife, err := cleanupStore.Lifecycle(t.Context())
@@ -647,7 +660,7 @@ func lockHelper(t *testing.T, mode string) {
 	}
 	if mode == "install-stale" {
 		opened, err := Open(t.Context(), root, func(op, path string) error {
-			if op == "lock-open" && path == "state/lifecycle.lock" {
+			if op == "lock-open" && path == "lifecycle.lock" {
 				fmt.Println("ready")
 			}
 			return nil
@@ -672,7 +685,7 @@ func lockHelper(t *testing.T, mode string) {
 	defer s.Close()
 	if mode == "lifecycle-stale" {
 		s.fault = func(op, path string) error {
-			if op == "lock-open" && path == "state/lifecycle.lock" {
+			if op == "lock-open" && path == "lifecycle.lock" {
 				fmt.Println("ready")
 			}
 			return nil
@@ -749,7 +762,7 @@ func lockHelper(t *testing.T, mode string) {
 		return
 	}
 	s.fault = func(op, path string) error {
-		if op == "lock-open" && ((mode == "purge-stale" && path == "state/state-gate.lock") || (mode != "purge-stale" && path == "state/state.lock")) {
+		if op == "lock-open" && ((mode == "purge-stale" && path == "state-gate.lock") || (mode != "purge-stale" && path == "state.lock")) {
 			fmt.Println("ready")
 		}
 		return nil

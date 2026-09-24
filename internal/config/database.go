@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const databasePath = "state/data-mate.db"
+const databasePath = "data-mate.db"
 
 // Ciphertext is an opaque authenticated bundle. This boundary accepts no secrets.
 type Ciphertext struct {
@@ -131,12 +131,12 @@ func (s *Store) initializeDatabase(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
-	gate, err := s.lock(ctx, "state/state-gate.lock", true, false)
+	gate, err := s.lock(ctx, "state-gate.lock", true, false)
 	if err != nil {
 		return err
 	}
 	defer releaseFile(gate)
-	state, err := s.lock(ctx, "state/state.lock", true, false)
+	state, err := s.lock(ctx, "state.lock", true, false)
 	if err != nil {
 		return err
 	}

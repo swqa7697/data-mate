@@ -41,6 +41,19 @@ func RemainingOwned(root Root) ([]string, error) {
 			return remaining, ErrOwnership
 		}
 	}
+	// Inspection detects an orphan executable but never grants deletion authority.
+	d, e := s.binaryDirectory()
+	if e == nil {
+		defer d.close()
+		var st unix.Stat_t
+		e = unix.Fstatat(int(d.dir.Fd()), "data-mate", &st, unix.AT_SYMLINK_NOFOLLOW)
+		if e == nil {
+			remaining = append(remaining, DevelopmentExecutable(root))
+		}
+	}
+	if e != nil && !errors.Is(e, os.ErrNotExist) {
+		return remaining, e
+	}
 	return remaining, nil
 }
 
@@ -62,11 +75,11 @@ func (l *LifecycleLease) CleanupLease(ctx context.Context) (_ *Lease, err error)
 	if err != nil {
 		return nil, err
 	}
-	n.gate, err = s.lock(ctx, "state/state-gate.lock", true, l.identity.Purging)
+	n.gate, err = s.lock(ctx, "state-gate.lock", true, l.identity.Purging)
 	if err != nil {
 		return nil, err
 	}
-	n.state, err = s.lock(ctx, "state/state.lock", true, l.identity.Purging)
+	n.state, err = s.lock(ctx, "state.lock", true, l.identity.Purging)
 	if err != nil {
 		return nil, err
 	}
@@ -95,19 +108,33 @@ func (l *Lease) RemoveBinary() error {
 	if err := l.check(); err != nil {
 		return err
 	}
-	return l.store.removeOptionalDirectoryFile("bin/data-mate")
-}
-
-func (s *Store) removeOptionalDirectoryFile(path string) error {
-	dir, _, err := splitOwned(path)
+	s := l.store
+	if s.identity.Executable == "" {
+		return nil
+	}
+	d, err := s.binaryDirectory()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	var st unix.Stat_t
-	if err = unix.Fstatat(int(s.dir.Fd()), dir, &st, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
-		return nil
+	defer d.close()
+	f, err := checkBinary(int(d.dir.Fd()), "data-mate", true)
+	if err != nil || f == nil {
+		return err
 	}
-	return s.remove(path)
+	defer f.Close()
+	if err = l.check(); err != nil {
+		return err
+	}
+	if d.check() != nil || !sameNamed(int(d.dir.Fd()), "data-mate", f) {
+		return ErrStale
+	}
+	if err = unix.Unlinkat(int(d.dir.Fd()), "data-mate", 0); err != nil {
+		return err
+	}
+	return d.dir.Sync()
 }
 
 // FinishPurge removes owned data before identity and stable locks. The caller
@@ -124,22 +151,18 @@ func (l *Lease) FinishPurge() error {
 	s := l.store
 	for _, path := range ownedPaths {
 		switch path {
-		case "state/installation.json", "state/lifecycle.lock", "state/state-gate.lock", "state/state.lock", "bin/data-mate", "state/purge.json", "state/purge.json.tmp":
+		case "installation.json", "lifecycle.lock", "state-gate.lock", "state.lock", "purge.json", "purge.json.tmp":
 			continue
 		}
-		if err := s.removeOptionalDirectoryFile(path); err != nil {
+		if err := s.remove(path); err != nil {
 			return err
 		}
 	}
 	if err := l.RemoveBinary(); err != nil {
 		return err
 	}
-	// Remove directories before relinquishing identity; installers still wait
-	// on lifecycle. Nonempty directories are unrelated user data, not errors.
-	for _, name := range []string{"config", "bin"} {
-		if err := s.removeEmptyDirectory(name); err != nil {
-			return err
-		}
+	if err := l.TrimBinaryDirectory(); err != nil {
+		return err
 	}
 	// Keep a terminal receipt until every stable lock is gone. A process
 	// interrupted after identity removal can still verify exactly this root.
@@ -147,23 +170,20 @@ func (l *Lease) FinishPurge() error {
 	if err != nil {
 		return err
 	}
-	if err = s.replace("state/purge.json", receipt); err != nil {
+	if err = s.replace("purge.json", receipt); err != nil {
 		return err
 	}
 	// No credential or external authority remains beyond this point. Remove
 	// identity after state locks so every interrupted prefix is reopenable.
-	for _, path := range []string{"state/state.lock", "state/state-gate.lock", "state/installation.json", "state/lifecycle.lock"} {
+	for _, path := range []string{"state.lock", "state-gate.lock", "installation.json", "lifecycle.lock"} {
 		if err := s.remove(path); err != nil {
 			return err
 		}
 	}
-	if err := s.remove("state/purge.json.tmp"); err != nil {
+	if err := s.remove("purge.json.tmp"); err != nil {
 		return err
 	}
-	if err := s.remove("state/purge.json"); err != nil {
-		return err
-	}
-	if err := s.removeEmptyDirectory("state"); err != nil {
+	if err := s.remove("purge.json"); err != nil {
 		return err
 	}
 	if err := s.validRoot(); err != nil {
@@ -176,30 +196,7 @@ func (l *Lease) FinishPurge() error {
 	return err
 }
 
-func (s *Store) removeEmptyDirectory(name string) error {
-	var st unix.Stat_t
-	if err := unix.Fstatat(int(s.dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
-		return nil
-	}
-	d, err := s.directory(name)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	if !sameNamed(int(s.dir.Fd()), name, d) {
-		return ErrStale
-	}
-	err = unix.Unlinkat(int(s.dir.Fd()), name, unix.AT_REMOVEDIR)
-	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return s.dir.Sync()
-}
-
-// TrimBinaryDirectory removes the now-empty binary directory on default uninstall.
+// TrimBinaryDirectory removes only the empty inventoried executable directory.
 func (l *Lease) TrimBinaryDirectory() error {
 	if l.parent == nil {
 		return ErrOwnership
@@ -207,5 +204,26 @@ func (l *Lease) TrimBinaryDirectory() error {
 	if err := l.check(); err != nil {
 		return err
 	}
-	return l.store.removeEmptyDirectory("bin")
+	if l.store.identity.Executable == "" {
+		return nil
+	}
+	d, err := l.store.binaryDirectory()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer d.close()
+	if err = d.check(); err != nil {
+		return err
+	}
+	err = unix.Unlinkat(int(d.parent.Fd()), "bin", unix.AT_REMOVEDIR)
+	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return d.parent.Sync()
 }

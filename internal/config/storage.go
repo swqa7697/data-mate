@@ -58,18 +58,18 @@ type Identity struct {
 	Purging             bool     `json:"purging"`
 	Owned               []string `json:"owned"`
 	KeyAccount          string   `json:"key_account"`
+	Executable          string   `json:"executable,omitempty"`
 }
 
 var ownedPaths = []string{
-	"state/data-mate.db", "state/data-mate.db-journal",
-	"state/installation.json", "state/installation.json.tmp",
-	"state/lifecycle.lock", "state/state-gate.lock", "state/state.lock",
-	"config/known_hosts", "config/known_hosts.tmp",
-	"state/service.json", "state/service.json.tmp",
-	"state/service.plist", "state/service.plist.tmp",
-	"state/registrations.json", "state/registrations.json.tmp",
-	"bin/data-mate",
-	"state/purge.json", "state/purge.json.tmp",
+	"data-mate.db", "data-mate.db-journal",
+	"installation.json", "installation.json.tmp",
+	"lifecycle.lock", "state-gate.lock", "state.lock",
+	"known_hosts", "known_hosts.tmp",
+	"service.json", "service.json.tmp",
+	"service.plist", "service.plist.tmp",
+	"registrations.json", "registrations.json.tmp",
+	"purge.json", "purge.json.tmp",
 }
 
 // Fault is an optional test seam called before/after durability boundaries. It
@@ -103,11 +103,11 @@ func OpenLifecycle(ctx context.Context, root Root) (*Store, error) {
 // readIdentity recognizes only an authenticated-by-ownership terminal receipt.
 // It permits cleanup retry after identity/lock removal, never ordinary startup.
 func (s *Store) readIdentity() ([]byte, bool, error) {
-	b, err := s.read("state/installation.json", 8192)
+	b, err := s.read("installation.json", 8192)
 	if !errors.Is(err, os.ErrNotExist) {
 		return b, false, err
 	}
-	b, err = s.read("state/purge.json", 8192)
+	b, err = s.read("purge.json", 8192)
 	if err != nil {
 		return nil, false, err
 	}
@@ -138,10 +138,6 @@ func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err e
 	}()
 	if err = s.validRoot(); err != nil {
 		return nil, err
-	}
-	var state unix.Stat_t
-	if e := unix.Fstatat(fd, "state", &state, unix.AT_SYMLINK_NOFOLLOW); errors.Is(e, unix.ENOENT) {
-		return nil, os.ErrNotExist
 	}
 	raw, terminal, err := s.readIdentity()
 	s.terminal = terminal
@@ -183,16 +179,6 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 	if err = s.checkObsolete(); err != nil {
 		return nil, err
 	}
-	for _, name := range []string{"state", "config"} {
-		if e := unix.Mkdirat(fd, name, 0700); e != nil && !errors.Is(e, unix.EEXIST) {
-			return nil, ErrOwnership
-		}
-		d, e := s.directory(name)
-		if e != nil {
-			return nil, e
-		}
-		d.Close()
-	}
 	if err = s.dir.Sync(); err != nil {
 		return nil, errors.New("cannot sync installation root")
 	}
@@ -201,22 +187,22 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 		return nil, err
 	}
 	defer unlock()
-	_, identityErr := s.read("state/installation.json", 8192)
+	_, identityErr := s.read("installation.json", 8192)
 	if identityErr != nil && !errors.Is(identityErr, os.ErrNotExist) {
 		return nil, identityErr
 	}
-	lifecycle, err := s.lock(ctx, "state/lifecycle.lock", true, errors.Is(identityErr, os.ErrNotExist))
+	lifecycle, err := s.lock(ctx, "lifecycle.lock", true, errors.Is(identityErr, os.ErrNotExist))
 	if err != nil {
 		return nil, err
 	}
 	defer releaseFile(lifecycle)
 	// A final purge receipt blocks initialization even after identity removal.
-	if _, e := s.read("state/purge.json", 8192); e == nil {
+	if _, e := s.read("purge.json", 8192); e == nil {
 		return nil, ErrPurging
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return nil, e
 	}
-	raw, err := s.read("state/installation.json", 8192)
+	raw, err := s.read("installation.json", 8192)
 	if errors.Is(err, os.ErrNotExist) {
 		var existing unix.Stat_t
 		if e := unix.Fstatat(int(s.dir.Fd()), databasePath, &existing, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(e, unix.ENOENT) {
@@ -248,7 +234,7 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 			}
 		}
 	}
-	for _, p := range []string{"state/state-gate.lock", "state/state.lock"} {
+	for _, p := range []string{"state-gate.lock", "state.lock"} {
 		flags := unix.O_RDWR
 		if !s.identity.ProfilesEstablished {
 			flags |= unix.O_CREAT
@@ -259,7 +245,7 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 		}
 		f.Close()
 	}
-	d, err := s.directory("state")
+	d, err := s.directory(".")
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +275,9 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 
 func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
+		return ErrOwnership
+	}
+	if id.Executable != "" && (id.Executable != DevelopmentExecutable(root) || strings.ContainsAny(id.Executable, "\x00\n\r\t")) {
 		return ErrOwnership
 	}
 	if id.Version != 2 {
@@ -359,7 +348,7 @@ func (s *Store) writeIdentity() error {
 	if err != nil {
 		return err
 	}
-	return s.replace("state/installation.json", b)
+	return s.replace("installation.json", b)
 }
 
 // Close releases the root descriptor. Leases must be released first.
@@ -380,17 +369,6 @@ func checkFD(fd int, directory bool) error {
 	return nil
 }
 
-// The executable has a distinct mode but the same no-link ownership contract.
-func checkOwnedFD(fd int, path string) error {
-	if path != "bin/data-mate" {
-		return checkFD(fd, false)
-	}
-	var st unix.Stat_t
-	if unix.Fstat(fd, &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&07777 != 0700 || st.Nlink != 1 {
-		return ErrOwnership
-	}
-	return nil
-}
 func sameNamed(parent int, name string, file *os.File) bool {
 	var opened, named unix.Stat_t
 	return unix.Fstat(int(file.Fd()), &opened) == nil && unix.Fstatat(parent, name, &named, unix.AT_SYMLINK_NOFOLLOW) == nil && opened.Dev == named.Dev && opened.Ino == named.Ino
@@ -402,7 +380,7 @@ func (s *Store) validRoot() error {
 	return nil
 }
 func (s *Store) directory(name string) (*os.File, error) {
-	if name != "state" && name != "config" && name != "bin" {
+	if name != "." {
 		return nil, ErrOwnership
 	}
 	if err := s.validRoot(); err != nil {
@@ -423,8 +401,7 @@ func splitOwned(path string) (string, string, error) {
 	if !slices.Contains(ownedPaths, path) {
 		return "", "", ErrOwnership
 	}
-	dir, name, _ := strings.Cut(path, "/")
-	return dir, name, nil
+	return ".", path, nil
 }
 func (s *Store) openFile(path string, flags int, mode uint32) (*os.File, error) {
 	dirname, name, err := splitOwned(path)
@@ -444,7 +421,7 @@ func (s *Store) openFile(path string, flags int, mode uint32) (*os.File, error) 
 		return nil, ErrOwnership
 	}
 	f := os.NewFile(uintptr(fd), name)
-	if checkOwnedFD(fd, path) != nil || !sameNamed(int(dir.Fd()), name, f) {
+	if checkFD(fd, false) != nil || !sameNamed(int(dir.Fd()), name, f) {
 		f.Close()
 		return nil, ErrOwnership
 	}

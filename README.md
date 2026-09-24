@@ -50,7 +50,7 @@ Stop the service with `make dev ARGS="mcp stop"`. Rebuilding a running installat
 | `mcp start` / `mcp stop` / `mcp status` | Manage and inspect the background service                                                |
 | `help` / `version`                      | Show command help or build information                                                   |
 
-All examples use `make dev ARGS="..."`, which runs `.dev/bin/data-mate` with this checkout's installation root. Run `make dev ARGS="db add --help"` for transport, limit, credential, and scope flags. `db list`, `db test`, `mcp start`, `mcp stop`, and `mcp status` accept `--json` for versioned machine output.
+All examples use `make dev ARGS="..."`, which runs `.dev/bin/data-mate` with `--root <checkout>/.dev/data-mate`. Run `make dev ARGS="db add --help"` for transport, limit, credential, and scope flags. `db list`, `db test`, `mcp start`, `mcp stop`, and `mcp status` accept `--json` for versioned machine output.
 
 For scripts, supply complete connection fields and `--yes`; use `--password-stdin` for one UTF-8 password line or `--credentials-stdin` for a strict JSON credential object. Data Mate does not accept secret values as command-line arguments. A passwordless connection requires explicit `--passwordless`.
 
@@ -76,7 +76,9 @@ The MCP service provides four tools:
 | `describe_table`   | Columns, types, keys, and visible relationships              |
 | `query`            | One read statement with bound parameters and bounded results |
 
-Queries run in read-only transactions. The query guard permits one `SELECT`-family statement and checks directly referenced relations against saved scope. By default, a profile allows a 60-second query budget, 500 returned rows, and a 1 MiB result limit; the query timeout can be configured up to five minutes. Data Mate stores nonsecret profiles and separate Tink-encrypted credential bundles in `.dev/state/data-mate.db`. One serialized AES-256-GCM Tink keyset per installation lives in the macOS Keychain. The service retains the loaded keyset until stopped; ordinary connection additions and edits then require no further Keychain access. Initialization and unlocking after restart may prompt, especially after an unsigned development rebuild. Noninteractive callers receive an unlock-required error when OS interaction is needed. Scope-only changes and deletion need no unlock. No MCP tool accepts credentials or changes saved connections.
+Queries run in read-only transactions. The query guard permits one `SELECT`-family statement and checks directly referenced relations against saved scope. By default, a profile allows a 60-second query budget, 500 returned rows, and a 1 MiB result limit; the query timeout can be configured up to five minutes. Data Mate stores nonsecret profiles and separate Tink-encrypted credential bundles in `.dev/data-mate/data-mate.db`. One serialized AES-256-GCM Tink keyset per installation lives in the macOS Keychain. The service retains the loaded keyset until stopped; ordinary connection additions and edits then require no further Keychain access. Initialization and unlocking after restart may prompt, especially after an unsigned development rebuild. Noninteractive callers receive an unlock-required error when OS interaction is needed. Scope-only changes and deletion need no unlock. No MCP tool accepts credentials or changes saved connections.
+
+Managed data files live directly in `.dev/data-mate/`: the database, installation identity, optional `known_hosts`, locks, and service/registration records. The executable remains separate at `.dev/bin/data-mate`. Direct executable invocation resolves the same data root regardless of the working directory. The future production equivalent is `~/.local/share/data-mate/`; production installation and defaults are not implemented yet.
 
 ## Development
 

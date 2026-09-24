@@ -35,22 +35,33 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootPath := filepath.Join(dir, ".dev")
-	if err = os.MkdirAll(filepath.Join(rootPath, "bin"), 0700); err != nil {
+	rootPath := filepath.Join(dir, ".dev", "data-mate")
+	if err = os.MkdirAll(filepath.Join(filepath.Dir(rootPath), "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(rootPath, 0700); err != nil {
 		t.Fatal(err)
 	}
 	root, err := config.ResolveRoot(rootPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(root.Path, "bin/data-mate")
-	cmd := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-trimpath", "-o", binary, "./cmd/data-mate")
+	binary := filepath.Join(filepath.Dir(root.Path), "bin/data-mate")
+	cmd := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-trimpath", "-o", binary+".build", "./cmd/data-mate")
 	cmd.Dir = "../../.."
 	if out, e := cmd.CombinedOutput(); e != nil {
 		t.Fatalf("native agent build: %v %s", e, out)
 	}
-	if err = os.Chmod(binary, 0700); err != nil {
+	if err = os.Chmod(binary+".build", 0700); err != nil {
 		t.Fatal(err)
+	}
+	temporary := filepath.Join(filepath.Dir(binary), ".data-mate.agents")
+	if err = os.Rename(binary+".build", temporary); err != nil {
+		t.Fatal(err)
+	}
+	install := exec.CommandContext(ctx, temporary, "__install", "--root", root.Path)
+	if out, e := install.CombinedOutput(); e != nil {
+		t.Fatalf("native agent install: %v %s", e, out)
 	}
 	run := func(input string, args ...string) ([]byte, error) {
 		c := exec.CommandContext(ctx, binary, args...)
@@ -63,6 +74,12 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 	if err != nil {
 		t.Fatal(err)
 	}
+	l, err := store.ReadLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := l.Identity().KeyAccount
+	l.Release()
 	clean := true
 	defer func() {
 		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
@@ -82,7 +99,7 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 			clean = false
 			t.Error("native agent registration cleanup", e)
 		}
-		if e = (vault.Keychain{}).Delete(cleanup, root.Digest); e != nil {
+		if e = (vault.Keychain{}).Delete(cleanup, account); e != nil {
 			clean = false
 			t.Error("native agent key cleanup", e)
 		}

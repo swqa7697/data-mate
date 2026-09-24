@@ -53,7 +53,13 @@ func (d *observedDriver) Close()       { d.mu.Lock(); defer d.mu.Unlock(); d.clo
 func (d *observedDriver) retired() int { d.mu.Lock(); defer d.mu.Unlock(); return len(d.invalidated) }
 func serviceFixture(t *testing.T) (*config.Store, config.Root) {
 	t.Helper()
-	path := t.TempDir()
+	path := filepath.Join(t.TempDir(), "data-mate")
+	if err := os.Chmod(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(path, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +128,7 @@ func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 		s.Close()
 		return err
 	}
-	f.job = job{true, os.Getpid(), filepath.Join(root.Path, "state/service.plist"), r.args()}
+	f.job = job{true, os.Getpid(), filepath.Join(root.Path, "service.plist"), r.args()}
 	f.starts++
 	if f.noReady {
 		s.Close()
@@ -189,7 +195,7 @@ func (f *fakeLaunch) Bootout(ctx context.Context, _ config.Root) error {
 func controllerFixture(t *testing.T) (*Controller, *fakeLaunch, *config.Store) {
 	t.Helper()
 	s, root := serviceFixture(t)
-	if err := os.Mkdir(filepath.Join(root.Path, "bin"), 0700); err != nil {
+	if err := os.Mkdir(filepath.Join(filepath.Dir(root.Path), "bin"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	exe, _ := os.Executable()
@@ -197,10 +203,19 @@ func controllerFixture(t *testing.T) (*Controller, *fakeLaunch, *config.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root.Path, "bin/data-mate"), binary, 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Dir(root.Path), "bin/.data-mate.fixture"), binary, 0700); err != nil {
 		t.Fatal(err)
 	}
-	hash, err := binaryHash(filepath.Join(root.Path, "bin/data-mate"))
+	l, e := s.Lifecycle(t.Context())
+	if e != nil {
+		t.Fatal(e)
+	}
+	e = l.InstallBinary(t.Context(), ".data-mate.fixture")
+	l.Release()
+	if e != nil {
+		t.Fatal(e)
+	}
+	hash, err := binaryHash(filepath.Join(filepath.Dir(root.Path), "bin/data-mate"))
 	if err != nil {
 		t.Fatal(err)
 	}

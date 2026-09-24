@@ -84,27 +84,28 @@ func installation(root config.Root, id config.Identity) identity {
 }
 
 type record struct {
-	Protocol int      `json:"protocol"`
-	Identity identity `json:"identity"`
-	Build    Build    `json:"build"`
-	Nonce    string   `json:"nonce"`
-	PID      int      `json:"pid"`
+	Protocol   int      `json:"protocol"`
+	Identity   identity `json:"identity"`
+	Build      Build    `json:"build"`
+	Nonce      string   `json:"nonce"`
+	PID        int      `json:"pid"`
+	Executable string   `json:"executable"`
 }
 
 func (r record) args() []string {
-	return []string{filepath.Join(r.Identity.Root, "bin/data-mate"), "__service", "--root", r.Identity.Root, "--instance", r.Nonce}
+	return []string{r.Executable, "__service", "--root", r.Identity.Root, "--instance", r.Nonce}
 }
 func label(root config.Root) string { return "com.data-mate.dev." + root.Digest[:16] }
 func socketDir(root config.Root) string {
 	return "/private/tmp/dm-" + itoa(os.Geteuid()) + "-" + root.Digest[:16]
 }
 func readRecord(read func(string, int) ([]byte, error), root config.Root, id config.Identity) (record, error) {
-	b, err := read("state/service.json", 4096)
+	b, err := read("service.json", 4096)
 	if err != nil {
 		return record{}, err
 	}
 	var r record
-	if config.DecodeStrict(b, 4096, &r) != nil || r.Protocol != 2 || r.Identity != installation(root, id) || !config.ValidUUID(r.Nonce) || r.PID < 0 || r.Build.Version == "" || r.Build.Revision == "" || len(r.Build.Fingerprint) != 64 {
+	if config.DecodeStrict(b, 4096, &r) != nil || r.Protocol != 2 || r.Executable == "" || r.Executable != id.Executable || r.Identity != installation(root, id) || !config.ValidUUID(r.Nonce) || r.PID < 0 || r.Build.Version == "" || r.Build.Revision == "" || len(r.Build.Fingerprint) != 64 {
 		return record{}, ErrState
 	}
 	return r, nil
@@ -114,6 +115,6 @@ func saveRecord(l *config.LifecycleLease, r record) error {
 	if err != nil {
 		return ErrState
 	}
-	return l.Replace("state/service.json", b)
+	return l.Replace("service.json", b)
 }
 func safePath(root config.Root) bool { return !strings.ContainsAny(root.Path, "\n\r\t\x00") }

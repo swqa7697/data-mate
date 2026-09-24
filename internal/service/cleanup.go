@@ -88,7 +88,7 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 	if err = m.RemoveOwned(ctx, l); err != nil {
 		return err
 	}
-	for _, path := range []string{"state/registrations.json.tmp", "state/registrations.json", "state/service.json.tmp", "state/service.plist.tmp", "state/service.plist"} {
+	for _, path := range []string{"registrations.json.tmp", "registrations.json", "service.json.tmp", "service.plist.tmp", "service.plist"} {
 		if err = l.Remove(path); err != nil {
 			return err
 		}

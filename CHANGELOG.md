@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add a checkout-local macOS Apple Silicon CLI with help, build-version reporting, executable-relative roots, and informational `upgrade`/`update` commands.
+- Add a checkout-local macOS Apple Silicon CLI with help, build-version reporting, a separate `.dev/data-mate/` data root beside `.dev/bin/data-mate`, executable-relative root discovery, and informational `upgrade`/`update` commands.
 - Add Make commands for local installation, atomic rebuilds, formatting, linting, and isolated unit and race tests, plus dependency-only `make setup` and optional `VERBOSE=1` setup/build diagnostics. Installation initializes nonsecret state and publishes executables under lifecycle locking; rebuilding reports when the service needs an explicit restart. `make clean` delegates to uninstall with purge disabled.
 - Add strict nonsecret connection profiles with validated scopes, transport settings, resource limits, and atomic SQLite persistence shared with encrypted credential records.
 - Add Tink AES-256-GCM credential bundles backed by one macOS Keychain keyset per installation, with authenticated connection binding, durable encryption accounting, atomic updates, and recoverable initialization and purge. The persistent service retains its unlocked keyset so ordinary connection saves require no further Keychain access.

@@ -18,7 +18,7 @@ build: ## Atomically rebuild .dev/bin/data-mate
 	@./scripts/build.sh
 
 dev: ## Run the installed binary (ARGS="help")
-	@"$(CURDIR)/.dev/bin/data-mate" --root "$(CURDIR)/.dev" $(ARGS)
+	@"$(CURDIR)/.dev/bin/data-mate" --root "$(CURDIR)/.dev/data-mate" $(ARGS)
 
 uninstall: ## Remove this installation; PURGE=1 also removes profiles and credentials
 	@./scripts/uninstall.sh

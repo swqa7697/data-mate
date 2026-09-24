@@ -80,21 +80,25 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var controllers []*Controller
+	var accounts []string
 	for _, name := range []string{"first checkout " + strings.Repeat("long", 35), "second checkout"} {
-		path := filepath.Join(dir, name, ".dev")
-		if err = os.MkdirAll(filepath.Join(path, "bin"), 0700); err != nil {
+		path := filepath.Join(dir, name, ".dev", "data-mate")
+		if err = os.MkdirAll(filepath.Join(filepath.Dir(path), "bin"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 		root, e := config.ResolveRoot(path, "")
 		if e != nil {
 			t.Fatal(e)
 		}
-		tmp := filepath.Join(root.Path, "bin/.data-mate.native")
+		tmp := filepath.Join(filepath.Dir(root.Path), "bin/.data-mate.native")
 		if e = os.WriteFile(tmp, data, 0700); e != nil {
 			t.Fatal(e)
 		}
 		run(tmp, "__install", "--root", root.Path)
-		binary := filepath.Join(root.Path, "bin/data-mate")
+		binary := filepath.Join(filepath.Dir(root.Path), "bin/data-mate")
 		hash, e := binaryHash(binary)
 		if e != nil {
 			t.Fatal(e)
@@ -108,6 +112,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		account := lease.Identity().KeyAccount
+		accounts = append(accounts, account)
 		lease.Release()
 		store.Close()
 		c := New(root, Build{"native", "p8-native", hash})
@@ -170,15 +175,13 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal("unexpected installed bridge diagnostics")
 		}
 
-		if _, e = os.Lstat(filepath.Join(root.Path, "state/vault.json")); !os.IsNotExist(e) {
-			t.Fatal("empty startup created vault", e)
-		}
-		if _, e = nativeStart(t, ctx, c); e != nil {
-			t.Fatal("reuse", e)
+		ready, e := nativeStart(t, ctx, c)
+		if e != nil || ready.KeysetState != "absent" || !ready.MCPEnabled {
+			t.Fatal("empty service initialized keyset", ready, e)
 		}
 	}
 	c := controllers[0]
-	binary := filepath.Join(c.Root.Path, "bin/data-mate")
+	binary := filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate")
 	var wg sync.WaitGroup
 	starts := make(chan error, 4)
 	for range 4 {
@@ -281,7 +284,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Fatal("native existing vault readiness", e)
 	}
 
-	path := filepath.Join(c.Root.Path, "state/data-mate.db")
+	path := filepath.Join(c.Root.Path, "data-mate.db")
 	profiles, e := os.ReadFile(path)
 	if e != nil {
 		t.Fatal(e)
@@ -319,7 +322,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Fatal("explicit crash restart", e)
 	}
 	// A byte-changing rebuild is published through the actual hidden install entry.
-	changed := filepath.Join(c.Root.Path, "bin/.data-mate.changed")
+	changed := filepath.Join(filepath.Dir(c.Root.Path), "bin/.data-mate.changed")
 	build("p8-changed", changed)
 	out := run(changed, "__install", "--root", c.Root.Path)
 	if len(out) == 0 {
@@ -350,7 +353,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	if _, e = newer.Stop(ctx); e != nil {
 		t.Fatal(e)
 	}
-	restore := filepath.Join(c.Root.Path, "bin/.data-mate.restore")
+	restore := filepath.Join(filepath.Dir(c.Root.Path), "bin/.data-mate.restore")
 	if e = os.WriteFile(restore, data, 0700); e != nil {
 		t.Fatal(e)
 	}
@@ -406,7 +409,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	foreignPresent = false
 	run(binary, "mcp", "start", "--json")
 	retained := map[string][]byte{}
-	for _, path := range []string{"state/data-mate.db", "state/installation.json"} {
+	for _, path := range []string{"data-mate.db", "installation.json"} {
 		b, err := os.ReadFile(filepath.Join(c.Root.Path, path))
 		if err != nil {
 			t.Fatal(err)
@@ -436,7 +439,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			}
 		}
 	}
-	if e = os.Mkdir(filepath.Join(c.Root.Path, "bin"), 0700); e != nil {
+	if e = os.Mkdir(filepath.Join(filepath.Dir(c.Root.Path), "bin"), 0700); e != nil {
 		t.Fatal(e)
 	}
 	if e = os.WriteFile(restore, data, 0700); e != nil {
@@ -445,14 +448,14 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	run(restore, "__install", "--root", c.Root.Path)
 	run(binary, "mcp", "start", "--json") // authenticates the retained vault/key in a new process
 	run(original, "__uninstall", "--root", c.Root.Path, "--purge")
-	if _, e = (vault.Keychain{}).Load(ctx, c.Root.Digest); !errors.Is(e, vault.ErrMissing) {
+	if _, e = (vault.Keychain{}).Load(ctx, accounts[0]); !errors.Is(e, vault.ErrMissing) {
 		t.Fatal("native purge key remains", e)
 	}
 	if b, err := os.ReadFile(sentinel); err != nil || string(b) != "keep" {
 		t.Fatal("native purge unrelated data", err)
 	}
-	for _, path := range []string{"config", "state", "bin"} {
-		if _, err := os.Lstat(filepath.Join(c.Root.Path, path)); !os.IsNotExist(err) {
+	for _, path := range []string{filepath.Join(c.Root.Path, "data-mate.db"), filepath.Join(c.Root.Path, "installation.json"), filepath.Join(filepath.Dir(c.Root.Path), "bin")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatal("native purge artifact remains", path, err)
 		}
 	}
@@ -466,7 +469,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 
 func nativeStart(t *testing.T, ctx context.Context, c *Controller) (Status, error) {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, filepath.Join(c.Root.Path, "bin/data-mate"), "mcp", "start", "--json")
+	cmd := exec.CommandContext(ctx, filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate"), "mcp", "start", "--json")
 	var out, diag bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &diag

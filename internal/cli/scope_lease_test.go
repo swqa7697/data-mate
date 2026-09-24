@@ -63,7 +63,7 @@ func scopeLeaseAcceptance(t *testing.T) {
 	go func() { done <- cmd.ExecuteContext(ctx) }()
 	// The writer owns admission only once it is waiting for the child's read
 	// lease. Observe the OS lock instead of guessing from elapsed sleeps.
-	gate, err := os.OpenFile(filepath.Join(root, "state/state-gate.lock"), os.O_RDWR, 0)
+	gate, err := os.OpenFile(filepath.Join(root, "state-gate.lock"), os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

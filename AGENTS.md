@@ -2,7 +2,7 @@
 
 ## Scope and sources of truth
 
-- Data Mate is one Go executable for macOS on Apple Silicon, installed in the checkout's `.dev`, exposing read-only PostgreSQL access through MCP. PostgreSQL 16 and 18 are the integration test matrix.
+- Data Mate is one Go executable for macOS on Apple Silicon, installed at `.dev/bin/data-mate`, with managed data directly in `.dev/data-mate/`, exposing read-only PostgreSQL access through MCP. PostgreSQL 16 and 18 are the integration test matrix.
 - Read [PRD](specs/PRD.md) for product scope, [DESIGN](specs/DESIGN.md) for target technical contracts, and [README](README.md) for implemented commands and setup. An accepted design may precede implementation; document that distinction and update usage documentation when behavior lands.
 - Keep retained development artifacts, such as test results, diagnostic logs and performance measurements, in ignored `.misc`. `.tmp` is developer-managed; read supplied reference material there without modifying it.
 - [CLAUDE.md](CLAUDE.md) points here. Maintain one shared set of project guidelines.
@@ -44,7 +44,7 @@
 - Validate input size, structure, duplicate keys, versions and unknown fields before use. Saved scope controls directly referenced application relations; PostgreSQL enforces privileges and query semantics.
 - Use a dedicated operator-managed read-only PostgreSQL account and a read-only transaction for every PostgreSQL operation. Internal SQLite state changes use write transactions under the service's mutation and ownership contracts. Keep the PostgreSQL query guard limited to statement kind and direct relation scope; trust database-defined views, routines, types, indexes, partitions and RLS. Preserve resource bounds and do not reintroduce semantic manifests or exhaustive privilege audits.
 - Use explicit connection/transport configuration. Do not inherit ambient database credentials, SSH agents or proxy settings as fallback behavior.
-- Resolve installation paths independently of the caller's working directory. Verify ownership and symlink safety before mutating owned state; preserve unrelated files and external certificates/key sources.
+- Resolve the data root independently of the caller's working directory. Keep the installed executable binding separate from the data-file inventory; service launch, agent registration, and cleanup use its verified recorded path. Verify ownership and symlink safety before mutating owned state; preserve unrelated files and external certificates/key sources.
 - Keep stdout reserved for requested machine/protocol output where applicable. Report diagnostics to stderr and preserve the documented success, operational failure, invalid input and cancellation exit codes.
 
 ## Development commands and validation

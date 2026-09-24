@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-// Root identifies a canonical development installation without creating state.
+// Root identifies a canonical data directory without creating state.
 type Root struct {
 	Path   string
 	Digest string
@@ -30,7 +30,7 @@ func ResolveRoot(override, executable string) (Root, error) {
 		if filepath.Base(real) != "data-mate" || filepath.Base(filepath.Dir(real)) != "bin" {
 			return Root{}, errors.New("use installed bin/data-mate or an absolute --root")
 		}
-		path = filepath.Dir(filepath.Dir(real))
+		path = filepath.Join(filepath.Dir(filepath.Dir(real)), "data-mate")
 	}
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
