@@ -3,7 +3,7 @@
 ## Scope and sources of truth
 
 - Data Mate is one Go executable for macOS on Apple Silicon, installed in the checkout's `.dev`, exposing read-only PostgreSQL access through MCP. PostgreSQL 16 and 18 are the integration test matrix.
-- Read [PRD](specs/PRD.md) for product scope, [DESIGN](specs/DESIGN.md) for technical contracts, and [README](README.md) for implemented commands and setup. Keep them synchronized when behavior changes.
+- Read [PRD](specs/PRD.md) for product scope, [DESIGN](specs/DESIGN.md) for target technical contracts, and [README](README.md) for implemented commands and setup. An accepted design may precede implementation; document that distinction and update usage documentation when behavior lands.
 - Keep retained development artifacts, such as test results, diagnostic logs and performance measurements, in ignored `.misc`. `.tmp` is developer-managed; read supplied reference material there without modifying it.
 - [CLAUDE.md](CLAUDE.md) points here. Maintain one shared set of project guidelines.
 
@@ -12,21 +12,24 @@
 | Location | Responsibility |
 | --- | --- |
 | `cmd/data-mate`, `internal/cli` | Process entry, command parsing, forms, output and exit contracts |
-| `internal/config`, `internal/contracts` | Nonsecret profiles, roots, revisions, bounded decoding and public schemas |
-| `internal/vault` | Encrypted credentials and the native OS key-provider boundary |
+| `internal/config` | Profile validation, roots, revisions, SQLite schema/transactions, ownership and locks |
+| `internal/contracts` | Bounded decoding, public schemas and safe error codes |
+| `internal/vault` | Tink credential encryption, authenticated context, keyset lifecycle and the OS key-provider boundary |
 | `internal/database`, `internal/database/postgres` | Driver operations, catalog access, query guard and codecs |
 | `internal/transport` | Explicit direct/TLS/SSH/SOCKS5 connection paths |
-| `internal/service`, `internal/mcp` | Lifecycle, admission, sessions, tool dispatch and the stdio bridge |
+| `internal/service` | Lifecycle, admission, private management requests, profile mutations and shared database operations |
+| `internal/mcp` | Read-only tool dispatch, MCP sessions and the stdio bridge |
 | `internal/agent` | Codex/Claude registration and ownership verification |
 | `internal/devtools`, `scripts`, `.github/workflows` | Developer command regressions, tooling and CI |
 
-- Keep database and authorization behavior shared across CLI/MCP callers. Agent adapters own registration and compatibility; the bridge must not acquire vault or driver responsibilities.
+- Keep database and authorization behavior shared across CLI/MCP callers through the service. The service owns normal OS keyset access and credential encryption/decryption; the CLI submits credential patches through the private management protocol. Agent adapters own registration and compatibility; the bridge must not acquire vault or driver responsibilities. MCP and the bridge must not acquire management, keyset-export or saved-password retrieval endpoints.
+- Keep management-only service startup separate from explicit MCP enablement. Passive listing and previews read nonsecret state without starting the service or unlocking the keyset. Ordinary connection edits use the service's loaded keyset without additional OS credential-store access; follow DESIGN for initialization, restart and cleanup exceptions.
 - Prefer concrete packages and small functions. Introduce interfaces only at real external seams used by callers/tests; do not add a plugin framework or universal query abstraction in advance.
 - Keep deterministic parsing/validation separate from filesystem, subprocess, network and key-store effects. Follow DESIGN for lock ordering, publication and cleanup contracts.
 
 ## Go and shell conventions
 
-- Use the Go standard library for JSON, crypto, logging, filesystem and process primitives where suitable. Keep dependencies and developer tools pinned in `go.mod`/`go.sum`; avoid floating versions in scripts.
+- Use the Go standard library for JSON, logging, filesystem/process primitives and non-credential hashing where suitable. Use Tink for credential encryption, nonce generation, authentication and ciphertext/keyset formats; do not construct a custom encryption envelope or key-wrapping scheme. Keep Tink, the SQLite driver, OS bindings and developer tools pinned in `go.mod`/`go.sum`; avoid floating versions in scripts.
 - Follow established Go naming and `gofmt`; document exported contracts and non-obvious invariants. Return errors instead of panicking on user input or operational failures.
 - Propagate `context.Context` through blocking operations. Bound concurrency and resource use; make ownership, cancellation and cleanup explicit for goroutines, locks, connections and subprocesses.
 - Wrap internal errors where useful, but translate them into safe public diagnostics at CLI/MCP boundaries. Do not expose secret-bearing upstream errors.
@@ -36,8 +39,10 @@
 ## Security and data contracts
 
 - Profiles contain nonsecret settings only. Never persist plaintext credentials or expose them through command arguments, previews, logs or MCP responses. Use synthetic secret values in tests; never commit real credentials.
+- Store profiles and opaque encrypted credential bundles in separate SQLite records, publishing their changes and revision generation in one transaction. Credentials must be encrypted before reaching SQLite, including its journal and temporary storage. SQLite is authoritative; legacy JSON profiles are not a parallel configuration source. Follow DESIGN for usage reservations, OS keyset initialization and recovery across those separate stores.
+- Keep one serialized Tink keyset per installation in OS secure storage. Keyset bytes must not enter SQLite, files, environment variables or subprocess output. Preserve ciphertext on decryption failure and never silently replace a missing keyset or fall back to plaintext storage. Verify database and sidecar ownership before opening them; leave journal recovery to SQLite.
 - Validate input size, structure, duplicate keys, versions and unknown fields before use. Saved scope controls directly referenced application relations; PostgreSQL enforces privileges and query semantics.
-- Use a dedicated operator-managed read-only database account and a read-only transaction for every database operation. Keep the query guard limited to statement kind and direct relation scope; trust database-defined views, routines, types, indexes, partitions and RLS. Preserve resource bounds and do not reintroduce semantic manifests or exhaustive privilege audits.
+- Use a dedicated operator-managed read-only PostgreSQL account and a read-only transaction for every PostgreSQL operation. Internal SQLite state changes use write transactions under the service's mutation and ownership contracts. Keep the PostgreSQL query guard limited to statement kind and direct relation scope; trust database-defined views, routines, types, indexes, partitions and RLS. Preserve resource bounds and do not reintroduce semantic manifests or exhaustive privilege audits.
 - Use explicit connection/transport configuration. Do not inherit ambient database credentials, SSH agents or proxy settings as fallback behavior.
 - Resolve installation paths independently of the caller's working directory. Verify ownership and symlink safety before mutating owned state; preserve unrelated files and external certificates/key sources.
 - Keep stdout reserved for requested machine/protocol output where applicable. Report diagnostics to stderr and preserve the documented success, operational failure, invalid input and cancellation exit codes.
