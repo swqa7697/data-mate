@@ -1,6 +1,7 @@
 package sqlpolicy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -117,6 +118,10 @@ func verifyConcurrentCatalogs(t *testing.T) {
 				if err := VerifyCatalog(c.major, c.data); err != nil {
 					t.Errorf("concurrent major %d: %v", c.major, err)
 				}
+				digest, err := CatalogFingerprint(c.major)
+				if err != nil || VerifyCatalogFingerprint(c.major, int64(len(c.data)), digest[:]) != nil {
+					t.Errorf("concurrent fingerprint major %d: %v", c.major, err)
+				}
 				if _, err := loadSignatures(c.major); err != nil {
 					t.Errorf("signature initialization: %v", err)
 				}
@@ -128,6 +133,23 @@ func verifyConcurrentCatalogs(t *testing.T) {
 
 func verifyCatalogMutations(t *testing.T) {
 	t.Helper()
+	// Extend the same corpus through both the previous full-document verifier and
+	// the compact verifier; every accepted/rejected semantic outcome must agree.
+	verify := func(major int, b []byte) error {
+		reference := VerifyCatalog(major, b)
+		_, err := decodeCatalog(b)
+		if err == nil {
+			var digest [32]byte
+			digest, err = fingerprintCatalog(major, b)
+			if err == nil {
+				err = VerifyCatalogFingerprint(major, int64(len(b)), digest[:])
+			}
+		}
+		if (reference == nil) != (err == nil) {
+			t.Fatal("fingerprint changed semantic acceptance", reference, err)
+		}
+		return err
+	}
 	decode := func() map[string]any {
 		t.Helper()
 		var doc map[string]any
@@ -143,6 +165,17 @@ func verifyCatalogMutations(t *testing.T) {
 		name   string
 		change func(map[string]any)
 	}{
+		{"null versus empty array", func(d map[string]any) { row(d, "functions")["proconfig"] = []any{} }},
+		{"function argument order", func(d map[string]any) {
+			for _, v := range d["functions"].([]any) {
+				args := v.(map[string]any)["proargtypes"].([]any)
+				if len(args) > 1 && args[0] != args[1] {
+					args[0], args[1] = args[1], args[0]
+					return
+				}
+			}
+			t.Fatal("no heterogeneous signature in fixture")
+		}},
 		{"function implementation", func(d map[string]any) { row(d, "functions")["prosrc"] = "unapproved_implementation" }},
 		{"function security", func(d map[string]any) { row(d, "functions")["prosecdef"] = true }},
 		{"operator implementation", func(d map[string]any) { row(d, "operators")["oprcode"] = 31 }},
@@ -182,7 +215,7 @@ func verifyCatalogMutations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if VerifyCatalog(16, b) == nil {
+		if verify(16, b) == nil {
 			t.Fatalf("catalog accepted %s", mutation.name)
 		}
 	}
@@ -199,17 +232,17 @@ func verifyCatalogMutations(t *testing.T) {
 				doc[section] = append(rows, rows[0])
 			}
 			b, _ := json.Marshal(doc)
-			if VerifyCatalog(16, b) == nil {
+			if verify(16, b) == nil {
 				t.Fatalf("catalog accepted %s: %s", section, action)
 			}
 		}
 	}
 	for _, b := range [][]byte{[]byte(`{}`), append(append([]byte{}, catalog16...), []byte(` {}`)...), []byte(`{"types":[],"types":[]}`), []byte(`{"types":[{"oid":16,"oid":17}]}`), []byte(strings.Repeat(" ", (2<<20)+1))} {
-		if VerifyCatalog(16, b) == nil {
+		if verify(16, b) == nil {
 			t.Fatal("malformed catalog accepted")
 		}
 	}
-	if VerifyCatalog(17, catalog16) == nil || VerifyCatalog(18, catalog16) == nil {
+	if verify(17, catalog16) == nil || verify(18, catalog16) == nil {
 		t.Fatal("wrong major accepted")
 	}
 	doc := decode()
@@ -220,9 +253,10 @@ func verifyCatalogMutations(t *testing.T) {
 		}
 	}
 	b, _ := json.Marshal(doc)
-	if err := VerifyCatalog(16, b); err != nil {
+	if err := verify(16, b); err != nil {
 		t.Fatal("row order affected semantic verification", err)
 	}
+	verifyCatalogEncoding(t)
 }
 
 // The native C parser cannot be interrupted by a Go context. Run worst shapes
@@ -255,4 +289,34 @@ func FuzzCompiler(f *testing.F) {
 		}
 		_, _ = compileFixture(s)
 	})
+}
+
+// Ladder 2: canonical encoding extends the compiler/catalog boundary. The same
+// vectors are executed by PostgreSQL in the existing owned integration scenario.
+func verifyCatalogEncoding(t *testing.T) {
+	t.Helper()
+	b, err := os.ReadFile("testdata/catalog-encoding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name      string
+		Input     json.RawMessage
+		Canonical string
+	}
+	if err = json.Unmarshal(b, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		d := json.NewDecoder(bytes.NewReader(c.Input))
+		d.UseNumber()
+		var value any
+		if err = d.Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+		actual, e := appendCatalogJSON(nil, value)
+		if e != nil || string(actual) != c.Canonical {
+			t.Fatalf("canonical encoding %s: %q %v", c.Name, actual, e)
+		}
+	}
 }

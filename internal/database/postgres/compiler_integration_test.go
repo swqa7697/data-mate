@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -286,6 +287,7 @@ func fixtureQuery(ctx context.Context, tx pgx.Tx, sql string, params []sqlpolicy
 // and incidental row IDs from a callable's security/behavioral properties.
 func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Access, admin *pgx.Conn) {
 	t.Helper()
+	catalogFingerprintAcceptance(t, d, access, admin)
 	var cost float64
 	var strict bool
 	if err := admin.QueryRow(t.Context(), "SELECT procost,proisstrict FROM pg_catalog.pg_proc WHERE oid='pg_catalog.int4pl(int4,int4)'::regprocedure").Scan(&cost, &strict); err != nil {
@@ -358,4 +360,98 @@ func catalogCompatibilityAcceptance(t *testing.T, d *Driver, access database.Acc
 		}()
 	}
 	t.Log("catalog compatibility: cost accepted; strictness rejected and restored; four incidental row identities accepted")
+}
+
+// Ladder 2: extend the existing live-catalog scenario with encoding equivalence,
+// compact wire results, and server-side bounds. Only the owned fixture is used.
+func catalogFingerprintAcceptance(t *testing.T, d *Driver, access database.Access, admin *pgx.Conn) {
+	t.Helper()
+	var version int
+	if err := admin.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (int64, []byte) {
+		t.Helper()
+		rows, err := admin.Query(t.Context(), sqlpolicy.CatalogFingerprintSQL, version/10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.Fatal("missing fingerprint", rows.Err())
+		}
+		size := 0
+		for _, v := range rows.RawValues() {
+			size += len(v)
+		}
+		if size >= 1024 {
+			t.Fatal("catalog response exceeded compact budget", size)
+		}
+		var count int64
+		var digest []byte
+		if err = rows.Scan(&count, &digest); err != nil {
+			t.Fatal(err)
+		}
+		if rows.Next() || rows.Err() != nil {
+			t.Fatal("unexpected fingerprint rows", rows.Err())
+		}
+		return count, digest
+	}
+	count, digest := read()
+	if err := sqlpolicy.VerifyCatalogFingerprint(version/10000, count, digest); err != nil {
+		t.Fatal("live fingerprint differs from reviewed manifest", err)
+	}
+	// Full extraction is allowed in this owned-fixture oracle, never at runtime.
+	var raw string
+	if err := admin.QueryRow(t.Context(), sqlpolicy.CatalogSQL).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) != count || sqlpolicy.VerifyCatalog(version/10000, []byte(raw)) != nil {
+		t.Fatal("full and compact verification disagree")
+	}
+	b, err := os.ReadFile("sqlpolicy/testdata/catalog-encoding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name      string
+		Input     json.RawMessage
+		Canonical string
+	}
+	if err = json.Unmarshal(b, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		var actual string
+		if err = admin.QueryRow(t.Context(), "SELECT $1::jsonb::text", string(c.Input)).Scan(&actual); err != nil || actual != c.Canonical {
+			t.Fatalf("PostgreSQL canonical encoding %s: %q %v", c.Name, actual, err)
+		}
+	}
+	// A huge callback definition previously hit the wire-message cap. Hashing
+	// must retain that limit, while never sending the oversized body to the client.
+	var source string
+	if err = admin.QueryRow(t.Context(), "SELECT prosrc FROM pg_catalog.pg_proc WHERE oid='pg_catalog.int4pl(int4,int4)'::regprocedure").Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, e := admin.Exec(ctx, "UPDATE pg_catalog.pg_proc SET prosrc=$1 WHERE oid='pg_catalog.int4pl(int4,int4)'::regprocedure", source); e != nil {
+			t.Errorf("restore catalog source: %v", e)
+		}
+	}
+	defer restore()
+	if _, err = admin.Exec(t.Context(), "UPDATE pg_catalog.pg_proc SET prosrc=pg_catalog.repeat('x',2097152) WHERE oid='pg_catalog.int4pl(int4,int4)'::regprocedure"); err != nil {
+		t.Fatal(err)
+	}
+	count, digest = read()
+	if count <= 2<<20 || digest != nil {
+		t.Fatal("oversized catalog was hashed", count)
+	}
+	_, err = d.Test(t.Context(), access)
+	requireCode(t, err, contracts.ResourceLimit)
+	restore()
+	if _, err = d.Test(t.Context(), access); err != nil {
+		t.Fatal("restored bounded catalog rejected", err)
+	}
 }

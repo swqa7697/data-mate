@@ -21,3 +21,7 @@
 - Add four read-only MCP tools and an authenticated stdio bridge, with strict schemas, scoped metadata, shared query authorization, bounded sessions and payloads, cancellation, and redacted errors.
 - Add automatic user-scope Codex/Claude registration after service readiness, passive per-agent status, conflict preservation, and recoverable ownership records; partial registration failures keep the service available.
 - Add ownership-checked uninstall with credential-preserving reinstall, explicit `PURGE=1` exact-key cleanup, lifecycle serialization, interruption recovery and retained cleanup helpers on failure.
+
+### Changed
+
+- Reduce PostgreSQL catalog transfers to a byte count and SHA-256 fingerprint while preserving fresh verification, catalog size limits, and fail-closed checks.

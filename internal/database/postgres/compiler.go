@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -40,11 +41,23 @@ func compileSQL(ctx context.Context, tx pgx.Tx, scope config.Scope, version int,
 }
 
 func verifyCatalog(ctx context.Context, tx pgx.Tx, version int) error {
-	var actual string
-	if err := tx.QueryRow(ctx, sqlpolicy.CatalogSQL).Scan(&actual); err != nil {
+	major := version / 10000
+	if _, err := sqlpolicy.CatalogFingerprint(major); err != nil {
 		return err
 	}
-	return sqlpolicy.VerifyCatalog(version/10000, []byte(actual))
+	var size *int64
+	var fingerprint []byte
+	if err := tx.QueryRow(ctx, sqlpolicy.CatalogFingerprintSQL, major).Scan(&size, &fingerprint); err != nil {
+		var scan pgx.ScanArgError
+		if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &scan) {
+			return database.Fail(contracts.QueryUnsupported, "invalid PostgreSQL catalog fingerprint", false)
+		}
+		return err
+	}
+	if size == nil {
+		return database.Fail(contracts.QueryUnsupported, "missing PostgreSQL catalog size", false)
+	}
+	return sqlpolicy.VerifyCatalogFingerprint(major, *size, fingerprint)
 }
 
 type compilerCatalog struct {

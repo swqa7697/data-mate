@@ -29,7 +29,7 @@ type executionSpy struct {
 }
 
 func (s *executionSpy) QueryRow(ctx context.Context, q string, args ...any) pgx.Row {
-	if q == sqlpolicy.CatalogSQL && s.onCatalog != nil {
+	if q == sqlpolicy.CatalogFingerprintSQL && s.onCatalog != nil {
 		s.onCatalog()
 		s.onCatalog = nil
 	}

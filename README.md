@@ -328,8 +328,12 @@ The explicit allowances are cast/opclass/family-member/support-entry row OIDs,
 function `procost`/`prorows`, and aggregate `aggtransspace`/`aggmtransspace`.
 Stable built-in identities, implementation callbacks and safety flags remain
 verified; owner/ACL fields are covered by separate role/privilege checks.
-Only embedded policy is cached; live metadata is checked during compilation
-and again after locking, including queries without base relations.
+Only embedded policy and its expected SHA-256 fingerprint are cached. PostgreSQL
+computes a fresh fingerprint of the audited live metadata during compilation
+and again after locking, including queries without base relations. Each check
+returns only the catalog byte count and 32-byte digest, avoiding full catalog
+transfers on slow connections. The 2 MiB catalog bound still applies; a mismatch
+fails closed without downloading the full catalog or increasing the timeout.
 The compiler contract documents candidate export through the owned integration
 harness. The MCP `query` tool uses this executor through the service manager.
 

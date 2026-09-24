@@ -1,0 +1,44 @@
+[
+  {
+    "name": "escaping",
+    "input": {
+      "z": "<>&/",
+      "a": "quote\"\\\b\f\n\r\t\u0001\u00e9\u2028\u2029\ud83d\ude00",
+      "aa": null
+    },
+    "canonical": "{\"a\": \"quote\\\"\\\\\\b\\f\\n\\r\\t\\u0001\u00e9\u2028\u2029\ud83d\ude00\", \"z\": \"<>&/\", \"aa\": null}"
+  },
+  {
+    "name": "byte key order",
+    "input": {
+      "\u00e4": 2,
+      "aa": 1,
+      "b": 0,
+      "a": -1,
+      "ccc": 4294967295
+    },
+    "canonical": "{\"a\": -1, \"b\": 0, \"aa\": 1, \"\u00e4\": 2, \"ccc\": 4294967295}"
+  },
+  {
+    "name": "nested ordered arrays",
+    "input": {
+      "bb": [],
+      "a": [
+        null,
+        [],
+        [
+          3,
+          1,
+          2
+        ],
+        true,
+        false,
+        {
+          "b": 0,
+          "a": 1
+        }
+      ]
+    },
+    "canonical": "{\"a\": [null, [], [3, 1, 2], true, false, {\"a\": 1, \"b\": 0}], \"bb\": []}"
+  }
+]

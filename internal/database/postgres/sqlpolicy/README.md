@@ -69,12 +69,34 @@ role/privilege checks are separate. Operator-class row OIDs are resolved through
 live catalog joins, including when checking a table's indexes.
 
 Each major's embedded policy is validated and indexed once with `sync.OnceValues`.
-Only this private immutable policy is cached. Every compilation fetches and
-verifies live metadata; no authorization result survives a request. Input is
+Only this private immutable policy and its locally derived SHA-256 fingerprint
+are cached. Every compilation verifies a freshly computed live fingerprint;
+no authorization result survives a request. Input is
 bounded to 2 MiB, with duplicate JSON keys, unknown/missing fields, malformed OIDs,
 missing/duplicate/unexpected records and dangling implementation references
 rejected. Presence checks distinguish an omitted field from false, zero or null.
 Unsupported majors and changed semantic definitions fail with `QUERY_UNSUPPORTED`.
+
+Runtime checks wrap the unchanged extraction query and return the UTF-8 byte
+length of its JSON document plus a 32-byte SHA-256 digest. Oversized documents
+return no digest and fail with `RESOURCE_LIMIT` above 2 MiB. Invalid sizes,
+missing/malformed digests, and mismatches fail closed. Unsupported majors are
+rejected before catalog access. There is no full-document fallback or extra
+round trip, and the timeout contract is unchanged. Full extraction remains
+available for owned-fixture exports and the integration oracle.
+
+The fingerprint input is UTF-8 `data-mate-catalog-v1:<major>:` followed by
+normalized JSONB text. Within each category, complete record encodings sort by
+bytes (`COLLATE "C"` in PostgreSQL), preserving duplicates; arrays inside records
+retain their order. Object keys sort by UTF-8 byte length and then bytes. JSONB
+uses spaces after commas/colons, exact decimal integers, explicit nulls, and
+JSON string escaping without HTML or U+2028/U+2029 escaping. The private Go
+encoder derives this representation from strictly validated embedded manifests;
+no expected values are learned from the connected database. Owned PostgreSQL
+16/18 regressions compare the runtime fingerprints and curated encoding vectors
+against PostgreSQL. These checks rely on SHA-256 collision resistance and the
+existing trust boundary for administrator-controlled built-ins; no extension
+or server installation is required.
 
 The emitter's SQL subset remains fixed: a referenced function's presence does
 not make it callable by user SQL. Default, C and POSIX collations are allowed;
@@ -112,7 +134,7 @@ new plan within a read-only READ COMMITTED transaction, locks captured relations
 in deterministic OID order with `LOCK TABLE ONLY ... IN ACCESS SHARE MODE`, then
 rechecks names/OIDs, all physical column layouts, hierarchy edges/pending detach,
 scope and privileges. The structural fingerprint is separate from semantic
-manifest identity exceptions. Fresh `CatalogSQL`/`VerifyCatalog` runs after the
+manifest identity exceptions. Fresh `CatalogFingerprintSQL`/`VerifyCatalogFingerprint` runs after the
 locks for every request, including relation-free queries. A failed check prevents
 preparation/execution. Table locks do not freeze administrator changes to server
 execution code; that remains the documented trusted-server boundary.

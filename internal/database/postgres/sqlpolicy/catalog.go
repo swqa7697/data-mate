@@ -2,6 +2,7 @@ package sqlpolicy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"reflect"
@@ -90,12 +91,13 @@ type signatures struct {
 	casts      map[castKey]bool
 }
 type catalogPolicy struct {
-	catalog    catalogIndex
-	signatures signatures
+	catalog     catalogIndex
+	signatures  signatures
+	fingerprint [sha256.Size]byte
 }
 
-var policy16 = sync.OnceValues(func() (*catalogPolicy, error) { return loadPolicy(catalog16) })
-var policy18 = sync.OnceValues(func() (*catalogPolicy, error) { return loadPolicy(catalog18) })
+var policy16 = sync.OnceValues(func() (*catalogPolicy, error) { return loadPolicy(16, catalog16) })
+var policy18 = sync.OnceValues(func() (*catalogPolicy, error) { return loadPolicy(18, catalog18) })
 
 func policyFor(major int) (*catalogPolicy, error) {
 	switch major {
@@ -127,7 +129,7 @@ func indexRecords[K comparable, R any](rows []R, key func(R) K) (map[K]R, error)
 func decodeCatalog(b []byte) (catalogIndex, error) {
 	var out catalogIndex
 	// Match the driver's hard wire budget, including synthetic/offline callers.
-	raw, err := contracts.JSON(bytes.NewReader(b), 2<<20)
+	raw, err := contracts.JSON(bytes.NewReader(b), maxCatalogBytes)
 	if err != nil {
 		return out, unsupported()
 	}
@@ -229,7 +231,7 @@ func (c catalogIndex) referencesValid() bool {
 	return true
 }
 
-func loadPolicy(b []byte) (*catalogPolicy, error) {
+func loadPolicy(major int, b []byte) (*catalogPolicy, error) {
 	c, err := decodeCatalog(b)
 	if err != nil {
 		return nil, err
@@ -259,7 +261,11 @@ func loadPolicy(b []byte) (*catalogPolicy, error) {
 	for k := range c.casts {
 		s.casts[k] = true
 	}
-	return &catalogPolicy{c, s}, nil
+	fingerprint, err := fingerprintCatalog(major, b)
+	if err != nil {
+		return nil, err
+	}
+	return &catalogPolicy{catalog: c, signatures: s, fingerprint: fingerprint}, nil
 }
 
 // VerifyCatalog checks the exact reviewed semantic definitions for this major.

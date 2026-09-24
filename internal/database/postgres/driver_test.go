@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
 )
 
 // The subprocess enters through the same startup sanitization as the application.
@@ -204,11 +206,37 @@ func TestAdmissionAndCursorLifecycle(t *testing.T) {
 	requireCode(t, err, contracts.StaleCursor)
 }
 
-// Continue the existing synthetic protocol scenario to cover a pre-16 version
-// without adding a third Docker major, and timeout after authentication starts.
+// Extend the synthetic protocol scenario: malformed fingerprints must fail closed,
+// unsupported majors must not fetch a catalog, and size limits survive hashing.
 func diagnosticProtocolAcceptance(t *testing.T) {
 	t.Helper()
-	for _, stage := range []string{"authentication", "version"} {
+	expected, err := sqlpolicy.CatalogFingerprint(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := []byte(`\x` + hex.EncodeToString(expected[:]))
+	for _, test := range []struct {
+		name, stage  string
+		version      int
+		size, digest []byte
+		noRow        bool
+		code         contracts.Code
+	}{
+		{name: "stalled authentication", stage: "authentication", version: 160000, code: contracts.QueryTimeout},
+		{name: "old server", stage: "version", version: 150000, code: contracts.QueryUnsupported},
+		{name: "unaudited major", stage: "policy", version: 170000, code: contracts.QueryUnsupported},
+		{name: "valid", stage: "policy", version: 160000, size: []byte("373699"), digest: valid},
+		{name: "null digest", stage: "policy", version: 160000, size: []byte("373699"), code: contracts.QueryUnsupported},
+		{name: "short digest", stage: "policy", version: 160000, size: []byte("373699"), digest: []byte(`\x00`), code: contracts.QueryUnsupported},
+		{name: "mismatch", stage: "policy", version: 160000, size: []byte("373699"), digest: []byte(`\x` + strings.Repeat("00", 32)), code: contracts.QueryUnsupported},
+		{name: "malformed bytea", stage: "policy", version: 160000, size: []byte("373699"), digest: []byte(`\xzz`), code: contracts.QueryUnsupported},
+		{name: "null size", stage: "policy", version: 160000, digest: valid, code: contracts.QueryUnsupported},
+		{name: "malformed size", stage: "policy", version: 160000, size: []byte("invalid"), digest: valid, code: contracts.QueryUnsupported},
+		{name: "empty size", stage: "policy", version: 160000, size: []byte("0"), digest: valid, code: contracts.QueryUnsupported},
+		{name: "missing row", stage: "policy", version: 160000, noRow: true, code: contracts.QueryUnsupported},
+		{name: "size boundary", stage: "policy", version: 160000, size: []byte("2097152"), digest: valid},
+		{name: "oversized catalog", stage: "policy", version: 160000, size: []byte("2097153"), code: contracts.ResourceLimit},
+	} {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -216,6 +244,7 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 		t.Cleanup(func() { listener.Close() })
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 		done := make(chan error, 1)
+		catalogCalls := 0
 		go func() {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -229,20 +258,17 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 				done <- err
 				return
 			}
-			if stage == "authentication" {
+			if test.stage == "authentication" {
 				backend.Send(&pgproto3.AuthenticationCleartextPassword{})
 				if err = backend.Flush(); err != nil {
 					done <- err
 					return
 				}
-				_, err = backend.Receive()
-				if err != nil {
+				if _, err = backend.Receive(); err != nil {
 					done <- err
 					return
 				}
-				// The client deadline must close an authentication exchange that stalls.
-				_, err = backend.Receive()
-				if err == nil {
+				if _, err = backend.Receive(); err == nil {
 					done <- errors.New("stalled auth received unexpected message")
 					return
 				}
@@ -250,11 +276,38 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 				return
 			}
 			backend.Send(&pgproto3.AuthenticationOk{})
-			backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "15.0"})
+			backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: strconv.Itoa(test.version/10000) + ".0"})
 			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 			if err = backend.Flush(); err != nil {
 				done <- err
 				return
+			}
+			describe := func(q string) ([]pgproto3.FieldDescription, [][]byte) {
+				var names []string
+				var oids []uint32
+				var values [][]byte
+				switch {
+				case strings.Contains(q, "server_version_num"):
+					names = []string{"version", "current_user", "session_user", "connect"}
+					oids = []uint32{23, 25, 25, 16}
+					values = [][]byte{[]byte(strconv.Itoa(test.version)), []byte("reader"), []byte("reader"), []byte("t")}
+				case q == sqlpolicy.CatalogFingerprintSQL:
+					names = []string{"catalog_bytes", "fingerprint"}
+					oids = []uint32{23, 17}
+					values = [][]byte{test.size, test.digest}
+					if test.noRow {
+						values = nil
+					}
+				case q == roleSQL || strings.Contains(q, "MAINTAIN"):
+					names = []string{"unsafe"}
+					oids = []uint32{16}
+					values = [][]byte{[]byte("f")}
+				}
+				fields := make([]pgproto3.FieldDescription, len(names))
+				for i, name := range names {
+					fields[i] = pgproto3.FieldDescription{Name: []byte(name), DataTypeOID: oids[i], DataTypeSize: -1}
+				}
+				return fields, values
 			}
 			query := ""
 			for {
@@ -265,19 +318,14 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 				}
 				switch m := msg.(type) {
 				case *pgproto3.Query:
-					if strings.Contains(m.String, "server_version_num") {
-						backend.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{
-							{Name: []byte("version"), DataTypeOID: 23, DataTypeSize: 4},
-							{Name: []byte("current_user"), DataTypeOID: 25, DataTypeSize: -1},
-							{Name: []byte("session_user"), DataTypeOID: 25, DataTypeSize: -1},
-							{Name: []byte("connect"), DataTypeOID: 16, DataTypeSize: 1},
-						}})
-						backend.Send(&pgproto3.DataRow{Values: [][]byte{[]byte("150000"), []byte("reader"), []byte("reader"), []byte("t")}})
-						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
-						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'T'})
-						break
+					fields, values := describe(m.String)
+					if len(fields) > 0 {
+						backend.Send(&pgproto3.RowDescription{Fields: fields})
 					}
-					tag := "BEGIN"
+					if values != nil {
+						backend.Send(&pgproto3.DataRow{Values: values})
+					}
+					tag := "SELECT 1"
 					status := byte('T')
 					if strings.Contains(strings.ToUpper(m.String), "ROLLBACK") {
 						tag = "ROLLBACK"
@@ -287,22 +335,23 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 					backend.Send(&pgproto3.ReadyForQuery{TxStatus: status})
 				case *pgproto3.Parse:
 					query = m.Query
+					if query == sqlpolicy.CatalogFingerprintSQL || query == sqlpolicy.CatalogSQL {
+						catalogCalls++
+					}
 					backend.Send(&pgproto3.ParseComplete{})
 				case *pgproto3.Bind:
 					backend.Send(&pgproto3.BindComplete{})
 				case *pgproto3.Describe:
-					if strings.Contains(query, "server_version_num") {
-						fields := []pgproto3.FieldDescription{}
-						for i, name := range []string{"version", "current_user", "session_user", "connect"} {
-							fields = append(fields, pgproto3.FieldDescription{Name: []byte(name), DataTypeOID: []uint32{23, 25, 25, 16}[i], DataTypeSize: -1})
-						}
+					fields, _ := describe(query)
+					if len(fields) > 0 {
 						backend.Send(&pgproto3.RowDescription{Fields: fields})
 					} else {
 						backend.Send(&pgproto3.NoData{})
 					}
 				case *pgproto3.Execute:
-					if strings.Contains(query, "server_version_num") {
-						backend.Send(&pgproto3.DataRow{Values: [][]byte{[]byte("150000"), []byte("reader"), []byte("reader"), []byte("t")}})
+					_, values := describe(query)
+					if values != nil {
+						backend.Send(&pgproto3.DataRow{Values: values})
 					}
 					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
 				case *pgproto3.Sync:
@@ -321,20 +370,22 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 		p.Connection.Host = "127.0.0.1"
 		p.Connection.Port = listener.Addr().(*net.TCPAddr).Port
 		limits := config.DefaultLimits()
-		limits.QueryTimeoutMS = 150
-		if stage == "version" {
-			limits.QueryTimeoutMS = 1000
+		limits.QueryTimeoutMS = 1000
+		if test.stage == "authentication" {
+			limits.QueryTimeoutMS = 150
 		}
 		p.Limits = &limits
 		d := driver(t)
 		ready, err := d.Test(ctx, database.NewAccess(p, "synthetic-diagnostic-password"))
-		if stage == "version" {
-			requireCode(t, err, contracts.QueryUnsupported)
+		if test.code == "" {
+			if err != nil {
+				t.Fatalf("%s: %v", test.name, err)
+			}
 		} else {
-			requireCode(t, err, contracts.QueryTimeout)
+			requireCode(t, err, test.code)
 		}
-		if ready.Stage != stage {
-			t.Fatalf("expected %s, got %s: %v", stage, ready.Stage, err)
+		if ready.Stage != test.stage {
+			t.Fatalf("%s: expected %s, got %s: %v", test.name, test.stage, ready.Stage, err)
 		}
 		d.Close()
 		listener.Close()
@@ -342,10 +393,13 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 		select {
 		case err = <-done:
 			if err != nil {
-				t.Fatal("protocol fixture", err)
+				t.Fatal("protocol fixture", test.name, err)
+			}
+			if test.version == 170000 && catalogCalls != 0 {
+				t.Fatal("unaudited major fetched catalog")
 			}
 		case <-time.After(3 * time.Second):
-			t.Fatal("protocol fixture cleanup stalled")
+			t.Fatal("protocol fixture cleanup stalled", test.name)
 		}
 	}
 }
