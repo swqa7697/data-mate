@@ -266,13 +266,19 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Context, pgx.Tx, int) error) error {
 	return d.runObserved(ctx, a, nil, fn)
 }
-func (d *Driver) runObserved(ctx context.Context, a database.Access, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) (result error) {
+func (d *Driver) runObserved(ctx context.Context, a database.Access, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) error {
 	trace.start("config")
 	a, rev, err := normalized(a)
 	if err != nil {
 		return err
 	}
 	trace.pass("config")
+	return d.runNormalized(ctx, a, rev, trace, fn)
+}
+
+// runNormalized accepts only the snapshot and revision returned by normalized in
+// this request. Query can reuse its pre-parse validation without caching access.
+func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev config.Revision, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) (result error) {
 	trace.start("dial")
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
 	defer cancel()

@@ -205,7 +205,14 @@ func TestPostgresIntegration(t *testing.T) {
 		{"file function", "GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO reader", "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) FROM reader"},
 	}
 	if wantMajor >= 17 {
-		unsafe = append(unsafe, struct{ name, before, after string }{"maintain", "GRANT MAINTAIN ON app.items TO reader", "REVOKE MAINTAIN ON app.items FROM reader"})
+		// The combined scan must include PUBLIC and both reachable-role paths,
+		// even when MAINTAIN is their only unsafe privilege.
+		unsafe = append(unsafe, []struct{ name, before, after string }{
+			{"maintain", "GRANT MAINTAIN ON app.items TO reader", "REVOKE MAINTAIN ON app.items FROM reader"},
+			{"public maintain", "GRANT MAINTAIN ON hidden.target TO PUBLIC", "REVOKE MAINTAIN ON hidden.target FROM PUBLIC"},
+			{"inherited maintain", "GRANT MAINTAIN ON app.items TO bridge; GRANT bridge TO reader WITH INHERIT TRUE, SET FALSE", "REVOKE bridge FROM reader; REVOKE MAINTAIN ON app.items FROM bridge"},
+			{"set reachable maintain", "GRANT MAINTAIN ON app.items TO bridge; GRANT bridge TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE bridge FROM reader; REVOKE MAINTAIN ON app.items FROM bridge"},
+		}...)
 	}
 	for _, c := range unsafe {
 		sql(c.before)

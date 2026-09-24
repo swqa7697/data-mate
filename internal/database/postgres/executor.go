@@ -22,7 +22,7 @@ var errResultDiscarded = errors.New("bounded result completed; connection discar
 // can be supplied by callers or reused to bypass the lock/recheck boundary.
 func (d *Driver) Query(ctx context.Context, a database.Access, req database.QueryRequest) (database.QueryResult, error) {
 	started := time.Now()
-	a, _, err := normalized(a)
+	a, rev, err := normalized(a)
 	if err != nil {
 		return database.QueryResult{}, err
 	}
@@ -47,7 +47,7 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 		return database.QueryResult{}, err
 	}
 	var out database.QueryResult
-	err = d.run(ctx, a, func(ctx context.Context, tx pgx.Tx, version int) error {
+	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, version int) error {
 		if err := verifyCatalog(ctx, tx, version); err != nil {
 			return err
 		}

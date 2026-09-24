@@ -25,7 +25,7 @@ SELECT
  OR EXISTS (SELECT FROM reachable r,pg_catalog.pg_database b WHERE b.datname=current_database() AND (b.datdba=r.oid OR pg_catalog.has_database_privilege(r.oid,b.oid,'CREATE')))
  OR EXISTS (SELECT FROM reachable r,pg_catalog.pg_namespace n WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema' AND (n.nspowner=r.oid OR pg_catalog.has_schema_privilege(r.oid,n.oid,'CREATE')))
  OR EXISTS (SELECT FROM reachable r,app c WHERE c.relowner=r.oid OR
- (c.relkind IN ('r','p','v','m','f') AND (pg_catalog.has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')))
+ (c.relkind IN ('r','p','v','m','f') AND (pg_catalog.has_table_privilege(r.oid,c.oid,CASE WHEN c.relkind IN ('r','p','m') THEN $1::text ELSE 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER' END) OR pg_catalog.has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')))
  OR (c.relkind='S' AND pg_catalog.has_sequence_privilege(r.oid,c.oid,'USAGE,UPDATE')))
  OR EXISTS (SELECT FROM reachable r,pg_catalog.pg_proc f JOIN pg_catalog.pg_namespace n ON n.oid=f.pronamespace
  WHERE n.nspname='pg_catalog' AND f.proname IN ('pg_read_file','pg_read_binary_file','pg_write_file','pg_ls_dir','pg_stat_file','lo_import','lo_export')
@@ -50,17 +50,15 @@ func checkRoleObserved(ctx context.Context, tx pgx.Tx, expected string, trace *d
 	if actual != expected || session != expected || !connect {
 		return 0, database.Fail(contracts.PolicyUnsafe, "authenticated role does not match the configured read-only role", false)
 	}
-	var unsafe bool
-	if err = tx.QueryRow(ctx, roleSQL).Scan(&unsafe); err != nil {
-		return 0, safeError(err)
+	// Share the fresh role/relation scan with MAINTAIN checks on supported servers.
+	// PostgreSQL 16 must never receive MAINTAIN, even on an unevaluated SQL branch.
+	privileges := "INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER"
+	if version >= 170000 {
+		privileges += ",MAINTAIN"
 	}
-	if !unsafe && version >= 170000 { // MAINTAIN was introduced in PostgreSQL 17.
-		err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_catalog.pg_roles r, pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
- WHERE (r.rolname=current_user OR pg_catalog.pg_has_role(current_user,r.oid,'USAGE') OR pg_catalog.pg_has_role(current_user,r.oid,'SET'))
- AND n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p','m') AND pg_catalog.has_table_privilege(r.oid,c.oid,'MAINTAIN'))`).Scan(&unsafe)
-		if err != nil {
-			return 0, safeError(err)
-		}
+	var unsafe bool
+	if err = tx.QueryRow(ctx, roleSQL, privileges).Scan(&unsafe); err != nil {
+		return 0, safeError(err)
 	}
 	if unsafe {
 		return 0, database.Fail(contracts.PolicyUnsafe, "use a non-owner role with CONNECT, USAGE and SELECT only; remove elevated, creation and write privileges, including reachable roles and PUBLIC grants", false)

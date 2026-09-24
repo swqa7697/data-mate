@@ -25,3 +25,4 @@
 ### Changed
 
 - Reduce PostgreSQL catalog transfers to a byte count and SHA-256 fingerprint while preserving fresh verification, catalog size limits, and fail-closed checks.
+- Reduce PostgreSQL query overhead by combining privilege scans and reusing validated profiles while preserving fresh authorization checks.

@@ -158,7 +158,7 @@ func executorRechecks(t *testing.T, d *Driver, a database.Access, admin *pgx.Con
  GRANT SELECT ON app.tree,hidden.leaf,hidden.new_leaf TO reader;`)
 	// Mutations happen after a successful compilation and before rechecking. Each
 	// rejected plan must fail before access to the executor's raw protocol seam.
-	for _, test := range []struct{ name, q, before, after string }{
+	tests := []struct{ name, q, before, after string }{
 		{"recreate", "SELECT * FROM app.changing", "DROP TABLE app.changing;CREATE TABLE app.changing(id int);GRANT SELECT ON app.changing TO reader", ""},
 		{"rename", "SELECT * FROM app.changing", "ALTER TABLE app.changing RENAME TO renamed;CREATE TABLE app.changing(id int);GRANT SELECT ON app.changing TO reader", "DROP TABLE app.changing;ALTER TABLE app.renamed RENAME TO changing"},
 		{"column", "SELECT * FROM app.changing", "ALTER TABLE app.changing ALTER COLUMN id TYPE bigint", "ALTER TABLE app.changing ALTER COLUMN id TYPE int"},
@@ -168,7 +168,16 @@ func executorRechecks(t *testing.T, d *Driver, a database.Access, admin *pgx.Con
 		{"detach", "SELECT * FROM app.tree", "ALTER TABLE app.tree DETACH PARTITION hidden.leaf", "ALTER TABLE app.tree ATTACH PARTITION hidden.leaf FOR VALUES FROM(0) TO(10)"},
 		{"signature no relations", "SELECT 1", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) CALLED ON NULL INPUT", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) RETURNS NULL ON NULL INPUT"},
 		{"signature with relations", "SELECT * FROM app.changing", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) CALLED ON NULL INPUT", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) RETURNS NULL ON NULL INPUT"},
-	} {
+	}
+	var version int
+	if err := admin.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version >= 170000 {
+		// A successful initial check must not authorize a newly elevated reader.
+		tests = append(tests, struct{ name, q, before, after string }{"maintain after compilation", "SELECT * FROM app.changing", "GRANT MAINTAIN ON app.changing TO reader", "REVOKE MAINTAIN ON app.changing FROM reader"})
+	}
+	for _, test := range tests {
 		err := d.run(t.Context(), a, func(ctx context.Context, tx pgx.Tx, v int) error {
 			p, e := sqlpolicy.Parse(test.q)
 			if e != nil {
@@ -185,6 +194,9 @@ func executorRechecks(t *testing.T, d *Driver, a database.Access, admin *pgx.Con
 				sql(test.before)
 			}
 			e = recheckPlan(ctx, spy, a, v, plan)
+			if test.name == "maintain after compilation" {
+				requireCode(t, e, contracts.PolicyUnsafe)
+			}
 			if e == nil {
 				_, e = executePlan(ctx, spy, a, plan, 500, time.Now())
 				t.Fatalf("stale %s reached execution: %v", test.name, e)

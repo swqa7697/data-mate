@@ -131,6 +131,9 @@ func TestConnectionBoundary(t *testing.T) {
 		bad := p
 		bad.Connection.Host = host
 		requireCode(t, d.Validate(database.NewAccess(bad, "")), contracts.ConfigInvalid)
+		// Query's reused snapshot must still reject invalid access before dialing.
+		_, err := d.Query(t.Context(), database.NewAccess(bad, ""), database.QueryRequest{SQL: "SELECT 1"})
+		requireCode(t, err, contracts.ConfigInvalid)
 	}
 	p.Transport.SSH = &config.SSH{Host: "jump", Port: 22, User: "user", Auth: "password"}
 	requireCode(t, d.Validate(database.NewAccess(p, "")), contracts.ConnectFailed)
