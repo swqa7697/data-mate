@@ -17,11 +17,13 @@
             "QUERY_UNSUPPORTED",
             "QUERY_TIMEOUT",
             "RESOURCE_LIMIT",
-            "POLICY_UNSAFE",
             "STALE_CURSOR",
             "INVALID_ARGUMENT",
             "SERVICE_UNAVAILABLE",
-            "CANCELLED"
+            "CANCELLED",
+            "READ_ONLY_VIOLATION",
+            "PERMISSION_DENIED",
+            "QUERY_FAILED"
           ]
         },
         "message": {
@@ -31,6 +33,10 @@
         },
         "retryable": {
           "type": "boolean"
+        },
+        "sqlstate": {
+          "type": "string",
+          "pattern": "^[0-9A-Z]{5}$"
         }
       },
       "required": [

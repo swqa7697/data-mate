@@ -13,33 +13,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
 )
-
-// All P5 helpers extend TestPostgresIntegration's owned fixture and lifecycle.
-// This spy refuses the only connection seam used to execute compiled SQL.
-type executionSpy struct {
-	pgx.Tx
-	connections, prepares int
-	onCatalog             func()
-}
-
-func (s *executionSpy) QueryRow(ctx context.Context, q string, args ...any) pgx.Row {
-	if q == sqlpolicy.CatalogFingerprintSQL && s.onCatalog != nil {
-		s.onCatalog()
-		s.onCatalog = nil
-	}
-	return s.Tx.QueryRow(ctx, q, args...)
-}
-func (s *executionSpy) Conn() *pgx.Conn { s.connections++; return s.Tx.Conn() }
-func (s *executionSpy) Prepare(ctx context.Context, n, q string) (*pgconn.StatementDescription, error) {
-	s.prepares++
-	return s.Tx.Prepare(ctx, n, q)
-}
 
 func executorAcceptance(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn, sql func(string, ...any)) {
 	t.Helper()
@@ -50,7 +27,7 @@ func executorAcceptance(t *testing.T, d *Driver, a database.Access, admin *pgx.C
 	expected := []json.RawMessage{}
 	for i, f := range fixtures {
 		projections = append(projections, fmt.Sprintf("$%d::%s AS c%d", i+1, pgx.Identifier{f.Type}.Sanitize(), i))
-		req.Parameters = append(req.Parameters, database.QueryParameter{Type: f.Type, Value: f.JSON})
+		req.Parameters = append(req.Parameters, fixtureParameter(f))
 		expected = append(expected, f.JSON)
 	}
 	req.SQL = "SELECT " + strings.Join(projections, ",")
@@ -69,15 +46,7 @@ func executorAcceptance(t *testing.T, d *Driver, a database.Access, admin *pgx.C
 	if e != nil {
 		t.Fatal(e)
 	}
-	values := make([][]byte, len(params))
-	oids := make([]uint32, len(params))
-	for i, p := range params {
-		oids[i] = uint32(p.Type)
-		if p.Value != nil {
-			values[i] = []byte(*p.Value)
-		}
-	}
-	rr := admin.PgConn().ExecParams(t.Context(), "CREATE TABLE app.codec_values AS "+req.SQL, values, oids, nil, nil)
+	rr := admin.PgConn().ExecParams(t.Context(), "CREATE TABLE app.codec_values AS "+req.SQL, params, nil, nil, nil)
 	if _, e = rr.Close(); e != nil {
 		t.Fatal("codec fixture", e)
 	}
@@ -135,8 +104,8 @@ func executorAcceptance(t *testing.T, d *Driver, a database.Access, admin *pgx.C
 		}
 	}
 	for _, request := range []database.QueryRequest{
-		{SQL: "SELECT 1", RowLimit: 5001}, {SQL: "SELECT $1::int4"}, {SQL: "SELECT 1", Parameters: []database.QueryParameter{{Type: "int4", Value: json.RawMessage(`1`)}}},
-		{SQL: "SELECT $1::date", Parameters: []database.QueryParameter{{Type: "date", Value: json.RawMessage(`"synthetic-private-invalid-date"`)}}},
+		{SQL: "SELECT 1", RowLimit: 5001}, {SQL: "SELECT $1::int4"}, {SQL: "SELECT 1", Parameters: []json.RawMessage{json.RawMessage(`1`)}},
+		{SQL: "SELECT $1::date", Parameters: []json.RawMessage{json.RawMessage(`"synthetic-private-invalid-date"`)}},
 		{SQL: "SELECT 1/0"},
 		{SQL: "SELECT 'synthetic-private-invalid-date'::date"},
 	} {
@@ -144,208 +113,32 @@ func executorAcceptance(t *testing.T, d *Driver, a database.Access, admin *pgx.C
 			t.Fatal("invalid input or redaction", err)
 		}
 	}
-	executorRechecks(t, d, a, admin, sql)
+	executorSessionCleanup(t, d, a, sql)
 	executorLimits(t, d, a, admin, sql)
 	executorCancellation(t, d, a, admin, sql)
-	t.Logf("P5 execution: %d codecs as parameters and stored columns; row limits, RLS, rechecks, DDL, resource and cancellation acceptance", len(fixtures))
+	t.Logf("Query execution: %d codecs as parameters and stored columns; row limits, RLS, session reset, DDL, resource and cancellation acceptance", len(fixtures))
 }
 
-func executorRechecks(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn, sql func(string, ...any)) {
+// Extends executor cleanup coverage after removing compiler/lock rechecks.
+func executorSessionCleanup(t *testing.T, d *Driver, a database.Access, sql func(string, ...any)) {
 	t.Helper()
-	sql(`CREATE TABLE app.changing(id int); INSERT INTO app.changing VALUES(1); GRANT SELECT ON app.changing TO reader;
- CREATE TABLE app.tree(id int) PARTITION BY RANGE(id); CREATE TABLE hidden.leaf PARTITION OF app.tree FOR VALUES FROM(0) TO(10); INSERT INTO app.tree VALUES(1);
- CREATE TABLE hidden.new_leaf(id int);INSERT INTO hidden.new_leaf VALUES(11);
- GRANT SELECT ON app.tree,hidden.leaf,hidden.new_leaf TO reader;`)
-	// Mutations happen after a successful compilation and before rechecking. Each
-	// rejected plan must fail before access to the executor's raw protocol seam.
-	tests := []struct{ name, q, before, after string }{
-		{"recreate", "SELECT * FROM app.changing", "DROP TABLE app.changing;CREATE TABLE app.changing(id int);GRANT SELECT ON app.changing TO reader", ""},
-		{"rename", "SELECT * FROM app.changing", "ALTER TABLE app.changing RENAME TO renamed;CREATE TABLE app.changing(id int);GRANT SELECT ON app.changing TO reader", "DROP TABLE app.changing;ALTER TABLE app.renamed RENAME TO changing"},
-		{"column", "SELECT * FROM app.changing", "ALTER TABLE app.changing ALTER COLUMN id TYPE bigint", "ALTER TABLE app.changing ALTER COLUMN id TYPE int"},
-		{"privilege", "SELECT * FROM app.changing", "REVOKE SELECT ON app.changing FROM reader", "GRANT SELECT ON app.changing TO reader"},
-		{"role", "SELECT * FROM app.changing", "GRANT UPDATE ON app.changing TO reader", "REVOKE UPDATE ON app.changing FROM reader"},
-		{"attach", "SELECT * FROM app.tree", "ALTER TABLE app.tree ATTACH PARTITION hidden.new_leaf FOR VALUES FROM(10) TO(20)", "ALTER TABLE app.tree DETACH PARTITION hidden.new_leaf"},
-		{"detach", "SELECT * FROM app.tree", "ALTER TABLE app.tree DETACH PARTITION hidden.leaf", "ALTER TABLE app.tree ATTACH PARTITION hidden.leaf FOR VALUES FROM(0) TO(10)"},
-		{"signature no relations", "SELECT 1", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) CALLED ON NULL INPUT", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) RETURNS NULL ON NULL INPUT"},
-		{"signature with relations", "SELECT * FROM app.changing", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) CALLED ON NULL INPUT", "ALTER FUNCTION pg_catalog.int4pl(int4,int4) RETURNS NULL ON NULL INPUT"},
-	}
-	var version int
-	if err := admin.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version >= 170000 {
-		// A successful initial check must not authorize a newly elevated reader.
-		tests = append(tests, struct{ name, q, before, after string }{"maintain after compilation", "SELECT * FROM app.changing", "GRANT MAINTAIN ON app.changing TO reader", "REVOKE MAINTAIN ON app.changing FROM reader"})
-	}
-	for _, test := range tests {
-		err := d.run(t.Context(), a, func(ctx context.Context, tx pgx.Tx, v int) error {
-			p, e := sqlpolicy.Parse(test.q)
-			if e != nil {
-				return e
-			}
-			plan, e := compileSQL(ctx, tx, a.Profile.Scope, v, p, nil)
-			if e != nil {
-				return e
-			}
-			spy := &executionSpy{Tx: tx}
-			if strings.HasPrefix(test.name, "signature") {
-				spy.onCatalog = func() { sql(test.before) }
-			} else {
-				sql(test.before)
-			}
-			e = recheckPlan(ctx, spy, a, v, plan)
-			if test.name == "maintain after compilation" {
-				requireCode(t, e, contracts.PolicyUnsafe)
-			}
-			if e == nil {
-				_, e = executePlan(ctx, spy, a, plan, 500, time.Now())
-				t.Fatalf("stale %s reached execution: %v", test.name, e)
-			}
-			if spy.connections != 0 || spy.prepares != 0 {
-				t.Fatalf("stale %s prepared/executed", test.name)
-			}
-			return nil
-		})
-		if test.after != "" {
-			sql(test.after)
-		}
-		if err != nil {
-			t.Fatalf("recheck %s: %v", test.name, err)
-		}
-	}
-	// A profile's scope is re-applied rather than inferred from the compiled plan.
-	err := d.run(t.Context(), a, func(ctx context.Context, tx pgx.Tx, v int) error {
-		p, _ := sqlpolicy.Parse("SELECT * FROM app.changing")
-		plan, e := compileSQL(ctx, tx, a.Profile.Scope, v, p, nil)
-		if e != nil {
-			return e
-		}
-		none := a.Profile
-		none.Scope = config.Scope{Mode: "selected"}
-		e = recheckPlan(ctx, tx, database.NewAccess(none, a.Password()), v, plan)
-		requireCode(t, e, contracts.ScopeDenied)
-		return nil
-	})
+	sql("CREATE TABLE app.changing(id int); INSERT INTO app.changing VALUES(1); GRANT SELECT ON app.changing TO reader")
+	_, err := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT pg_catalog.pg_advisory_lock(174937),pg_catalog.set_config('TimeZone','Asia/Tokyo',false)"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Attach after the final recheck is legal under ACCESS SHARE. Frozen ONLY
-	// scans must exclude the newly attached child until the following request.
-	err = d.run(t.Context(), a, func(ctx context.Context, tx pgx.Tx, v int) error {
-		p, _ := sqlpolicy.Parse("SELECT id FROM app.tree ORDER BY id")
-		plan, e := p.CompileBounded(ctx, v/10000, &compilerCatalog{tx: tx, scope: a.Profile.Scope}, nil, 501)
-		if e != nil {
-			return e
-		}
-		if e = recheckPlan(ctx, tx, a, v, plan); e != nil {
-			return e
-		}
-		sql("ALTER TABLE app.tree ATTACH PARTITION hidden.new_leaf FOR VALUES FROM(10) TO(20)")
-		out, e := executePlan(ctx, tx, normalizedFixture(t, a), plan, 500, time.Now())
-		if e != nil {
-			return e
-		}
-		if out.RowCount != 1 || out.Rows[0][0] != int64(1) {
-			t.Fatal("post-check attach entered frozen scan")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal("post-check attach", err)
+	r, err := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT pg_catalog.pg_advisory_unlock(174937),pg_catalog.current_setting('TimeZone')"})
+	if err != nil || r.Rows[0][0] != false || r.Rows[0][1] != "UTC" {
+		t.Fatal("session leaked", r.Rows, err)
 	}
-	out, err := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT id FROM app.tree ORDER BY id"})
-	if err != nil || out.RowCount != 2 {
-		t.Fatal("next request missed new partition", err)
-	}
-	// Ordinary inheritance requires explicit descendant scope on every request.
-	sql("CREATE TABLE app.plain(id int);INSERT INTO app.plain VALUES(1)")
-	sql("GRANT SELECT ON app.plain TO reader")
-	out, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.plain"})
-	if err != nil || out.RowCount != 1 {
-		t.Fatal(err)
-	}
-	err = d.run(t.Context(), a, func(ctx context.Context, tx pgx.Tx, v int) error {
-		p, _ := sqlpolicy.Parse("SELECT * FROM app.plain")
-		plan, e := p.CompileBounded(ctx, v/10000, &compilerCatalog{tx: tx, scope: a.Profile.Scope}, nil, 501)
-		if e != nil {
-			return e
-		}
-		if e = recheckPlan(ctx, tx, a, v, plan); e != nil {
-			return e
-		}
-		sql("CREATE TABLE hidden.plain_child() INHERITS(app.plain);INSERT INTO hidden.plain_child VALUES(2);GRANT SELECT ON hidden.plain_child TO reader")
-		out, e := executePlan(ctx, tx, a, plan, 500, time.Now())
-		if e != nil {
-			return e
-		}
-		if out.RowCount != 1 || out.Rows[0][0] != int64(1) {
-			t.Fatal("post-check inheritance leaked child")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal("post-check inheritance", err)
-	}
-	_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.plain"})
-	requireCode(t, err, contracts.QueryUnsupported)
-	out, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM ONLY app.plain"})
-	if err != nil || out.RowCount != 1 {
-		t.Fatal("ONLY scope", err)
-	}
-	executorLockRace(t, d, a, admin, sql)
-}
-
-func normalizedFixture(t *testing.T, a database.Access) database.Access {
-	t.Helper()
-	a, _, err := normalized(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a
-}
-
-func executorLockRace(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn, sql func(string, ...any)) {
-	t.Helper()
-	// A writer holds ACCESS EXCLUSIVE while a reader waits for its lock. The
-	// post-wait snapshot must see a committed column change and reject the plan.
-	err := d.run(t.Context(), a, func(ctx context.Context, tx pgx.Tx, v int) error {
-		p, _ := sqlpolicy.Parse("SELECT * FROM app.changing")
-		plan, e := compileSQL(ctx, tx, a.Profile.Scope, v, p, nil)
-		if e != nil {
-			return e
-		}
-		sql("BEGIN;LOCK TABLE app.changing IN ACCESS EXCLUSIVE MODE;ALTER TABLE app.changing ADD COLUMN newer int")
-		defer func() { _, _ = admin.Exec(context.Background(), "ROLLBACK") }()
-		finished := make(chan error, 1)
-		pid := tx.Conn().PgConn().PID()
-		go func() { finished <- recheckPlan(ctx, tx, a, v, plan) }()
-		// The observer is the writer's own session; relation locks do not block its
-		// pg_locks read. No sleeps or timing guesses select the mutation window.
-		deadline := time.Now().Add(750 * time.Millisecond)
-		for {
-			var waiting bool
-			if e = admin.QueryRow(ctx, "SELECT EXISTS(SELECT FROM pg_catalog.pg_locks WHERE pid=$1 AND NOT granted)", pid).Scan(&waiting); e != nil {
-				return e
-			}
-			if waiting {
-				break
-			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("reader failed to wait on DDL lock")
-			}
-			runtime.Gosched()
-		}
-		sql("COMMIT")
-		select {
-		case e = <-finished:
-			requireCode(t, safeError(e), contracts.QueryUnsupported)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal("lock race", err)
+	sql("REVOKE SELECT ON app.changing FROM reader")
+	_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.changing"})
+	requireCode(t, err, contracts.PermissionDenied)
+	sql("GRANT SELECT ON app.changing TO reader")
+	sql("ALTER TABLE app.changing ADD COLUMN state app.custom DEFAULT 'one'")
+	r, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.changing"})
+	if err != nil || len(r.Columns) != 2 {
+		t.Fatal("fresh shape", err)
 	}
 }
 
@@ -467,7 +260,7 @@ func executorMemory(t *testing.T, d *Driver, a database.Access) {
 func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn, sql func(string, ...any)) {
 	t.Helper()
 	// RLS is trusted server code: use a sleeping policy to observe a real executing
-	// query, rather than allowing pg_sleep in user SQL or depending on query cost.
+	// query, without depending on query cost.
 	sql(`CREATE TABLE app.slow(id int);INSERT INTO app.slow VALUES(1);ALTER TABLE app.slow ENABLE ROW LEVEL SECURITY;
  CREATE FUNCTION app.slow_policy() RETURNS boolean LANGUAGE plpgsql AS $$BEGIN PERFORM pg_catalog.pg_sleep(30);RETURN true;END$$;
  CREATE POLICY slow ON app.slow USING(app.slow_policy());GRANT SELECT ON app.slow TO reader`)

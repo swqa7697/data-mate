@@ -13,9 +13,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
+            "pattern": "^[^\\x00]*$"
           },
           "type": {
             "type": "string",
@@ -25,8 +23,10 @@
           "encoding": {
             "type": "string",
             "enum": [
-              "base64"
-            ]
+              "base64",
+              "postgres_text"
+            ],
+            "description": "Value representation marker; for PostgreSQL array results, describes the elements."
           }
         },
         "required": [

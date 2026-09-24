@@ -33,18 +33,16 @@ func (t *diagnosticTrace) pass(stage string) {
 	t.stages = append(t.stages, database.Stage{Stage: stage, OK: true})
 }
 
-// Test checks transport, authentication, version, role and the shared semantic
-// catalog policy, without reading application rows. Success is readiness only:
-// Query still compiles and verifies each statement and locked relation afresh.
+// Test verifies connection and read-only transaction readiness, not account grants.
 func (d *Driver) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
 	trace := &diagnosticTrace{}
 	out := database.Readiness{TLS: a.Profile.Transport.TLS.Mode == "verify-full"}
 	err := d.runObserved(ctx, a, trace, func(ctx context.Context, tx pgx.Tx, version int) error {
 		out.ServerVersion = version
-		return verifyCatalog(ctx, tx, version)
+		return nil
 	})
 	if err == nil {
-		trace.pass("policy")
+		trace.pass("read_only")
 	} else {
 		var safe *database.Error
 		if !errors.As(err, &safe) {

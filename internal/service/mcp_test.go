@@ -155,7 +155,7 @@ func TestMCPSessions(t *testing.T) {
 	for _, test := range []struct {
 		sql, alias string
 		code       contracts.Code
-	}{{"delete from app.items", "fixture", contracts.QueryUnsupported}, {"select 1", "missing", contracts.ConnectionNotFound}, {"large", "fixture", contracts.ResourceLimit}, {"upstream", "fixture", contracts.ServiceUnavailable}} {
+	}{{"delete from app.items", "fixture", contracts.ReadOnlyViolation}, {"select 1", "missing", contracts.ConnectionNotFound}, {"large", "fixture", contracts.ResourceLimit}, {"upstream", "fixture", contracts.ServiceUnavailable}} {
 		r, raw = callTool(t, a, "query", map[string]any{"connection": test.alias, "sql": test.sql})
 		var body struct {
 			Error contracts.Failure `json:"error"`

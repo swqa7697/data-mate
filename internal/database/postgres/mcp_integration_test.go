@@ -31,8 +31,8 @@ func (b *wireBackend) Connections(_ context.Context, fn func([]protocol.Connecti
 }
 
 // Regression ladder 2: extend the existing PostgreSQL 16/18 acceptance scenario
-// through MCP. Catalog compatibility cases stay in the existing driver corpus.
-func mcpAcceptance(t *testing.T, d *Driver, a database.Access, sql func(string, ...any)) {
+// through MCP. Query/codec cases stay in the shared driver corpus.
+func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	t.Helper()
 	limits := config.DefaultLimits()
 	a.Profile.Limits = &limits
@@ -65,7 +65,7 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access, sql func(string, 
 				Error contracts.Failure `json:"error"`
 			}
 			_ = json.Unmarshal(raw, &body)
-			if !r.IsError || body.Error.Code != code {
+			if !r.IsError || body.Error.Code != code || contracts.Validate("error", raw) != nil {
 				t.Fatalf("MCP %s wanted %s: %s", name, code, raw)
 			}
 		}
@@ -87,16 +87,11 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access, sql func(string, 
 	}
 	call("describe_table", map[string]any{"connection": "fixture", "schema": "hidden", "table": "target"}, contracts.ScopeDenied)
 	call("query", map[string]any{"connection": "fixture", "sql": "select count(*) from app.items"}, "")
-	call("query", map[string]any{"connection": "fixture", "sql": "select app.policy_probe()"}, contracts.QueryUnsupported)
-	// One shared catalog rejection crosses the wire; the driver owns the corpus.
-	func() {
-		sql("ALTER FUNCTION pg_catalog.int4pl(int4,int4) CALLED ON NULL INPUT")
-		defer sql("ALTER FUNCTION pg_catalog.int4pl(int4,int4) RETURNS NULL ON NULL INPUT")
-		call("query", map[string]any{"connection": "fixture", "sql": "select 1"}, contracts.QueryUnsupported)
-	}()
-	call("query", map[string]any{"connection": "fixture", "sql": "select 1"}, "")
+	call("query", map[string]any{"connection": "fixture", "sql": "select app.policy_probe()"}, contracts.ReadOnlyViolation)
+
+	call("query", map[string]any{"connection": "fixture", "sql": "select $1::int8,$2::jsonb", "parameters": []any{"9007199254740993", map[string]any{"ok": true}}}, "")
 	// Grant/scope checks are repeated on later calls in the same initialized session.
 	d.Invalidate(a.Profile.ID)
 	call("list_tables", map[string]any{"connection": "fixture", "cursor": *page.NextCursor}, contracts.StaleCursor)
-	t.Log("MCP SDK metadata, hidden endpoints, cursor invalidation, query and shared policy rejection passed")
+	t.Log("MCP SDK metadata, hidden endpoints, cursor invalidation, query and shared read-only rejection passed")
 }

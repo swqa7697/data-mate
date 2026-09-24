@@ -136,7 +136,7 @@ func TestPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ready.Stage != "policy" || len(ready.Stages) != 5 {
+	if ready.Stage != "read_only" || len(ready.Stages) != 5 {
 		t.Fatalf("readiness stages: %+v", ready)
 	}
 	for _, stage := range ready.Stages {
@@ -145,6 +145,7 @@ func TestPostgresIntegration(t *testing.T) {
 		}
 	}
 	t.Logf("server_version_num=%d image=%s", ready.ServerVersion, fixture.Image)
+	readPathMeasurements(t, access, sql)
 	wantMajor := 16
 	if fixture.Image == "postgres:18" {
 		wantMajor = 18
@@ -179,56 +180,12 @@ func TestPostgresIntegration(t *testing.T) {
 	if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "synthetic-wrong-password") {
 		t.Fatal("credential in error")
 	}
-	unsafe := []struct{ name, before, after string }{
-		{"superuser", "ALTER ROLE reader SUPERUSER", "ALTER ROLE reader NOSUPERUSER"},
-		{"bypassrls", "ALTER ROLE reader BYPASSRLS", "ALTER ROLE reader NOBYPASSRLS"},
-		{"createrole", "ALTER ROLE reader CREATEROLE", "ALTER ROLE reader NOCREATEROLE"},
-		{"createdb", "ALTER ROLE reader CREATEDB", "ALTER ROLE reader NOCREATEDB"},
-		{"replication", "ALTER ROLE reader REPLICATION", "ALTER ROLE reader NOREPLICATION"},
-		{"table owner", "ALTER TABLE app.items OWNER TO reader", "ALTER TABLE app.items OWNER TO postgres; GRANT SELECT ON app.items TO reader"},
-		{"schema owner", "ALTER SCHEMA app OWNER TO reader", "ALTER SCHEMA app OWNER TO postgres; GRANT USAGE ON SCHEMA app TO reader"},
-		{"database owner", "ALTER DATABASE fixture OWNER TO reader", "ALTER DATABASE fixture OWNER TO postgres"},
-		{"database create", "GRANT CREATE ON DATABASE fixture TO reader", "REVOKE CREATE ON DATABASE fixture FROM reader"},
-		{"public schema create", "GRANT CREATE ON SCHEMA app TO PUBLIC", "REVOKE CREATE ON SCHEMA app FROM PUBLIC"},
-		{"direct write", "GRANT DELETE ON app.items TO reader", "REVOKE DELETE ON app.items FROM reader"},
-		{"column write", "GRANT UPDATE(name) ON app.items TO reader", "REVOKE UPDATE(name) ON app.items FROM reader"},
-		{"sequence write", "GRANT USAGE ON SEQUENCE app.counter TO reader", "REVOKE USAGE ON SEQUENCE app.counter FROM reader"},
-		{"public column write", "GRANT UPDATE(name) ON app.items TO PUBLIC", "REVOKE UPDATE(name) ON app.items FROM PUBLIC"},
-		{"public write", "GRANT INSERT ON app.items TO PUBLIC", "REVOKE INSERT ON app.items FROM PUBLIC"},
-		{"inherited", "GRANT writer TO reader WITH INHERIT TRUE, SET FALSE", "REVOKE writer FROM reader"},
-		{"set reachable", "GRANT writer TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE writer FROM reader"},
-		{"mixed path", "GRANT writer TO bridge WITH INHERIT TRUE, SET FALSE; GRANT bridge TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE bridge FROM reader; REVOKE writer FROM bridge"},
-		{"elevated reachable", "GRANT elevated TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE elevated FROM reader"},
-		{"membership admin", "GRANT bridge TO reader WITH ADMIN TRUE, INHERIT FALSE, SET FALSE", "REVOKE bridge FROM reader"},
-		{"file role", "GRANT pg_read_server_files TO reader", "REVOKE pg_read_server_files FROM reader"},
-		{"program role", "GRANT pg_execute_server_program TO reader", "REVOKE pg_execute_server_program FROM reader"},
-		{"file function", "GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO reader", "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) FROM reader"},
-	}
-	if wantMajor >= 17 {
-		// The combined scan must include PUBLIC and both reachable-role paths,
-		// even when MAINTAIN is their only unsafe privilege.
-		unsafe = append(unsafe, []struct{ name, before, after string }{
-			{"maintain", "GRANT MAINTAIN ON app.items TO reader", "REVOKE MAINTAIN ON app.items FROM reader"},
-			{"public maintain", "GRANT MAINTAIN ON hidden.target TO PUBLIC", "REVOKE MAINTAIN ON hidden.target FROM PUBLIC"},
-			{"inherited maintain", "GRANT MAINTAIN ON app.items TO bridge; GRANT bridge TO reader WITH INHERIT TRUE, SET FALSE", "REVOKE bridge FROM reader; REVOKE MAINTAIN ON app.items FROM bridge"},
-			{"set reachable maintain", "GRANT MAINTAIN ON app.items TO bridge; GRANT bridge TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE bridge FROM reader; REVOKE MAINTAIN ON app.items FROM bridge"},
-		}...)
-	}
-	for _, c := range unsafe {
-		sql(c.before)
-		_, err := d.Test(t.Context(), access)
-		if err == nil {
-			t.Fatalf("unsafe role accepted: %s", c.name)
-		}
-		requireCode(t, err, contracts.PolicyUnsafe)
-		sql(c.after)
-	}
-	// Membership with neither capability is not an elevation; TEMP alone is safe.
-	sql("GRANT writer TO reader WITH INHERIT FALSE, SET FALSE; GRANT TEMP ON DATABASE fixture TO reader")
+	// Readiness certifies the transaction, not an exhaustive audit of grants.
+	sql("GRANT UPDATE ON app.items TO reader")
 	if _, err = d.Test(t.Context(), access); err != nil {
-		t.Fatal(err)
+		t.Fatal("readiness audited grants", err)
 	}
-	sql("REVOKE writer FROM reader")
+	sql("REVOKE UPDATE ON app.items FROM reader")
 	p.Scope = config.Scope{Mode: "selected", Schemas: []string{"app"}, Tables: []config.Table{{Schema: "Dot.Schema", Name: "a.b"}}}
 	access = database.NewAccess(p, password)
 	seen := map[string]database.Table{}
@@ -261,9 +218,10 @@ func TestPostgresIntegration(t *testing.T) {
 			firstCursor = req.Cursor
 		}
 	}
-	if len(seen) != 8 || !seen["app/items"].Supported || !seen["app/rls"].Supported || !seen["app/parts"].Supported || seen["app/parent"].Supported || seen["app/custom_type"].Supported || seen["app/rls_parts"].Supported || seen["app/a_view"].Supported {
-		t.Fatalf("supported catalog: %#v", seen)
+	if len(seen) != 8 || seen["app/a_view"].Kind != "view" || seen["app/custom_type"].Name == "" {
+		t.Fatalf("catalog: %#v", seen)
 	}
+
 	desc, err := d.DescribeTable(t.Context(), access, config.Table{Schema: "app", Name: "items"})
 	if err != nil {
 		t.Fatal(err)
@@ -330,12 +288,11 @@ func TestPostgresIntegration(t *testing.T) {
 	if err = admin.QueryRow(t.Context(), "SELECT n FROM hidden.audit").Scan(&count); err != nil || count != 0 {
 		t.Fatal("metadata/test executed application RLS or rows")
 	}
-	mcpAcceptance(t, d, access, sql)
+	mcpAcceptance(t, d, access)
 	nativeAgentAcceptance(t, p, password, sql)
 	scopeAcceptance(t, d, access, password, sql)
 	cliDiagnosticsAcceptance(t, fixture.Root)
-	compilerAcceptance(t, d, access, sql)
-	catalogCompatibilityAcceptance(t, d, access, admin)
+	queryAcceptance(t, d, access, sql)
 	executorAcceptance(t, d, access, admin, sql)
 	transportAcceptance(t, p, password, fixture.Root, admin)
 	// Independent concurrent requests share at most two connections per profile.
@@ -426,4 +383,46 @@ func TestPostgresIntegration(t *testing.T) {
 	d.Close()
 	_, err = d.Test(t.Context(), access)
 	requireCode(t, err, contracts.ServiceUnavailable)
+}
+
+// Optional measurements extend the owned fixture; ordinary assertions never use timing.
+func readPathMeasurements(t *testing.T, access database.Access, sql func(string, ...any)) {
+	t.Helper()
+	if os.Getenv("DATA_MATE_MEASURE") != "1" {
+		return
+	}
+	sql("CREATE SCHEMA measurement; GRANT USAGE ON SCHEMA measurement TO reader")
+	for i := range 30 {
+		sql(fmt.Sprintf("CREATE TABLE measurement.t%02d(id int); GRANT SELECT ON measurement.t%02d TO reader", i, i))
+	}
+	defer sql("DROP SCHEMA measurement CASCADE")
+	started := time.Now()
+	for trial := range 5 {
+		d, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, operation := range []string{"query", "list"} {
+			for iteration := range 7 {
+				begin := time.Now()
+				if operation == "query" {
+					_, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT count(*) FROM app.items"})
+				} else {
+					_, err = d.ListTables(t.Context(), access, database.PageRequest{Schema: "measurement", PageSize: 100})
+				}
+				elapsed := time.Since(begin).Nanoseconds()
+				if err != nil {
+					d.Close()
+					t.Fatal(err)
+				}
+				if iteration >= 2 {
+					t.Logf("MEASURE operation=%s trial=%d iteration=%d ns=%d", operation, trial, iteration-2, elapsed)
+				}
+			}
+		}
+		d.Close()
+		if trial >= 2 && time.Since(started) > 4*time.Minute {
+			break
+		}
+	}
 }

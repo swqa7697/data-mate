@@ -14,7 +14,7 @@
 | `cmd/data-mate`, `internal/cli` | Process entry, command parsing, forms, output and exit contracts |
 | `internal/config`, `internal/contracts` | Nonsecret profiles, roots, revisions, bounded decoding and public schemas |
 | `internal/vault` | Encrypted credentials and the native OS key-provider boundary |
-| `internal/database`, `internal/database/postgres` | Driver operations, catalog access, SQL policy and codecs |
+| `internal/database`, `internal/database/postgres` | Driver operations, catalog access, query guard and codecs |
 | `internal/transport` | Explicit direct/TLS/SSH/SOCKS5 connection paths |
 | `internal/service`, `internal/mcp` | Lifecycle, admission, sessions, tool dispatch and the stdio bridge |
 | `internal/agent` | Codex/Claude registration and ownership verification |
@@ -36,8 +36,8 @@
 ## Security and data contracts
 
 - Profiles contain nonsecret settings only. Never persist plaintext credentials or expose them through command arguments, previews, logs or MCP responses. Use synthetic secret values in tests; never commit real credentials.
-- Validate input size, structure, duplicate keys, versions and unknown fields before use. Saved scope, database privileges and supported SQL semantics must all authorize an operation.
-- PostgreSQL parsing is not authorization. Preserve the typed default-deny policy and resource bounds; reject unsupported SQL explicitly.
+- Validate input size, structure, duplicate keys, versions and unknown fields before use. Saved scope controls directly referenced application relations; PostgreSQL enforces privileges and query semantics.
+- Use a dedicated operator-managed read-only database account and a read-only transaction for every database operation. Keep the query guard limited to statement kind and direct relation scope; trust database-defined views, routines, types, indexes, partitions and RLS. Preserve resource bounds and do not reintroduce semantic manifests or exhaustive privilege audits.
 - Use explicit connection/transport configuration. Do not inherit ambient database credentials, SSH agents or proxy settings as fallback behavior.
 - Resolve installation paths independently of the caller's working directory. Verify ownership and symlink safety before mutating owned state; preserve unrelated files and external certificates/key sources.
 - Keep stdout reserved for requested machine/protocol output where applicable. Report diagnostics to stderr and preserve the documented success, operational failure, invalid input and cancellation exit codes.

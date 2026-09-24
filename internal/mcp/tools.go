@@ -30,14 +30,14 @@ type Connection struct {
 }
 
 type arguments struct {
-	Connection string                    `json:"connection"`
-	Schema     string                    `json:"schema"`
-	Table      string                    `json:"table"`
-	Cursor     string                    `json:"cursor"`
-	PageSize   int                       `json:"page_size"`
-	SQL        string                    `json:"sql"`
-	Parameters []database.QueryParameter `json:"parameters"`
-	RowLimit   int                       `json:"row_limit"`
+	Connection string            `json:"connection"`
+	Schema     string            `json:"schema"`
+	Table      string            `json:"table"`
+	Cursor     string            `json:"cursor"`
+	PageSize   int               `json:"page_size"`
+	SQL        string            `json:"sql"`
+	Parameters []json.RawMessage `json:"parameters"`
+	RowLimit   int               `json:"row_limit"`
 }
 
 func newServer(ctx context.Context, backend Backend, version string) *sdk.Server {

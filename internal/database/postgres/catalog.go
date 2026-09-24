@@ -21,7 +21,7 @@ const maxCatalogObjects = 4096
 // scopes do not require materializing the database catalog in the application.
 const visibleSQL = `n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema'
  AND c.relkind IN ('r','p','v','m','f') AND c.relpersistence<>'t'
- AND pg_catalog.has_schema_privilege(n.oid,'USAGE') AND pg_catalog.has_table_privilege(c.oid,'SELECT')
+ AND pg_catalog.has_schema_privilege(n.oid,'USAGE') AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.has_any_column_privilege(c.oid,'SELECT'))
  AND ($1::boolean OR n.nspname::text=ANY($2::text[]) OR EXISTS (SELECT FROM pg_catalog.jsonb_to_recordset($3::jsonb) AS s(schema text,name text) WHERE s.schema=n.nspname AND s.name=c.relname))`
 
 func scopeArgs(s config.Scope) []any {
@@ -53,18 +53,6 @@ func kind(s string) string {
 		return "foreign_table"
 	}
 	return "other"
-}
-
-// OIDs are checked with pg_catalog namespace/type kind as well as canonical IDs.
-func supportedType(oid uint32, ns, typtype string) bool {
-	if ns != "pg_catalog" || typtype != "b" {
-		return false
-	}
-	switch oid {
-	case 16, 17, 20, 21, 23, 25, 114, 700, 701, 1042, 1043, 1082, 1083, 1114, 1184, 1700, 2950, 3802:
-		return true
-	}
-	return false
 }
 
 type cursor struct {
@@ -132,44 +120,31 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	out := database.TablePage{Connection: a.Profile.Alias, Tables: []database.Table{}}
 	err = d.run(ctx, a, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		args := append(scopeArgs(a.Profile.Scope), req.Schema, pos.Schema, pos.Name, req.PageSize+1)
-		rows, err := tx.Query(ctx, `SELECT c.oid,n.nspname,c.relname,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+`
+		rows, err := tx.Query(ctx, `SELECT n.nspname,c.relname,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+`
  AND ($4::text='' OR n.nspname=$4) AND (n.nspname::text COLLATE "C",c.relname::text COLLATE "C") > ($5::text COLLATE "C",$6::text COLLATE "C")
  ORDER BY n.nspname::text COLLATE "C",c.relname::text COLLATE "C" LIMIT $7`, args...)
 		if err != nil {
 			return err
 		}
-		type item struct {
-			oid   uint32
-			table database.Table
-		}
-		items := []item{}
 		for rows.Next() {
-			var i item
+			var table database.Table
 			var k string
-			if err := rows.Scan(&i.oid, &i.table.Schema, &i.table.Name, &k); err != nil {
+			if err := rows.Scan(&table.Schema, &table.Name, &k); err != nil {
 				rows.Close()
 				return err
 			}
-			i.table.Kind = kind(k)
-			items = append(items, i)
+			table.Kind = kind(k)
+			out.Tables = append(out.Tables, table)
 		}
 		rows.Close()
 		if err = rows.Err(); err != nil {
 			return err
 		}
-		more := len(items) > req.PageSize
+		more := len(out.Tables) > req.PageSize
 		if more {
-			items = items[:req.PageSize]
+			out.Tables = out.Tables[:req.PageSize]
 		}
-		for _, i := range items {
-			info, err := inspect(ctx, tx, i.oid, a.Profile.Scope)
-			if err != nil {
-				return err
-			}
-			i.table.Supported = info.reason == ""
-			i.table.Reason = info.reason
-			out.Tables = append(out.Tables, i.table)
-		}
+
 		if more {
 			last := out.Tables[len(out.Tables)-1]
 			pos.Schema = last.Schema
@@ -185,126 +160,25 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	return out, nil
 }
 
-type relationInfo struct {
-	columns []database.Column
-	reason  string
-	oid     uint32
-}
-
-func columns(ctx context.Context, tx pgx.Tx, oid uint32) ([]database.Column, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT a.attname,t.typname,n.nspname,t.typtype::text,t.oid,NOT a.attnotnull,a.attgenerated::text
- FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
- WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1601`, oid)
+func columns(ctx context.Context, tx pgx.Tx, oid uint32) ([]database.Column, error) {
+	rows, err := tx.Query(ctx, `SELECT a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),NOT a.attnotnull
+ FROM pg_catalog.pg_attribute a WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1601`, oid)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer rows.Close()
 	out := []database.Column{}
-	ok := true
 	for rows.Next() {
 		var c database.Column
-		var ns, tp, generated string
-		var tid uint32
-		if err := rows.Scan(&c.Name, &c.Type, &ns, &tp, &tid, &c.Nullable, &generated); err != nil {
-			return nil, false, err
-		}
-		c.Supported = supportedType(tid, ns, tp) && generated == ""
-		if !c.Supported {
-			ok = false
-		}
-		if ns != "pg_catalog" {
-			c.Type = "unsupported"
+		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable); err != nil {
+			return nil, err
 		}
 		out = append(out, c)
 	}
 	if len(out) > 1600 {
-		return nil, false, database.Fail(contracts.ResourceLimit, "column limit exceeded", false)
+		return nil, database.Fail(contracts.ResourceLimit, "column limit exceeded", false)
 	}
-	return out, ok, rows.Err()
-}
-func inspect(ctx context.Context, tx pgx.Tx, oid uint32, scope config.Scope) (relationInfo, error) {
-	out := relationInfo{oid: oid}
-	cols, ok, err := columns(ctx, tx, oid)
-	if err != nil {
-		return out, err
-	}
-	out.columns = cols
-	if !ok {
-		out.reason = "unsupported column type or generated column"
-	}
-	// UNION deduplicates DAG paths and bounds the client materialization. Pending
-	// detach edges are surfaced; Query separately locks and rechecks frozen scans.
-	rows, err := tx.Query(ctx, `WITH RECURSIVE tree(oid) AS (SELECT $1::oid UNION SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent=t.oid)
- SELECT c.oid,n.nspname,c.relname,c.relkind::text,c.relrowsecurity,c.relpersistence::text,am.amname,
- pg_catalog.has_schema_privilege(n.oid,'USAGE') AND pg_catalog.has_table_privilege(c.oid,'SELECT'),
- EXISTS(SELECT FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid AND i.inhdetachpending),
- EXISTS(SELECT FROM pg_catalog.pg_rewrite r WHERE r.ev_class=c.oid),
- EXISTS(SELECT FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid)
- FROM tree JOIN pg_catalog.pg_class c ON c.oid=tree.oid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam
- ORDER BY c.oid LIMIT 4097`, oid)
-	if err != nil {
-		return out, err
-	}
-	type node struct {
-		id                          uint32
-		schema, name, k             string
-		rls                         bool
-		persistence                 string
-		am                          *string
-		read, detach, rules, parent bool
-	}
-	nodes := []node{}
-	for rows.Next() {
-		var n node
-		if err := rows.Scan(&n.id, &n.schema, &n.name, &n.k, &n.rls, &n.persistence, &n.am, &n.read, &n.detach, &n.rules, &n.parent); err != nil {
-			rows.Close()
-			return out, err
-		}
-		nodes = append(nodes, n)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return out, err
-	}
-	if len(nodes) == 0 {
-		return out, database.Fail(contracts.ScopeDenied, "relation is no longer available", true)
-	}
-	if len(nodes) > maxCatalogObjects {
-		return out, database.Fail(contracts.ResourceLimit, "relation hierarchy exceeds limit", false)
-	}
-	rootPartition := false
-	for _, n := range nodes {
-		if n.id == oid {
-			rootPartition = n.k == "p"
-		}
-	}
-	for _, n := range nodes {
-		if n.k != "r" && n.k != "p" {
-			out.reason = "relation kind is not supported"
-		}
-		if n.persistence == "t" || (n.k == "r" && (n.am == nil || *n.am != "heap")) || n.rules {
-			out.reason = "relation execution features are not supported"
-		}
-		if n.detach {
-			out.reason = "partition hierarchy is changing"
-		}
-		if n.rls && (len(nodes) > 1 || n.k == "p" || n.parent) {
-			out.reason = "RLS with partitioning or inheritance is not supported"
-		}
-		if !n.read || strings.HasPrefix(n.schema, "pg_") || n.schema == "information_schema" || (!rootPartition && !scope.ContainsName(n.schema, n.name)) {
-			out.reason = "hierarchy contains unavailable relations"
-		}
-		if n.id != oid {
-			_, supported, err := columns(ctx, tx, n.id)
-			if err != nil {
-				return out, err
-			}
-			if !supported {
-				out.reason = "hierarchy has unsupported columns"
-			}
-		}
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // DescribeTable omits expressions and filters foreign-key endpoints by scope.
@@ -324,13 +198,12 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 		if err != nil {
 			return err
 		}
-		info, err := inspect(ctx, tx, oid, a.Profile.Scope)
+		cols, err := columns(ctx, tx, oid)
 		if err != nil {
 			return err
 		}
 		out.Kind = kind(k)
-		out.Supported = info.reason == ""
-		out.Columns = info.columns
+		out.Columns = cols
 		if err = constraints(ctx, tx, oid, a.Profile.Scope, &out); err != nil {
 			return err
 		}

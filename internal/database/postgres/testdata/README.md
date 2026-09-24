@@ -6,11 +6,9 @@ int8/numeric are strings. `encoding` marks bytea base64. Local timestamps omit
 zones; timestamptz is UTC; BC and infinity remain explicit strings. All types
 include SQL NULL; bytea columns retain their encoding marker even for NULL.
 The offline codec regression and owned PostgreSQL 16/18 scenario execute these
-values as typed parameters and stored columns.
+values as separately bound parameters with SQL casts and as stored columns.
 
-`signatures.json` retains the P0 fixture-schema examples. It is not the runtime
-allowlist. P4 embeds complete per-major type/operator/aggregate/cast/btree and
-function identities in `../sqlpolicy/catalog16.json` and `catalog18.json`, and
-verifies them through `catalog.sql` before compilation. See the
-[compiler contract](../sqlpolicy/README.md) for supported forms, snapshot provenance
-and execution rechecks.
+The owned query scenario also covers mixed enum/array tables, nested arrays,
+domains, text fallbacks, view/function dependencies and column-level grants.
+The query guard has its own bounded syntax/scope corpus; no semantic manifests
+or signature allowlists are maintained.

@@ -108,39 +108,6 @@ for image in "${images[@]}"; do
     echo 'Owned PostgreSQL fixture failed to become ready.' >&2
     exit 1
   fi
-  # Explicit export mode creates review candidates, never updates embedded policy
-  # or substitutes for integration acceptance. Reuse the owned fixture lifecycle.
-  if [[ -n "${CATALOG_OUTPUT_DIR:-}" ]]; then
-    python3 - "$CATALOG_OUTPUT_DIR" "$container_name" "$image" "$project_dir/internal/database/postgres/sqlpolicy/catalog.sql" <<'PYEXPORT'
-import json, pathlib, subprocess, sys
-out, container, image, sql_path = sys.argv[1:]
-root = pathlib.Path(out).resolve(strict=True)
-if not root.is_dir() or not root.is_relative_to(pathlib.Path('/tmp').resolve()) or root == pathlib.Path('/tmp').resolve():
-    raise SystemExit('CATALOG_OUTPUT_DIR must be an existing directory beneath /tmp')
-def query(sql):
-    return subprocess.check_output(['docker', 'exec', '-i', container, 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'fixture'], input=sql, text=True).strip()
-version = int(query('SHOW server_version_num;'))
-major = version // 10000
-if major not in (16, 18):
-    raise SystemExit('Unaudited fixture major')
-raw = query('SET search_path=pg_catalog;\n' + pathlib.Path(sql_path).read_text() + ';')
-# Preserve sorted object keys and query-defined semantic row ordering.
-with (root / f'catalog{major}.json').open('x') as f:
-    document = json.loads(raw)
-    sections = []
-    for key in sorted(document):
-        rows = ',\n'.join('  ' + json.dumps(row, separators=(',', ':'), sort_keys=True) for row in document[key])
-        sections.append(' ' + json.dumps(key) + ': [\n' + rows + '\n ]')
-    f.write('{\n' + ',\n'.join(sections) + '\n}\n')
-metadata = dict(server_version_num=version, image=image, image_metadata=json.loads(subprocess.check_output(['docker', 'image', 'inspect', image], text=True))[0]['RepoDigests'])
-with (root / f'catalog{major}.provenance.json').open('x') as f:
-    json.dump(metadata, f, indent=2)
-    f.write('\n')
-print(f'Exported PostgreSQL {major} candidates to {root}; integration tests not run in export mode')
-PYEXPORT
-    remove_resources
-    continue
-  fi
   port="$(docker port "$container_name" 5432/tcp)"
   port="${port##*:}"
   python3 - "$fixture_dir" "$port" "$container_name" "$fixture_id" "$image" <<'PY'

@@ -49,7 +49,7 @@ func TestToolInputsFailClosed(t *testing.T) {
 		"list_connections.input": {`{"host":"secret"}`, `null`},
 		"list_tables.input":      {`{}`, `{"connection":"analytics","page_size":501}`, `{"connection":"analytics","scope":{"mode":"all"}}`},
 		"describe_table.input":   {`{"connection":"analytics","schema":"public"}`},
-		"query.input":            {`{"connection":"analytics","sql":"select 1","timeout":99}`, `{"connection":"analytics","sql":"select 1","row_limit":0}`, `{"connection":"analytics","sql":"select $1","parameters":[{"type":"int8","value":9223372036854775807}]}`, `{"connection":"analytics","sql":"select $1","parameters":[{"type":"unknown","value":null}]}`, `{"connection":"analytics","sql":"select $1","parameters":[{"type":"text","value":"x","password":"y"}]}`},
+		"query.input":            {`{"connection":"analytics","sql":"select 1","timeout":99}`, `{"connection":"analytics","sql":"select 1","row_limit":0}`, `{"connection":"analytics","sql":"select $1","parameters":{}}`},
 	}
 	for name, inputs := range cases {
 		for i, input := range inputs {

@@ -6,15 +6,15 @@ Data Mate makes saved database connections available to independently launched t
 
 This document describes the current architecture and technical contracts. The [PRD](PRD.md) defines product requirements, the [README](../README.md) documents setup and usage, and the [changelog](../CHANGELOG.md) records user-visible changes. Implementation plans and validation evidence belong in ignored `.misc`, not in this design.
 
-The supported platform is macOS on Apple Silicon, with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: connection and role checks require PostgreSQL 16 or later, while query compilation and diagnostic policy readiness require the reviewed semantic manifests supplied for majors 16 and 18. Other majors fail those semantic checks. PostgreSQL 16 and 18 form the integration matrix.
+The supported platform is macOS on Apple Silicon, with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax is bounded by the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
 
 Other database drivers, Linux, distribution, automatic updates, credential export, and key rotation are deferred. Windows and Intel macOS are outside the product scope. `upgrade` and `update` are informational local-rebuild stubs. There is no GUI, cloud service, account system, model API integration, agent launcher, database mutation tool, migration runner, query history, telemetry, plugin loader, or local SQL database for application state. Data Mate does not manage database users or change server permissions.
 
 The design follows these principles:
 
-- One background service per installation shares database and policy logic across agents.
+- One background service per installation shares database and query logic across agents.
 - Nonsecret profiles and encrypted credentials are separate; one installation key lives in OS secure storage.
-- Every database request enforces saved visibility, role privileges, and supported semantics, including metadata requests.
+- Query and metadata tools enforce saved direct-relation scope; PostgreSQL owns grants and query semantics.
 - Resources, cancellation, ownership, and partial failures have explicit bounds and outcomes.
 - The normal workflow is add a connection, optionally narrow scope, start MCP, and launch an agent normally.
 
@@ -26,7 +26,7 @@ flowchart LR
     CLI --> Config[Nonsecret profiles]
     CLI --> Vault[Encrypted credential vault]
     CLI --> Lifecycle[Service lifecycle and agent registration]
-    CLI --> Driver[Shared PostgreSQL driver and policy]
+    CLI --> Driver[Shared PostgreSQL driver and query guard]
     Keychain[OS secure storage: one vault key] --> Vault
     Agent[Codex or Claude Code] -->|MCP over stdio| Bridge[Data Mate bridge]
     Bridge -->|Private Unix socket| Service[Background MCP service]
@@ -57,8 +57,8 @@ The service listens on a Unix domain socket in an owner-checked private director
 | `internal/contracts`                                | Strict public JSON schemas, decoding, examples, and safe error codes           |
 | `internal/vault`                                    | Encrypted repository, write accounting, and native Keychain provider           |
 | `internal/database`                                 | Shared driver operations and result/access types                               |
-| `internal/database/postgres`                        | Connections, pools, catalogs, role checks, execution, and codecs               |
-| `internal/database/postgres/sqlpolicy`              | Bounded parser, typed compiler, and embedded semantic manifests                |
+| `internal/database/postgres`                        | Connections, pools, catalogs, read-only transactions, execution, and codecs               |
+| `internal/database/postgres/sqlguard`              | Bounded statement-kind and direct-relation scope checks                |
 | `internal/transport`                                | Direct, TLS, SSH, and SOCKS5 connection paths and owned SSH host pins          |
 | `internal/service`                                  | Lifecycle, identity, runtime socket, profile reload, and request coordination  |
 | `internal/mcp`                                      | Tool handlers, session framing/admission, and stdio bridge                     |
@@ -126,7 +126,7 @@ Each fetch opens a fresh shared state lease, verifies the preview revision, and 
 
 ### 3.3 Diagnostics and output
 
-`db test` runs selected profiles sequentially in alias order with a per-profile deadline that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `policy` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange distinguishes authentication failures. Policy uses the same role and semantic-catalog checks as the query path, without compiling agent SQL or reading application rows. Successful diagnostics do not authorize later queries.
+`db test` runs selected profiles sequentially in alias order with a per-profile deadline that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `read_only` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange distinguishes authentication failures. The final stage verifies the actual read-only transaction and authenticated identity, without reading application rows or auditing grants. Success does not certify that the operator has provisioned a restricted account or authorize later queries.
 
 The terminal `stage` and `ok` fields summarize each result. A failed stage includes a safe error object; later stages are omitted. Ordinary per-profile failures continue the batch. Invalid whole-document configuration and unknown aliases fail before output because no validated selection exists. Cancellation stops the command. Output occurs after releasing state leases. Diagnostics may initialize owned state for manual profiles but do not create or repair secrets, keys, or database grants.
 
@@ -304,7 +304,7 @@ Credentials and keys never appear in agent settings, MCP results, previews, diag
 
 ## 7. Visibility policy
 
-Each profile addresses one database. Effective visibility intersects configured scope, the database role's privileges, and driver-supported objects. All scope does not grant missing privileges or bypass query validation.
+Each profile addresses one database. Direct relation visibility intersects configured application scope and the database role's privileges. All scope does not grant missing privileges or bypass query validation.
 
 | Scope                                                                                        | Meaning                                                                                |
 | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
@@ -314,11 +314,11 @@ Each profile addresses one database. Effective visibility intersects configured 
 
 Selected schemas and tables form a union of exact, case-preserving names. There are no patterns or exclusions. Future tables enter through all or whole-schema selection. Renamed/missing explicit names remain unavailable; recreating a selected name selects the replacement object. Scope is name-based.
 
-Agent catalog tools apply saved scope and role privileges in trusted parameterized SQL before C-collated keyset pagination. The user's scope picker can inspect the role's full accessible application catalog. Metadata omits full definitions, default expressions, role listings, server paths, credential references, and hidden foreign-key endpoints. Catalog support labels describe discovered objects but do not authorize execution.
+Agent catalog tools apply saved scope and role privileges in parameterized SQL before C-collated keyset pagination. The user's scope picker can inspect the role's full accessible application catalog. Relations readable through table-level or column-level SELECT grants are discoverable. Each page uses one relation query, with no per-relation inspection. Descriptions expose actual type names, columns, keys and visible foreign-key endpoints; they omit expressions and defaults. There are no `supported` or `reason` fields.
 
-Queries support ordinary and partitioned application tables with audited built-in types and execution features. Views, materialized views, foreign tables, temporary/system relations, custom types/functions/operators, and unverified relation features are unsupported. Ordinary inheritance requires every scanned descendant to be in scope. Selecting a partition root includes its partitions, subject to grants and driver support. Execution freezes and rechecks the hierarchy; hierarchies with RLS are unsupported.
+Scope applies to direct schema-qualified relation references, including views, materialized views and foreign tables. PostgreSQL owns indirect dependencies, partitions, ordinary inheritance, RLS and functions; these are not recursively restricted by saved scope. This is a convenience boundary on direct references, not database-enforced isolation against routines or views. `pg_*` schemas and `information_schema` remain excluded even in `all` scope. An empty selection permits no direct relations but still permits relation-free queries and trusted functions.
 
-Authenticated cursors bind version, profile ID/revision, schema filter, position, and process invalidation epoch. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600 and hierarchy/constraint materialization at 4096 entries, with operation deadlines and conservative encoded-size accounting. Metadata shares the profile result-byte cap.
+Authenticated cursors bind version, profile ID/revision, schema filter, position, and process invalidation epoch. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600 and constraints at 4096 entries, with deadlines and encoded-size accounting. Metadata shares the profile result-byte cap.
 
 ## 8. Database transport and connection management
 
@@ -345,7 +345,7 @@ Each database connection owns its SSH TCP connection and forwarding channel, or 
 
 One shared PostgreSQL driver owns lazy pools with no initial idle connections, at most two connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows eight active operations, 32 waiters, and a five-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Service database work has a 35-second outer deadline and then the profile timeout; connection listing has a five-second deadline.
 
-Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with fresh role-readiness checks. Pools cache connections, never live catalog/grant authorization. PostgreSQL statement and description caches are disabled. Profile invalidation cancels active work and invalidates cursors.
+Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache connections, never authorization. PostgreSQL statement and description caches are disabled. Successful operations roll back and run `DISCARD ALL` before pool reuse; cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
 
 Rollback has an independent two-second budget. Uncertain connections are discarded; cleanup failure cannot return success. Deliberate byte truncation closes the connection before returning a complete bounded result instead of draining unread rows. No executing query is automatically retried. Driver cleanup finishes before the caller releases its state lease.
 
@@ -353,66 +353,51 @@ Every PostgreSQL connection, including readiness and catalog connections, caps m
 
 ## 9. Read-only PostgreSQL execution
 
-Read-only enforcement combines role restrictions, saved scope, a finite typed SQL subset, fresh catalog verification, relation locking, and read-only transactions. A SELECT prefix, volatility label, or transaction access mode alone is insufficient.
+Data Mate is a bounded PostgreSQL reader. It checks one read statement and direct relation scope, executes the original SQL with bound values, and leaves SQL semantics to PostgreSQL.
 
-### 9.1 Role and server trust boundary
+### 9.1 Account and server trust
 
-The configured role needs CONNECT, schema USAGE, and SELECT on intended objects. Checks reject superuser, BYPASSRLS, role/database creation, replication, membership ADMIN options, application database/schema/object ownership, schema creation, relation/column writes, sequence USAGE/UPDATE, and privileged server file/program capabilities. PostgreSQL 17+ MAINTAIN is also rejected. Both inherited and SET-reachable capabilities are evaluated, including mixed membership paths and PUBLIC grants.
+Operators provision a dedicated non-owner read-only account with CONNECT, schema USAGE and SELECT on intended relations/columns. Data Mate never grants privileges and does not audit ownership, role memberships, PUBLIC grants or function implementations. Diagnostics verify transaction read-only state, not account safety. Every operation explicitly starts READ ONLY regardless of account defaults.
 
-Readiness checks cover application objects throughout the database, not just saved scope. TEMP alone is permitted, but query execution rejects temporary relations. Data Mate never grants or revokes privileges.
+Database-installed routines, extensions, views, types, operators, indexes and RLS policies are trusted configuration. PostgreSQL applies normal grants, view-owner rules and RLS, including partitioned tables. Functions can access data indirectly beyond saved scope. Read-only transactions prevent ordinary database mutations but are not a sandbox for arbitrary server-side code or external side effects; see [PostgreSQL transaction semantics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
 
-Ordinary noninherited RLS executes under the configured role. Owners and BYPASSRLS roles are unsuitable. RLS functions and administrator-controlled server code remain trusted configuration; Data Mate cannot prove arbitrary server code harmless or freeze administrative grant changes. RLS hierarchies are rejected.
+### 9.2 Query guard
 
-### 9.2 Compiler and accepted subset
+The pinned native scanner bounds tokens and delimiter nesting before parsing. The AST walk bounds messages/depth, permits one SELECT-family statement (`SELECT`, `VALUES`, `TABLE`), rejects modifying CTEs, SELECT INTO and locking clauses, and checks all direct relation references. Transaction/session/utility commands and multi-statements are rejected. CTE visibility follows lexical scopes, including recursion and nested shadowing. Physical relations require explicit schema names; cross-database and system-schema references are rejected.
 
-The [compiler contract](../internal/database/postgres/sqlpolicy/README.md) defines exact syntax, budgets, semantic fields, and manifest maintenance. Independent lexical bounds precede the pinned `pg_query_go` parser. Strict populated-field checks and typed AST validation default to rejection. Original agent SQL is never sent to PostgreSQL for planning or execution; the compiler emits canonical SQL and separately bound values with explicit OIDs.
+There is no expression/type/function/index allowlist or SQL emitter. Normal PostgreSQL joins, windows, recursive CTEs, correlated/lateral queries, set operations, arrays, casts, custom operators and functions pass through to PostgreSQL. Session `search_path` starts as `pg_catalog`, with `standard_conforming_strings=on` to align server string parsing with the native guard. There are no semantic manifests, catalog fingerprints, hierarchy snapshots or explicit authorization locks.
 
-The supported subset includes one SELECT, schema-qualified physical relations, aliases and column aliases, projections/stars, typed literals/parameters, INNER/LEFT/RIGHT/FULL/CROSS joins with ON, supported boolean/comparison/numeric expressions, NULL predicates, BETWEEN, finite IN lists, noncorrelated EXISTS/IN subqueries, derived SELECTs, nonrecursive CTEs, simple GROUP BY/HAVING, count/sum/avg/min/max, supported aggregate DISTINCT arguments, ordering, and integer LIMIT/OFFSET. CTEs and aliases resolve through lexical scopes. Duplicate output labels are preserved through unique internal bindings.
+### 9.3 Execution
 
-Unknown strings/NULL need contextual or explicit types. Numeric casts and int2 → int4 → int8 → numeric widening use audited signatures. Comparisons, grouping, ordering, and aggregate overloads require exact supported built-in semantics. Default/C/POSIX collations and plain audited built-in btree indexes are supported.
+1. Validate the current profile, JSON parameters and bounded query guard under the existing state lease.
+2. Admit work, acquire a connection, begin READ ONLY READ COMMITTED, set local timeouts and verify transaction state/identity.
+3. Parse/describe the original SQL through PostgreSQL's extended protocol with unspecified parameter OIDs. Check the server's parameter count.
+4. Fetch only result type names and array/domain dependencies in one bounded recursive catalog query. This is decoding metadata, not a semantic audit.
+5. Bind values separately and execute the same prepared statement with text-format results. Preserve labels, including duplicates, and PostgreSQL's query semantics; do not rewrite SQL or LIMIT.
+6. Consume complete rows within the row/byte budgets. One extra row detects truncation. Close the socket before closing the result reader on truncation or early failure, preventing unbounded draining.
+7. Roll back completed operations and `DISCARD ALL` before pool reuse. Rollback/reset use the bounded cleanup context. Closed/uncertain connections are discarded before releasing admission and state access.
 
-Unsupported constructs include multiple statements, data-modifying CTEs, SELECT INTO, locking clauses, DDL/DML, COPY, CALL, DO, transaction/session/role commands, prepared-statement execution, EXPLAIN, direct system-catalog access, user-defined functions/operators, set-returning functions, SELECT DISTINCT, correlated/lateral queries, set operations, arrays, windows, grouping aliases/ordinals, ambiguous output-alias ordering, explicit CTE materialization, type modifiers, and quoted backslash escapes. Custom/expression/partial/non-btree indexes and unaudited coercions fail closed. Explicit expressions, unambiguous ordering ordinals, and typed parameters provide supported alternatives where applicable.
+### 9.4 Bounds and codecs
 
-Session `search_path` is `pg_catalog`; physical relations require explicit schemas. Embedded manifests for PostgreSQL 16 and 18 define supported types, I/O functions, operators, casts, aggregates, btree semantics, and referenced implementation/planner callbacks. Each immutable manifest is validated and indexed once, with an expected SHA-256 fingerprint derived locally. Every compilation and post-lock check computes a fresh server-side fingerprint over the same live definitions; only the original UTF-8 catalog byte count and 32-byte digest cross the connection. The versioned hash input includes the PostgreSQL major and canonical JSONB text with category records sorted using C collation; nested array order, nulls, duplicates, and every audited field remain significant. The client enforces the 2 MiB catalog bound and rejects missing, malformed or mismatched fingerprints without a full-catalog fallback. Unsupported majors are rejected before catalog access. No live authorization result is cached. Comparison uses semantic identity, allowing only the incidental row OIDs and numeric planner estimates documented in the compiler contract. Unsupported majors or changed definitions return `QUERY_UNSUPPORTED`. Presence in a manifest does not make a function callable by agent SQL.
+| Resource | Bound |
+| --- | --- |
+| Query deadline | Profile default 10 seconds, maximum 30 seconds |
+| Lock wait | 1 second |
+| Returned rows | Profile default 500, maximum 5000; caller may lower |
+| Result envelope | Profile cap, at most 1 MiB |
+| Protocol message body | 2 MiB |
+| SQL | 64 KiB |
+| Tokens / AST messages | 8192 each; depth 64 |
+| Parameters | 256; 64 KiB each, 256 KiB total JSON input |
+| Result type metadata | 8192 type descriptors; decoding depth 64 |
 
-### 9.3 Execution sequence
+Native parsing cannot be interrupted by a Go context; the worst-shape regression runs in a deadline-controlled subprocess. Timeouts and cancellation return failures without partial results. Row/byte truncation returns complete rows with `truncated: true`; oversized column metadata fails with `RESOURCE_LIMIT`. Encoded-size accounting includes escaping, base64 and both MCP result representations.
 
-Each query follows this sequence:
+Rows are arrays aligned with columns. SQL NULL becomes JSON null. Int8/numeric values are exact strings; finite floats are numbers and special values are strings. Local timestamps have no invented zone; timestamptz normalizes to UTC. BC/infinity remain explicit strings. Bytea uses base64. JSON retains exact numbers and duplicate members, with a 1 MiB/depth-64 bound.
 
-1. Admit work, validate the current profile, and read scope/credentials under shared state access.
-2. Validate parameter codecs and bounded SQL structure before acquiring a pool connection.
-3. Begin a read-only READ COMMITTED transaction, set local statement/lock timeouts, and check role readiness.
-4. Verify live semantic definitions and compile against current relation identities, grants, scope, columns, and hierarchy.
-5. Lock captured relation names with `LOCK TABLE ONLY ... IN ACCESS SHARE MODE` in OID order. Recheck role, identities, complete column layouts, hierarchy edges, grants, and scope with fresh snapshots; reverify semantic definitions even for relation-free SELECTs. Changed captures fail with retry guidance.
-6. Execute emitted SQL and separate parameters through the extended query protocol. Validate returned column names/OIDs/formats against the plan and consume raw text values incrementally.
-7. Finish bounded result preparation and rollback, or discard a deliberately truncated/uncertain connection, before releasing database and state resources.
+PostgreSQL arrays become nested JSON arrays, retaining null elements, multidimensional shape and the scalar representation of each element. Empty arrays become `[]`; lower bounds normalize to JSON indexing. Domains use their base representation. Other types, including enums, ranges and composites, use PostgreSQL text with actual type names and `encoding: postgres_text`. Array encoding markers describe their elements (for example bytea arrays use `base64`). No unselected column participates in result decoding.
 
-Hierarchy scans emit explicit ONLY relations and UNION ALL, including typed empty partition roots. Attachments made after the final check cannot enter the captured physical scans; later requests rediscover them. A compiled plan never authorizes execution outside the lock/recheck sequence, and successful authorization is not reused across requests.
-
-### 9.4 Bounds and value codecs
-
-| Resource                        | Bound                                                        |
-| ------------------------------- | ------------------------------------------------------------ |
-| Query timeout                   | Profile default 10 seconds, maximum 30 seconds               |
-| Relation lock wait              | 1 second                                                     |
-| Returned rows                   | Profile default 500, maximum 5000; caller may lower          |
-| Result envelope                 | Profile cap, at most 1 MiB                                   |
-| Input SQL                       | 64 KiB                                                       |
-| Lexical tokens / AST messages   | 8192 each; depth 64                                          |
-| Supplied parameters             | 256; 64 KiB each, 256 KiB total before/after wire conversion |
-| Generated bindings              | 8192                                                         |
-| Expression emission / final SQL | 1 MiB each                                                   |
-| Compiler catalog                | 4096 relations, 8192 columns                                 |
-
-Native parsing is size/depth bounded; Go context cancellation is not a guarantee that an in-progress native parser call can be interrupted. Regression checks isolate worst-case parsing in a deadline-controlled subprocess.
-
-The emitter caps the top-level LIMIT at the effective row cap plus one lookahead row, preserving smaller user limits and nested pagination. Row/byte truncation returns complete rows with `truncated: true`, never broken JSON. Timeouts/cancellation return failures rather than presenting partial work as a complete result. Column metadata that cannot fit produces `RESOURCE_LIMIT`.
-
-Byte accounting includes column metadata, JSON escaping, base64 expansion, maximum count/elapsed widths, structured content, and duplicated compact JSON compatibility text. `QueryPayloadSize` shares that tool-envelope definition with MCP. JSON-RPC framing has an independent cap.
-
-Rows are arrays aligned with columns, preserving duplicate labels. SQL NULL is JSON null. Int8 and exact numeric values are strings; finite floats are numbers and special floats are strings. Local timestamps use `T` without a zone; timestamptz normalizes to UTC with `Z`. Infinity and BC values remain explicit strings. Bytea metadata always specifies `encoding:base64`, including for NULL. JSON remains structured with exact number and duplicate-member preservation, bounded to 1 MiB and depth 64.
-
-Parameters use ordered `{type,value}` objects with canonical supported PostgreSQL scalar names and the same codec representations. Temporal parameters require ISO forms and explicit zones for timestamptz; audited PostgreSQL input functions validate calendar/range constraints. Codec/signature fixtures live in [PostgreSQL testdata](../internal/database/postgres/testdata/README.md).
+`parameters` is an ordered JSON value array. Strings become their contents, numbers preserve their original decimal text, booleans become textual booleans, null becomes SQL NULL, and objects/arrays become compact JSON text. PostgreSQL infers types; explicit casts such as `$1::uuid`, `$2::jsonb` and `$3::text[]` resolve ambiguity. PostgreSQL-array input uses an array-text string. To pass JSON null rather than SQL NULL, pass the string `"null"` and cast to json/jsonb. Parameters are never interpolated into SQL. [Codec fixtures](../internal/database/postgres/testdata/README.md) exercise exact representations.
 
 ## 10. MCP contract
 
@@ -424,8 +409,8 @@ Four tools expose strict embedded [input/output schemas](../internal/contracts/s
 | ------------------ | ------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `list_connections` | Empty object                                                  | Aliases, drivers, database labels, and configured scope                |
 | `list_tables`      | `connection`; optional `schema`, `cursor`, `page_size`        | Visible table names, kinds, support labels, and next cursor            |
-| `describe_table`   | `connection`, `schema`, `table`                               | Columns, supported types, nullability, keys, and visible relationships |
-| `query`            | `connection`, `sql`; optional typed `parameters`, `row_limit` | Columns, rows, row count, truncation, and elapsed time                 |
+| `describe_table`   | `connection`, `schema`, `table`                               | Columns, actual types, nullability, keys, and visible relationships |
+| `query`            | `connection`, `sql`; optional JSON-value `parameters`, `row_limit` | Columns, rows, row count, truncation, and elapsed time                 |
 
 All tools declare read-only intent, enforced server-side. Inputs reject additional fields. No tool accepts connection overrides, credentials, DSNs, hosts, or arbitrary file paths; no tool modifies profiles or broadens scope. Schema validation alone does not authorize execution. Connection listing reads only the public profile snapshot and never loads credentials.
 
@@ -444,7 +429,7 @@ Example structured query result:
 }
 ```
 
-Tool failures use `isError` and a safe `{code,message,retryable}` object. Codes include `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `SCOPE_DENIED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, `RESOURCE_LIMIT`, `POLICY_UNSAFE`, `STALE_CURSOR`, `INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`. Unexpected internal failures become `SERVICE_UNAVAILABLE`; invalid tool arguments and protocol errors remain JSON-RPC errors. Raw DSNs, parameters, upstream PostgreSQL details/hints, and decrypted secrets never enter diagnostics.
+Tool failures use `isError` and a safe `{code,message,retryable,sqlstate?}` object. Codes include `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `SCOPE_DENIED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, `RESOURCE_LIMIT`, `READ_ONLY_VIOLATION`, `PERMISSION_DENIED`, `QUERY_FAILED`, `STALE_CURSOR`, `INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`. Unexpected internal failures become `SERVICE_UNAVAILABLE`; invalid tool arguments and protocol errors remain JSON-RPC errors. Raw DSNs, parameters, upstream PostgreSQL details/hints, and decrypted secrets never enter diagnostics.
 
 Database text is untrusted data, not operational instruction. Scope controls retrieval; it cannot make permitted text immune to prompt injection in the consuming agent.
 
@@ -492,7 +477,7 @@ The Make wrapper builds a private helper under `/tmp` so cleanup/retry remains a
 
 Explicit purge marks a durable tombstone before exact-key deletion, then removes profiles, vault, accounting, known hosts, and owned publication siblings. A terminal `state/purge.json` receipt preserves root/installation identity through final identity and lock removal. Startup/publication rejects that receipt; only cleanup can recreate missing terminal locks. Deleting the receipt commits terminal cleanup. All lock waiters recheck named inodes and identity.
 
-Unrelated `.dev` contents, external agent settings, source keys, certificates, unrecognized logs/build files, and shared Go caches remain untouched. Directories are removed only when empty. Ownership is never inferred from a filename prefix. Semantic manifests are embedded in the executable; no installed manifest sidecar is needed.
+Unrelated `.dev` contents, external agent settings, source keys, certificates, unrecognized logs/build files, and shared Go caches remain untouched. Directories are removed only when empty. Ownership is never inferred from a filename prefix.
 
 ## 12. Validation boundaries
 
@@ -504,10 +489,10 @@ Tests live beside the owning Go packages; reusable fixtures and public examples 
 | CLI                     | Hidden input, cancellation, non-TTY behavior, scope selection, JSON/exit contracts, and multi-profile diagnostics                                               |
 | Lifecycle and agents    | Independent checkouts, registration conflicts/preservation, start/stop, partial readiness, stale/rebuilt identities, and cleanup retries                        |
 | MCP and resources       | Initialization, schemas, independent sessions, frame/queue limits, disconnect/cancellation, bounded output, and redaction                                       |
-| PostgreSQL              | Accepted/rejected SQL, role/scope enforcement, semantic manifests, hierarchy/DDL races, codecs, truncation, rollback, and connection disposal                   |
+| PostgreSQL              | Broad read SQL, direct scope, server write/permission rejection, codecs, truncation, rollback/reset and connection disposal                   |
 | Ownership and purge     | Symlink/identity protection, state-reader draining, tombstones/receipts, exact-key deletion, and preservation of unrelated files                                |
 
-Bounded fuzz seeds exercise decoding and SQL policy. Race tests cover concurrent behavior. CI uses `macos-15` jobs for Format and lint, Test and build, and Race tests, each with `make setup`; Docker integration is excluded.
+Bounded fuzz seeds exercise decoding and query guard. Race tests cover concurrent behavior. CI uses `macos-15` jobs for Format and lint, Test and build, and Race tests, each with `make setup`; Docker integration is excluded.
 
 `make test-integration DB_DRIVER=postgres` owns its Docker containers, networks, credentials, and synthetic data for both PostgreSQL 16 and 18. `DB_IMAGE=postgres:16` or `DB_IMAGE=postgres:18` selects one entry. Image overrides still face version and semantic-readiness checks. The harness never accepts an arbitrary existing database URL and tears down on success, failure, and interruption. Owned local SSH/SOCKS5 fixtures exercise transport paths.
 

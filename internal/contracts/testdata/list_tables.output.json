@@ -4,8 +4,7 @@
     {
       "schema": "public",
       "name": "orders",
-      "kind": "table",
-      "supported": true
+      "kind": "table"
     }
   ],
   "next_cursor": null

@@ -51,7 +51,7 @@ func Fail(code contracts.Code, message string, retry bool) error {
 	return &Error{contracts.Failure{Code: code, Message: message, Retryable: retry}}
 }
 
-// Readiness reports successful connection and policy checks without reading application rows.
+// Readiness reports successful connection and read-only transaction checks without reading application rows.
 type Readiness struct {
 	ServerVersion int
 	TLS           bool
@@ -77,13 +77,11 @@ type ScopePage struct {
 	Next    string
 }
 
-// Table identifies a visible relation and its query support status.
+// Table identifies a visible readable relation.
 type Table struct {
-	Schema    string `json:"schema"`
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Supported bool   `json:"supported"`
-	Reason    string `json:"reason,omitempty"`
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
 }
 
 // PageRequest carries an optional exact schema filter and authenticated keyset cursor.
@@ -102,10 +100,9 @@ type TablePage struct {
 
 // Column exposes safe type metadata without expressions or defaults.
 type Column struct {
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Nullable  bool   `json:"nullable"`
-	Supported bool   `json:"supported"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Nullable bool   `json:"nullable"`
 }
 
 // Key contains a primary or unique key without its server definition.
@@ -127,7 +124,6 @@ type Description struct {
 	Schema        string         `json:"schema"`
 	Table         string         `json:"table"`
 	Kind          string         `json:"kind"`
-	Supported     bool           `json:"supported"`
 	Columns       []Column       `json:"columns"`
 	Keys          []Key          `json:"keys"`
 	Relationships []Relationship `json:"relationships"`
@@ -140,17 +136,11 @@ type ResultColumn struct {
 	Encoding string `json:"encoding,omitempty"`
 }
 
-// QueryParameter uses the public codec representation, preserving exact JSON numbers.
-type QueryParameter struct {
-	Type  string          `json:"type"`
-	Value json.RawMessage `json:"value"`
-}
-
 // QueryRequest can lower the profile's row cap, never its authorization or limits.
 // Zero RowLimit uses the profile cap. SQL and parameters must never be logged.
 type QueryRequest struct {
 	SQL        string
-	Parameters []QueryParameter
+	Parameters []json.RawMessage
 	RowLimit   int
 }
 

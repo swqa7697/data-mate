@@ -4,22 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
+	"github.com/swqa7697/data-mate/internal/database/postgres/sqlguard"
 )
 
 // Only the executor can signal successful truncation after terminating a socket.
 var errResultDiscarded = errors.New("bounded result completed; connection discarded")
 
-// Query compiles and executes one bounded SELECT in a fresh read-only transaction.
-// Authorization is request-local; neither compiled plans nor successful checks
-// can be supplied by callers or reused to bypass the lock/recheck boundary.
+// Query executes one scoped read query in a fresh read-only transaction.
 func (d *Driver) Query(ctx context.Context, a database.Access, req database.QueryRequest) (database.QueryResult, error) {
 	started := time.Now()
 	a, rev, err := normalized(a)
@@ -42,73 +39,29 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 	if err != nil {
 		return database.QueryResult{}, err
 	}
-	parsed, err := sqlpolicy.Parse(req.SQL)
-	if err != nil {
+	if err := sqlguard.Check(req.SQL, a.Profile.Scope); err != nil {
 		return database.QueryResult{}, err
 	}
 	var out database.QueryResult
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, version int) error {
-		if err := verifyCatalog(ctx, tx, version); err != nil {
-			return err
+		description, e := tx.Conn().PgConn().Prepare(ctx, "data_mate_query", req.SQL, nil)
+		if e != nil {
+			return e
 		}
-		plan, err := parsed.CompileBounded(ctx, version/10000, &compilerCatalog{tx: tx, scope: a.Profile.Scope}, params, limit+1)
-		if err != nil {
-			return err
+		if len(description.ParamOIDs) != len(params) {
+			return invalidParameters()
 		}
-		if err = recheckPlan(ctx, tx, a, version, plan); err != nil {
-			return err
+		types, e := describeTypes(ctx, tx, description.Fields)
+		if e != nil {
+			return e
 		}
-		out, err = executePlan(ctx, tx, a, plan, limit, started)
+		out, err = executeQuery(ctx, tx, a, description, types, params, limit, started)
 		return err
 	})
 	if err != nil {
 		return database.QueryResult{}, err
 	}
 	return out, nil
-}
-
-func stalePlan() error {
-	return database.Fail(contracts.QueryUnsupported, "relation changed during authorization; retry the query", true)
-}
-
-func recheckPlan(ctx context.Context, tx pgx.Tx, a database.Access, version int, plan sqlpolicy.Compiled) error {
-	unique := map[uint32]sqlpolicy.Identity{}
-	for _, rel := range plan.Relations {
-		for _, dep := range rel.Dependencies {
-			if prior, ok := unique[dep.OID]; ok && prior != dep {
-				return stalePlan()
-			}
-			unique[dep.OID] = dep
-		}
-	}
-	ids := make([]uint32, 0, len(unique))
-	for oid := range unique {
-		ids = append(ids, oid)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	for _, oid := range ids {
-		dep := unique[oid]
-		// ONLY prevents PostgreSQL from implicitly locking newly attached children.
-		if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+pgx.Identifier{dep.Schema, dep.Name}.Sanitize()+" IN ACCESS SHARE MODE"); err != nil {
-			return err
-		}
-	}
-	// READ COMMITTED gives every read a fresh snapshot after any lock wait.
-	if _, err := checkRole(ctx, tx, a.Profile.Connection.Username); err != nil {
-		return err
-	}
-	catalog := &compilerCatalog{tx: tx, scope: a.Profile.Scope}
-	for _, want := range plan.Relations {
-		got, err := catalog.Resolve(ctx, want.Schema, want.Name, want.Only)
-		if err != nil {
-			return err
-		}
-		if !reflect.DeepEqual(got, want) {
-			return stalePlan()
-		}
-	}
-	// Mandatory even for relation-free SELECTs. No prepare/execute precedes this.
-	return verifyCatalog(ctx, tx, version)
 }
 
 // QueryPayloadSize counts the complete tool result, including the duplicated
@@ -127,17 +80,18 @@ func resultBytes(b []byte) int {
 	return len(`{"content":[{"type":"text","text":`) + len(quoted) + len(`}],"structuredContent":`) + len(b) + len(`}`)
 }
 
-func executePlan(ctx context.Context, tx pgx.Tx, a database.Access, plan sqlpolicy.Compiled, rowLimit int, started time.Time) (out database.QueryResult, err error) {
+func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description *pgconn.StatementDescription, types resultTypes, values [][]byte, rowLimit int, started time.Time) (out database.QueryResult, err error) {
 	out = database.QueryResult{Connection: a.Profile.Alias, Columns: []database.ResultColumn{}, Rows: [][]any{}}
-	for _, col := range plan.Columns {
-		if col.Type.Name() == "" || !validName(col.Name) {
-			return out, unsupportedRelation()
+	for _, f := range description.Fields {
+		if !validResultName(f.Name) {
+			return out, codecError()
 		}
-		c := database.ResultColumn{Name: col.Name, Type: col.Type.Name()}
-		if col.Type == 17 {
-			c.Encoding = "base64"
+		t := types[f.DataTypeOID]
+		encoding, e := types.representation(f.DataTypeOID)
+		if e != nil {
+			return out, e
 		}
-		out.Columns = append(out.Columns, c)
+		out.Columns = append(out.Columns, database.ResultColumn{Name: f.Name, Type: t.name, Encoding: encoding})
 	}
 	// Reserve maximum field widths; each appended row is counted exactly once.
 	// false is one byte longer than true. RowCount can never exceed the profile.
@@ -150,15 +104,7 @@ func executePlan(ctx context.Context, tx pgx.Tx, a database.Access, plan sqlpoli
 	}
 	out.RowCount = 0
 	out.ElapsedMS = 0
-	values := make([][]byte, len(plan.Parameters))
-	oids := make([]uint32, len(values))
-	for i, p := range plan.Parameters {
-		oids[i] = uint32(p.Type)
-		if p.Value != nil {
-			values[i] = []byte(*p.Value)
-		}
-	}
-	rr := tx.Conn().PgConn().ExecParams(ctx, plan.SQL, values, oids, nil, []int16{0})
+	rr := tx.Conn().PgConn().ExecPrepared(ctx, description.Name, values, nil, []int16{0})
 	// On every early exit, close the socket before closing the reader. Reader.Close
 	// alone drains unread results and could run arbitrarily much remaining work.
 	concluded := false
@@ -172,9 +118,9 @@ func executePlan(ctx context.Context, tx pgx.Tx, a database.Access, plan sqlpoli
 		}
 	}()
 	fields := rr.FieldDescriptions()
-	if len(fields) != len(plan.Columns) {
+	if len(fields) != len(description.Fields) {
 		if len(fields) > 0 {
-			return out, unsupportedRelation()
+			return out, codecError()
 		}
 		// Preserve timeout/wire/server errors when no row description arrived.
 		_, e := rr.Close()
@@ -182,11 +128,11 @@ func executePlan(ctx context.Context, tx pgx.Tx, a database.Access, plan sqlpoli
 		if e != nil {
 			return out, e
 		}
-		return out, unsupportedRelation()
+		return out, codecError()
 	}
 	for i, f := range fields {
-		if f.DataTypeOID != uint32(plan.Columns[i].Type) || f.Name != plan.Columns[i].Name || f.Format != 0 {
-			return out, unsupportedRelation()
+		if f.DataTypeOID != description.Fields[i].DataTypeOID || f.Name != description.Fields[i].Name || f.Format != 0 {
+			return out, codecError()
 		}
 	}
 	for rr.NextRow() {
@@ -195,22 +141,25 @@ func executePlan(ctx context.Context, tx pgx.Tx, a database.Access, plan sqlpoli
 		}
 		if len(out.Rows) == rowLimit {
 			out.Truncated = true
-			break
+			out.RowCount = len(out.Rows)
+			out.ElapsedMS = time.Since(started).Milliseconds()
+			closeConn(tx.Conn())
+			return out, errResultDiscarded
 		}
 		raw := rr.Values()
 		if len(raw) != len(fields) {
-			return out, unsupportedRelation()
+			return out, codecError()
 		}
 		row := make([]any, len(raw))
 		for i, b := range raw {
-			row[i], err = decodeValue(plan.Columns[i].Type, b)
+			row[i], err = types.decode(fields[i].DataTypeOID, b, 0)
 			if err != nil {
 				return out, err
 			}
 		}
 		b, e := json.Marshal(row)
 		if e != nil {
-			return out, unsupportedRelation()
+			return out, codecError()
 		}
 		// Relative to empty [], a row contributes its JSON and its JSON-string
 		// escaped form (without the latter's two quotes), plus two commas after row 1.

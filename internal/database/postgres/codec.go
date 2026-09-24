@@ -13,24 +13,9 @@ import (
 
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
 )
 
 var decimalText = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
-
-// Match the public ISO representations, excluding relative dates, implicit
-// timezones and server-specific input shortcuts. PostgreSQL validates calendar
-// and type-range constraints using the explicitly audited input function.
-const isoDate = `[0-9]{4,6}-[0-9]{2}-[0-9]{2}`
-const isoTime = `[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?`
-
-var parameterPatterns = map[sqlpolicy.Type]*regexp.Regexp{
-	1082: regexp.MustCompile(`^(?:` + isoDate + `(?: BC)?|-?infinity)$`),
-	1083: regexp.MustCompile(`^` + isoTime + `$`),
-	1114: regexp.MustCompile(`^(?:` + isoDate + `T` + isoTime + `(?: BC)?|-?infinity)$`),
-	1184: regexp.MustCompile(`^(?:` + isoDate + `T` + isoTime + `(?:Z|[+-][0-9]{2}:[0-9]{2})(?: BC)?|-?infinity)$`),
-	2950: regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`),
-}
 
 func codecError() error {
 	return database.Fail(contracts.QueryUnsupported, "result value has an unsupported representation", false)
@@ -75,10 +60,7 @@ func jsonValue(b []byte) (json.RawMessage, error) {
 
 func specialNumber(s string) bool { return s == "NaN" || s == "Infinity" || s == "-Infinity" }
 
-func decodeValue(typ sqlpolicy.Type, b []byte) (any, error) {
-	if typ.Name() == "" {
-		return nil, codecError()
-	}
+func decodeValue(typ uint32, b []byte) (any, error) {
 	if b == nil {
 		return nil, nil
 	}
@@ -169,77 +151,39 @@ func invalidParameters() error {
 	return database.Fail(contracts.InvalidArgument, "invalid query parameter type or value", false)
 }
 
-func queryParameters(input []database.QueryParameter) ([]sqlpolicy.Parameter, error) {
+// queryParameters preserves JSON number text and leaves type inference to PostgreSQL.
+func queryParameters(input []json.RawMessage) ([][]byte, error) {
 	if len(input) > 256 {
 		return nil, invalidParameters()
 	}
-	out := make([]sqlpolicy.Parameter, 0, len(input))
+	out := make([][]byte, len(input))
 	total := 0
-	for _, p := range input {
-		total += len(p.Value)
-		if len(p.Value) > 64<<10 || total > 256<<10 {
+	for i, p := range input {
+		total += len(p)
+		if len(p) > 64<<10 || total > 256<<10 {
 			return nil, invalidParameters()
 		}
-		typ := sqlpolicy.NamedType(p.Type)
-		if typ == 0 || len(p.Value) == 0 {
-			return nil, invalidParameters()
-		}
-		raw, err := jsonValue(p.Value)
+		raw, err := jsonValue(p)
 		if err != nil {
 			return nil, invalidParameters()
 		}
 		raw = bytes.TrimSpace(raw)
 		if bytes.Equal(raw, []byte("null")) {
-			out = append(out, sqlpolicy.Parameter{Type: typ})
 			continue
 		}
-		var s string
-		switch typ {
-		case 114, 3802:
-			s = string(raw)
-		case 16:
-			var b bool
-			if json.Unmarshal(raw, &b) != nil {
+		if raw[0] == '"' {
+			var value string
+			if json.Unmarshal(raw, &value) != nil || strings.ContainsRune(value, 0) {
 				return nil, invalidParameters()
 			}
-			s = strconv.FormatBool(b)
-		case 21, 23:
-			var n int64
-			if json.Unmarshal(raw, &n) != nil || typ == 21 && (n < -32768 || n > 32767) || typ == 23 && (n < -2147483648 || n > 2147483647) {
+			out[i] = []byte(value)
+		} else {
+			var b bytes.Buffer
+			if json.Compact(&b, raw) != nil {
 				return nil, invalidParameters()
 			}
-			s = strconv.FormatInt(n, 10)
-		case 700, 701:
-			if raw[0] == '"' {
-				if json.Unmarshal(raw, &s) != nil || !specialNumber(s) {
-					return nil, invalidParameters()
-				}
-			} else {
-				s = string(raw)
-				if _, err = decodeValue(typ, raw); err != nil {
-					return nil, invalidParameters()
-				}
-			}
-		default:
-			if json.Unmarshal(raw, &s) != nil || strings.ContainsRune(s, 0) {
-				return nil, invalidParameters()
-			}
-			if pattern := parameterPatterns[typ]; pattern != nil && !pattern.MatchString(s) {
-				return nil, invalidParameters()
-			}
-			if typ == 17 {
-				b, e := base64.StdEncoding.Strict().DecodeString(s)
-				if e != nil {
-					return nil, invalidParameters()
-				}
-				s = `\x` + hex.EncodeToString(b)
-			} else if typ == 20 || typ == 1700 {
-				if _, err = decodeValue(typ, []byte(s)); err != nil {
-					return nil, invalidParameters()
-				}
-			}
+			out[i] = b.Bytes()
 		}
-		out = append(out, sqlpolicy.Parameter{Type: typ, Value: &s})
 	}
 	return out, nil
 }

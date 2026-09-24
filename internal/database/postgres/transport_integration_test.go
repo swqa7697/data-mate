@@ -21,7 +21,7 @@ import (
 )
 
 // Extend the owned PG16/18 scenario with representative shared-driver results,
-// fresh policy rejection, TLS and cleanup through each route. P5 owns the corpus.
+// read-only rejection, TLS and cleanup through each route. P5 owns the corpus.
 func transportAcceptance(t *testing.T, p config.Profile, password, fixtureRoot string, admin *pgx.Conn) {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -72,21 +72,9 @@ func transportAcceptance(t *testing.T, p config.Profile, password, fixtureRoot s
 			if err != nil || result.RowCount != 1 || result.Rows[0][0] != int64(3) {
 				t.Fatalf("%s/%s accepted query: %#v %v", kind, tlsMode, result.Rows, err)
 			}
-			// A previous success on the same pool cannot cache semantic permission.
-			func() {
-				if _, err := admin.Exec(t.Context(), "ALTER FUNCTION pg_catalog.int4pl(int4,int4) CALLED ON NULL INPUT"); err != nil {
-					t.Fatal(err)
-				}
-				defer func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					defer cancel()
-					if _, err := admin.Exec(ctx, "ALTER FUNCTION pg_catalog.int4pl(int4,int4) RETURNS NULL ON NULL INPUT"); err != nil {
-						t.Fatal(err)
-					}
-				}()
-				_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT 1 + 2 AS total"})
-				requireCode(t, err, contracts.QueryUnsupported)
-			}()
+			_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT app.policy_probe()"})
+			requireCode(t, err, contracts.ReadOnlyViolation)
+
 			if _, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT 1 + 2 AS total"}); err != nil {
 				t.Fatal(err)
 			}
@@ -152,6 +140,6 @@ func transportAcceptance(t *testing.T, p config.Profile, password, fixtureRoot s
 		deadline.Stop()
 		d.Close()
 		peer.Close()
-		t.Logf("P6 %s: plaintext/TLS query, fresh catalog rejection, bad CA/hostname, database cancellation and idle retirement passed", kind)
+		t.Logf("P6 %s: plaintext/TLS query, read-only rejection, bad CA/hostname, database cancellation and idle retirement passed", kind)
 	}
 }

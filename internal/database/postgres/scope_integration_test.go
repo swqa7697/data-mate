@@ -51,7 +51,7 @@ func scopeAcceptance(t *testing.T, d *Driver, a database.Access, password string
 		t.Fatal(err)
 	}
 	sql("ALTER TABLE picker.t000 RENAME TO renamed")
-	requireCode(t, query(p, "t000"), contracts.ScopeDenied)
+	requireCode(t, query(p, "t000"), contracts.InvalidArgument)
 	requireCode(t, query(p, "renamed"), contracts.ScopeDenied)
 	sql("CREATE TABLE picker.t000(id int); GRANT SELECT ON picker.t000 TO reader")
 	if err = query(p, "t000"); err != nil {
@@ -86,5 +86,5 @@ func cliDiagnosticsAcceptance(t *testing.T, root string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("CLI diagnostic fixture: %v\n%s", err, output)
 	}
-	t.Log("CLI diagnostic fixture: real driver, encrypted synthetic credentials, batch/single JSON and auth/TLS/policy stages passed")
+	t.Log("CLI diagnostic fixture: real driver, encrypted synthetic credentials, batch/single JSON and auth/TLS/read-only stages passed")
 }

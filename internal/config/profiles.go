@@ -99,15 +99,15 @@ type Table struct {
 	Name   string `json:"name"`
 }
 
-// Scope is all accessible supported tables or a union of exact selections.
+// Scope selects all accessible application relations or a union of exact names.
 type Scope struct {
 	Mode    string   `json:"mode"`
 	Schemas []string `json:"schemas,omitempty"`
 	Tables  []Table  `json:"tables,omitempty"`
 }
 
-// ContainsName checks only the saved selection. Drivers must intersect privileges
-// and supported relation policy before using this result as authorization.
+// ContainsName checks direct relation selection. Drivers exclude system schemas;
+// PostgreSQL enforces privileges and indirect view/function dependencies.
 func (s Scope) ContainsName(schema, table string) bool {
 	return s.Mode == "all" || (s.Mode == "selected" && (slices.Contains(s.Schemas, schema) || slices.Contains(s.Tables, Table{schema, table})))
 }

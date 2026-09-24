@@ -314,7 +314,11 @@ func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev confi
 		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := tx.Rollback(cleanup); err == nil {
-			healthy = true
+			_, resetErr := c.Exec(cleanup, "DISCARD ALL")
+			healthy = resetErr == nil
+			if resetErr != nil && result == nil {
+				result = safeError(resetErr)
+			}
 		} else if result == nil {
 			result = safeError(err)
 		}
@@ -323,7 +327,7 @@ func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev confi
 	if err != nil {
 		return safeError(err)
 	}
-	version, err := checkRoleObserved(ctx, tx, a.Profile.Connection.Username, trace)
+	version, err := checkReadOnlyObserved(ctx, tx, a.Profile.Connection.Username, trace)
 	if err != nil {
 		return err
 	}
@@ -363,16 +367,22 @@ func safeError(err error) error {
 	}
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) {
-		switch pg.Code {
-		case "57014", "55P03":
-			return database.Fail(contracts.QueryTimeout, "database operation timed out", true)
-		case "42501":
-			return database.Fail(contracts.PolicyUnsafe, "database privileges changed or are insufficient", false)
-		case "25006":
-			return database.Fail(contracts.PolicyUnsafe, "server policy attempted a write in a read-only query", false)
-		case "22003", "22007", "22008", "22012", "22023", "22P02":
-			return database.Fail(contracts.InvalidArgument, "query value or arithmetic operation is invalid", false)
+		code, message, retry := contracts.QueryFailed, "PostgreSQL could not execute the query", false
+		switch {
+		case pg.Code == "57014" || pg.Code == "55P03":
+			code, message, retry = contracts.QueryTimeout, "database operation timed out", true
+		case pg.Code == "42501":
+			code, message = contracts.PermissionDenied, "database account lacks permission for this operation"
+		case pg.Code == "25006":
+			code, message = contracts.ReadOnlyViolation, "PostgreSQL rejected a write in a read-only transaction"
+		case strings.HasPrefix(pg.Code, "22") || strings.HasPrefix(pg.Code, "42") || pg.Code == "08P01":
+			code, message = contracts.InvalidArgument, "invalid SQL or query parameter"
 		}
+		if strings.HasPrefix(pg.Code, "28") || strings.HasPrefix(pg.Code, "08") && pg.Code != "08P01" || pg.Code == "3D000" || pg.Code == "57P01" {
+			code, message, retry = contracts.ConnectFailed, "PostgreSQL connection failed", true
+		}
+		return &database.Error{Failure: contracts.Failure{Code: code, Message: message, Retryable: retry, SQLState: safeSQLState(pg.Code)}}
+
 	}
 	return database.Fail(contracts.ConnectFailed, "PostgreSQL operation failed; check endpoint, TLS and credentials", true)
 }
@@ -389,4 +399,17 @@ func payloadBound(v any, a database.Access) error {
 		return database.Fail(contracts.ResourceLimit, "metadata result exceeds payload budget; request a smaller page", false)
 	}
 	return nil
+}
+
+// SQLSTATE is public; no other upstream diagnostic field crosses the boundary.
+func safeSQLState(code string) string {
+	if len(code) != 5 {
+		return ""
+	}
+	for _, c := range code {
+		if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z') {
+			return ""
+		}
+	}
+	return code
 }

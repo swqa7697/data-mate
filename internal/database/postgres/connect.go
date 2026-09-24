@@ -81,7 +81,7 @@ func connectionConfig(a database.Access) (*pgx.ConnConfig, error) {
 		c.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
 	}
 	c.ConnectTimeout = 10 * time.Second
-	c.RuntimeParams = map[string]string{"application_name": "data-mate", "search_path": "pg_catalog", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "bytea_output": "hex", "client_encoding": "UTF8", "extra_float_digits": "3", "default_transaction_read_only": "on", "statement_timeout": "10000", "lock_timeout": "1000"}
+	c.RuntimeParams = map[string]string{"application_name": "data-mate", "search_path": "pg_catalog", "standard_conforming_strings": "on", "TimeZone": "UTC", "DateStyle": "ISO, YMD", "bytea_output": "hex", "client_encoding": "UTF8", "extra_float_digits": "3", "default_transaction_read_only": "on", "statement_timeout": "10000", "lock_timeout": "1000"}
 	c.MaxProtocolMessageBodyLen = 2 << 20
 	trackWire(c)
 	c.DefaultQueryExecMode = pgx.QueryExecModeExec

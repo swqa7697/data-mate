@@ -27,8 +27,8 @@ func (d *fixtureDatabase) ValidateProfile(p config.Profile) error {
 func (d *fixtureDatabase) Close() { d.closed = true }
 func (d *fixtureDatabase) Test(_ context.Context, a database.Access) (database.Readiness, error) {
 	d.tested = append(d.tested, a.Profile.Alias)
-	out := database.Readiness{ServerVersion: 160000, Stage: "policy"}
-	for _, s := range []string{"config", "dial", "authentication", "version", "policy"} {
+	out := database.Readiness{ServerVersion: 160000, Stage: "read_only"}
+	for _, s := range []string{"config", "dial", "authentication", "version", "read_only"} {
 		if a.Profile.Alias == "bad" && s == "authentication" {
 			out.Stage = s
 			e := database.Fail(contracts.ConnectFailed, "authentication failed", false).(*database.Error)
@@ -64,7 +64,7 @@ func (d *fixtureDatabase) BrowseScope(_ context.Context, _ database.Access, r da
 		return p, nil
 	}
 	if r.Schema == "Dot.Schema" {
-		p.Tables = []database.Table{{Schema: r.Schema, Name: "a.b", Kind: "table", Supported: true}, {Schema: r.Schema, Name: "parts", Kind: "partitioned_table", Supported: true}}
+		p.Tables = []database.Table{{Schema: r.Schema, Name: "a.b", Kind: "table"}, {Schema: r.Schema, Name: "parts", Kind: "partitioned_table"}}
 		return p, nil
 	}
 	start := 0
@@ -73,7 +73,7 @@ func (d *fixtureDatabase) BrowseScope(_ context.Context, _ database.Access, r da
 		start++
 	}
 	for i := start; i < min(5000, start+50); i++ {
-		p.Tables = append(p.Tables, database.Table{Schema: r.Schema, Name: fmt.Sprintf("table%04d", i), Kind: "table", Supported: true})
+		p.Tables = append(p.Tables, database.Table{Schema: r.Schema, Name: fmt.Sprintf("table%04d", i), Kind: "table"})
 	}
 	if start+50 < 5000 {
 		p.Next = p.Tables[len(p.Tables)-1].Name

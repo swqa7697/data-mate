@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"net"
 	"os"
@@ -20,7 +19,6 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
 )
 
 // The subprocess enters through the same startup sanitization as the application.
@@ -138,7 +136,7 @@ func TestConnectionBoundary(t *testing.T) {
 	p.Transport.SSH = &config.SSH{Host: "jump", Port: 22, User: "user", Auth: "password"}
 	requireCode(t, d.Validate(database.NewAccess(p, "")), contracts.ConnectFailed)
 	_, err = d.Query(t.Context(), database.NewAccess(profile(), ""), database.QueryRequest{SQL: "DELETE FROM app.items"})
-	requireCode(t, err, contracts.QueryUnsupported)
+	requireCode(t, err, contracts.ReadOnlyViolation)
 	t.Setenv("PGPASSWORD", "unexpected-after-startup")
 	requireCode(t, d.Validate(database.NewAccess(profile(), "")), contracts.ConfigInvalid)
 }
@@ -209,36 +207,20 @@ func TestAdmissionAndCursorLifecycle(t *testing.T) {
 	requireCode(t, err, contracts.StaleCursor)
 }
 
-// Extend the synthetic protocol scenario: malformed fingerprints must fail closed,
-// unsupported majors must not fetch a catalog, and size limits survive hashing.
+// Extend readiness protocol coverage for versions and actual read-only state.
 func diagnosticProtocolAcceptance(t *testing.T) {
 	t.Helper()
-	expected, err := sqlpolicy.CatalogFingerprint(16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	valid := []byte(`\x` + hex.EncodeToString(expected[:]))
 	for _, test := range []struct {
-		name, stage  string
-		version      int
-		size, digest []byte
-		noRow        bool
-		code         contracts.Code
+		name, stage string
+		version     int
+		readOnly    bool
+		code        contracts.Code
 	}{
-		{name: "stalled authentication", stage: "authentication", version: 160000, code: contracts.QueryTimeout},
-		{name: "old server", stage: "version", version: 150000, code: contracts.QueryUnsupported},
-		{name: "unaudited major", stage: "policy", version: 170000, code: contracts.QueryUnsupported},
-		{name: "valid", stage: "policy", version: 160000, size: []byte("373699"), digest: valid},
-		{name: "null digest", stage: "policy", version: 160000, size: []byte("373699"), code: contracts.QueryUnsupported},
-		{name: "short digest", stage: "policy", version: 160000, size: []byte("373699"), digest: []byte(`\x00`), code: contracts.QueryUnsupported},
-		{name: "mismatch", stage: "policy", version: 160000, size: []byte("373699"), digest: []byte(`\x` + strings.Repeat("00", 32)), code: contracts.QueryUnsupported},
-		{name: "malformed bytea", stage: "policy", version: 160000, size: []byte("373699"), digest: []byte(`\xzz`), code: contracts.QueryUnsupported},
-		{name: "null size", stage: "policy", version: 160000, digest: valid, code: contracts.QueryUnsupported},
-		{name: "malformed size", stage: "policy", version: 160000, size: []byte("invalid"), digest: valid, code: contracts.QueryUnsupported},
-		{name: "empty size", stage: "policy", version: 160000, size: []byte("0"), digest: valid, code: contracts.QueryUnsupported},
-		{name: "missing row", stage: "policy", version: 160000, noRow: true, code: contracts.QueryUnsupported},
-		{name: "size boundary", stage: "policy", version: 160000, size: []byte("2097152"), digest: valid},
-		{name: "oversized catalog", stage: "policy", version: 160000, size: []byte("2097153"), code: contracts.ResourceLimit},
+		{"stalled authentication", "authentication", 160000, true, contracts.QueryTimeout},
+		{"old server", "version", 150000, true, contracts.QueryUnsupported},
+		{"intermediate major", "read_only", 170000, true, ""},
+		{"valid", "read_only", 160000, true, ""},
+		{"writable transaction", "read_only", 160000, false, contracts.ReadOnlyViolation},
 	} {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -247,7 +229,6 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 		t.Cleanup(func() { listener.Close() })
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 		done := make(chan error, 1)
-		catalogCalls := 0
 		go func() {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -291,20 +272,13 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 				var values [][]byte
 				switch {
 				case strings.Contains(q, "server_version_num"):
-					names = []string{"version", "current_user", "session_user", "connect"}
+					names = []string{"version", "current_user", "session_user", "read_only"}
 					oids = []uint32{23, 25, 25, 16}
-					values = [][]byte{[]byte(strconv.Itoa(test.version)), []byte("reader"), []byte("reader"), []byte("t")}
-				case q == sqlpolicy.CatalogFingerprintSQL:
-					names = []string{"catalog_bytes", "fingerprint"}
-					oids = []uint32{23, 17}
-					values = [][]byte{test.size, test.digest}
-					if test.noRow {
-						values = nil
+					ro := "f"
+					if test.readOnly {
+						ro = "t"
 					}
-				case q == roleSQL || strings.Contains(q, "MAINTAIN"):
-					names = []string{"unsafe"}
-					oids = []uint32{16}
-					values = [][]byte{[]byte("f")}
+					values = [][]byte{[]byte(strconv.Itoa(test.version)), []byte("reader"), []byte("reader"), []byte(ro)}
 				}
 				fields := make([]pgproto3.FieldDescription, len(names))
 				for i, name := range names {
@@ -330,7 +304,7 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 					}
 					tag := "SELECT 1"
 					status := byte('T')
-					if strings.Contains(strings.ToUpper(m.String), "ROLLBACK") {
+					if strings.Contains(strings.ToUpper(m.String), "ROLLBACK") || m.String == "DISCARD ALL" {
 						tag = "ROLLBACK"
 						status = 'I'
 					}
@@ -338,9 +312,6 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 					backend.Send(&pgproto3.ReadyForQuery{TxStatus: status})
 				case *pgproto3.Parse:
 					query = m.Query
-					if query == sqlpolicy.CatalogFingerprintSQL || query == sqlpolicy.CatalogSQL {
-						catalogCalls++
-					}
 					backend.Send(&pgproto3.ParseComplete{})
 				case *pgproto3.Bind:
 					backend.Send(&pgproto3.BindComplete{})
@@ -397,9 +368,6 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 		case err = <-done:
 			if err != nil {
 				t.Fatal("protocol fixture", test.name, err)
-			}
-			if test.version == 170000 && catalogCalls != 0 {
-				t.Fatal("unaudited major fetched catalog")
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("protocol fixture cleanup stalled", test.name)

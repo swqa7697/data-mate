@@ -42,14 +42,14 @@ func liveDiagnostics(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	password := strings.TrimSpace(string(raw))
-	for _, alias := range []string{"bad-auth", "bad-policy", "bad-tls", "good"} {
+	for _, alias := range []string{"bad-auth", "extra-grants", "bad-tls", "good"} {
 		secret := password
 		user := "reader"
 		extra := []string{}
 		if alias == "bad-auth" {
 			secret = "synthetic-wrong-password"
 		}
-		if alias == "bad-policy" {
+		if alias == "extra-grants" {
 			user = "postgres"
 			raw, err = os.ReadFile(filepath.Join(fixture.Root, "admin-password"))
 			if err != nil {
@@ -73,9 +73,9 @@ func liveDiagnostics(t *testing.T, path string) {
 	if json.Unmarshal([]byte(out), &report) != nil || len(report.Results) != 4 {
 		t.Fatal("incomplete live diagnostics")
 	}
-	for i, want := range []string{"authentication", "policy", "dial", "policy"} {
+	for i, want := range []string{"authentication", "dial", "read_only", "read_only"} {
 		r := report.Results[i]
-		if r.Stage != want || r.OK != (i == 3) {
+		if r.Stage != want || r.OK != (i == 2 || i == 3) {
 			t.Fatalf("stage %d: %+v", i, r)
 		}
 	}

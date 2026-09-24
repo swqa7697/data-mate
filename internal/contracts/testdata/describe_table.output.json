@@ -3,13 +3,11 @@
   "schema": "public",
   "table": "orders",
   "kind": "table",
-  "supported": true,
   "columns": [
     {
       "name": "id",
       "type": "int8",
-      "nullable": false,
-      "supported": true
+      "nullable": false
     }
   ],
   "keys": [

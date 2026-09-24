@@ -8,7 +8,6 @@ import (
 
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres/sqlpolicy"
 )
 
 type codecFixture struct {
@@ -43,7 +42,7 @@ func TestQueryCodecs(t *testing.T) {
 		if f.Wire != nil {
 			b = []byte(*f.Wire)
 		}
-		got, e := decodeValue(sqlpolicy.NamedType(f.Type), b)
+		got, e := decodeValue(fixtureType(f.Type), b)
 		if e != nil {
 			t.Fatalf("%s: %v", f.Name, e)
 		}
@@ -57,13 +56,13 @@ func TestQueryCodecs(t *testing.T) {
 		if string(encoded) != string(expected) {
 			t.Fatalf("%s: %s != %s", f.Name, encoded, expected)
 		}
-		_, e = queryParameters([]database.QueryParameter{{Type: f.Type, Value: f.JSON}})
+		_, e = queryParameters([]json.RawMessage{f.JSON})
 		if e != nil {
 			t.Fatalf("parameter %s: %v", f.Name, e)
 		}
 	}
 	for _, f := range []struct {
-		typ   sqlpolicy.Type
+		typ   uint32
 		value string
 	}{
 		{21, "32768"}, {23, "2147483648"}, {20, "9223372036854775808"}, {1700, "1/0"}, {16, "true"}, {17, `\xzz`}, {701, "1e999"}, {700, "1e99"}, {114, `{"x":`}, {25, string([]byte{255})}, {0, ""},
@@ -76,15 +75,15 @@ func TestQueryCodecs(t *testing.T) {
 		_, err := decodeValue(114, []byte(raw))
 		requireCode(t, err, contracts.ResourceLimit)
 	}
-	for _, p := range []database.QueryParameter{
-		{Type: "int4", Value: json.RawMessage(`"1"`)}, {Type: "bool", Value: json.RawMessage(`1`)}, {Type: "int8", Value: json.RawMessage(`1`)}, {Type: "bytea", Value: json.RawMessage(`"bad"`)}, {Type: "numeric", Value: json.RawMessage(`"synthetic-secret"`)}, {Type: "float8", Value: json.RawMessage(`"1"`)}, {Type: "text", Value: json.RawMessage(`"\u0000"`)}, {Type: "unknown", Value: json.RawMessage(`null`)},
-	} {
-		_, err := queryParameters([]database.QueryParameter{p})
+	for _, p := range []json.RawMessage{json.RawMessage(`"\u0000"`), json.RawMessage(`{"invalid":`), nil} {
+		_, err := queryParameters([]json.RawMessage{p})
 		requireCode(t, err, contracts.InvalidArgument)
-		if strings.Contains(err.Error(), "synthetic-secret") {
-			t.Fatal("parameter leaked")
-		}
 	}
+	params, err := queryParameters([]json.RawMessage{json.RawMessage(`9007199254740993`), json.RawMessage(`true`), json.RawMessage(`null`), json.RawMessage(`"text"`), json.RawMessage(`{"n": 9007199254740993}`), json.RawMessage(`[1,null]`)})
+	if err != nil || string(params[0]) != "9007199254740993" || string(params[1]) != "true" || params[2] != nil || string(params[3]) != "text" || string(params[4]) != `{"n":9007199254740993}` || string(params[5]) != `[1,null]` {
+		t.Fatal("parameter fidelity", err)
+	}
+
 	// Count the actual compatibility envelope, including escaping and exact JSON.
 	out := database.QueryResult{Connection: "fixture", Columns: []database.ResultColumn{{Name: "q\"", Type: "json"}}, Rows: [][]any{{json.RawMessage(`{"n":9007199254740993,"s":"<\n\""}`)}}, RowCount: 1}
 	raw, _ := json.Marshal(out)
@@ -97,4 +96,22 @@ func TestQueryCodecs(t *testing.T) {
 	if e != nil || n != len(full) {
 		t.Fatalf("payload budget %d != %d: %v", n, len(full), e)
 	}
+}
+
+func fixtureType(name string) uint32 {
+	for oid, n := range scalarNames {
+		if n == name {
+			return oid
+		}
+	}
+	return 0
+}
+
+// Wire strings allow PostgreSQL to parse each fixture's declared SQL cast.
+func fixtureParameter(f codecFixture) json.RawMessage {
+	if f.Wire == nil {
+		return json.RawMessage(`null`)
+	}
+	b, _ := json.Marshal(*f.Wire)
+	return b
 }

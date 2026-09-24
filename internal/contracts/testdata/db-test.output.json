@@ -4,7 +4,7 @@
     {
       "alias": "analytics",
       "ok": true,
-      "stage": "policy",
+      "stage": "read_only",
       "stages": [
         {
           "stage": "config",
@@ -27,7 +27,7 @@
           "ok": true
         },
         {
-          "stage": "policy",
+          "stage": "read_only",
           "ok": true
         }
       ]

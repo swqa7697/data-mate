@@ -74,7 +74,7 @@ func (r *diagnosticResult) fail(stage string, code contracts.Code, message strin
 	r.Stages = append(r.Stages, database.Stage{Stage: stage, Error: r.Error})
 }
 func newDBTest(override *string, keys vault.KeyProvider, factory databaseFactory) *cobra.Command {
-	cmd := &cobra.Command{Use: "test [alias]", Short: "Check staged connection and read-only policy readiness", Args: cobra.MaximumNArgs(1)}
+	cmd := &cobra.Command{Use: "test [alias]", Short: "Check staged connection and read-only transaction readiness", Args: cobra.MaximumNArgs(1)}
 	cmd.Flags().Bool("json", false, "Versioned JSON results with reached diagnostic stages")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error { return runDBTest(cmd, args, *override, keys, factory) }
 	return cmd

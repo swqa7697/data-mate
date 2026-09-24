@@ -10,10 +10,10 @@ forms, scripted input, strict profiles, atomic publication, AES-256-GCM, durable
 encryption accounting, and one native Keychain item per installation are
 implemented. The internal PostgreSQL driver supports direct, SSH and SOCKS5
 routes with optional verified TLS,
-read-only role checks, scoped catalog pages and table descriptions. The internal
-compiler validates a finite SELECT subset against exact PostgreSQL 16/18 catalog
-signatures and executes only emitted, parameterized SQL after relation locking
-and fresh authorization checks. `mcp start`, `mcp stop` and `mcp status` manage
+read-only transactions, scoped catalog pages and table descriptions. A small
+query guard checks statement kind and direct table/view scope; PostgreSQL handles
+SQL semantics and permissions. Arrays, enums, views, custom types, generated
+columns and normal PostgreSQL read queries are supported. `mcp start`, `mcp stop` and `mcp status` manage
 the background service. The stdio bridge exposes four read-only MCP tools through
 the shared driver. Start also registers the bridge with installed Codex and
 Claude Code clients; new sessions can discover it from other working directories.
@@ -108,7 +108,7 @@ a pipe or socket so blocked writes can be interrupted. The bridge exposes:
 | `list_connections` | Empty object | Aliases, drivers, database labels and saved scope |
 | `list_tables` | `connection`; optional `schema`, `cursor`, `page_size` | Scoped table page with authenticated next cursor |
 | `describe_table` | `connection`, `schema`, `table` | Columns, keys and visible relationships |
-| `query` | `connection`, `sql`; optional typed `parameters`, `row_limit` | Bounded columns and rows, truncation and elapsed time |
+| `query` | `connection`, `sql`; optional JSON-value `parameters`, `row_limit` | Bounded columns and rows, truncation and elapsed time |
 
 Inputs reject unknown fields. Tools cannot supply credentials or override scope.
 Results provide identical structured data and compact JSON text, with a combined
@@ -222,7 +222,7 @@ the next page and `b` returns to its first page. Only 50 objects are fetched at 
 time. Use `0` to start with none or `a` for all; broad selections cannot express
 individual exclusions. Enter previews the exact selection and a default-No Y/N
 confirmation saves it. Whole schemas include future tables; fixed table names do
-not. Partition roots include their partitions, subject to driver support and
+not. Partition roots include their partitions, subject to PostgreSQL
 privileges. Names containing dots retain their exact identity. Renamed names are
 unavailable; recreating a selected name selects the replacement object.
 
@@ -230,20 +230,20 @@ Failed browsing, cancellation and stale previews preserve saved scope. Saving
 waits for existing database operations holding a state lease to finish. For a
 manually written profile with no initialized installation state, run `db test`
 or save with `db edit` before interactive browsing. Scripted scope replacement
-works directly. Scope selection and catalog visibility never authorize otherwise
-unsupported SQL.
+works directly. Scope applies to direct relation references; it does not recursively inspect
+view/function dependencies.
 
 `db test [alias]` checks one connection, or every saved connection in alias order.
 It reports config, vault, dial (including TLS/SSH/proxy), authentication, version,
-and policy stages. Policy includes the shared read-only role and semantic catalog
-checks. Tests read no application rows and change no database data. Each profile
+and read_only stages. The final stage verifies an actual read-only transaction
+and the authenticated identity, without auditing account grants. Tests read no application rows and change no database data. Each profile
 uses its timeout; profiles run sequentially and ordinary failures do not stop the
 batch. JSON is `{"version":1,"results":[...]}`: each result has `alias`, `ok`, the
 last reached `stage`, ordered `stages`, and a safe `error` on failure. Unreached
 stages are omitted. Any failed profile produces a nonzero exit. An invalid whole
 configuration or unknown alias exits 2 before producing a report; interruption
-exits 130. Readiness does not authorize a query: every Query still compiles and
-rechecks the current scope, relation identities and semantic catalog.
+exits 130. Readiness does not certify account grants. Every query checks the current direct
+scope and runs in a read-only transaction.
 
 Manual profiles follow the same schema without an activation record. Malformed
 configuration is preserved and reported. Editing a profile with a missing
@@ -288,85 +288,82 @@ It accepts only `DB_DRIVER=postgres` and the two documented images, refuses
 external endpoint variables and CI, and records image digests/server versions.
 It never connects to a supplied database URL. Images remain in Docker's cache.
 
-P3 checks actual authenticated identity, PostgreSQL 16+, CONNECT, inherited and
-SET-reachable role privileges, and PUBLIC grants on every operation. Use a
-non-owner role without elevated, creation, relation/column write, sequence write,
-or server file/program privileges. These safety checks cover application objects
-throughout the database, even outside the saved scope; TEMP alone is allowed.
-The driver does not modify grants. Startup discards inherited `PG*` settings;
-password/service files, ambient TLS certificates and connection fallbacks are not
-used. TLS verifies the configured database hostname and never falls back.
+Use an operator-provisioned, non-owner read-only account with CONNECT, schema
+USAGE and SELECT on intended tables or columns. Data Mate does not modify or
+audit grants. Every operation runs in an explicit read-only transaction, even
+if the account has a different default. PostgreSQL 16+ is accepted; 16 and 18
+are the integration matrix. SQL syntax follows the pinned PostgreSQL parser.
 
-Metadata applies exact saved scope, schema USAGE and table SELECT, hides foreign
-keys to unavailable targets, and omits expressions/defaults. Pages use signed
-process-local cursors invalidated by profile/scope changes, explicit invalidation,
-or restart. Supported query candidates are ordinary/partitioned heap tables with
-supported built-in types; views, foreign/materialized relations, custom types,
-generated columns and unverified relation features are reported as unsupported.
-Partition roots include their tree across schemas; ordinary inheritance requires
-all descendants in scope. RLS with inheritance/partitioning is unsupported;
-ordinary noninherited RLS remains supported. The compiler freezes physical scans
-with ONLY/UNION ALL. Execution locks captured relations in OID order, then checks
-names/OIDs, all column layouts, hierarchy edges, scope and privileges again in a
-read-only READ COMMITTED transaction. A changed capture fails with retry guidance;
-queries are never automatically replayed. A partition attached after the final
-check enters only subsequent requests. Even a childless ordinary table uses
-ONLY, so a newly inherited child cannot enter an authorized scan. PostgreSQL
-16/18 fixtures exercise these DDL boundaries. Catalog support status alone does
-not authorize a query.
+The configured scope covers directly named application tables/views. Use
+`schema.table`; CTE names remain unqualified. `all` includes accessible application
+relations, while `pg_*` schemas and `information_schema` remain excluded. Views,
+materialized views, foreign tables, partitions, inheritance, generated columns,
+RLS and custom types use PostgreSQL's normal behavior. View/function dependencies
+are governed by database permissions, not recursively filtered by Data Mate.
+Database-installed routines and extensions are trusted; read-only transactions
+are not a sandbox for arbitrary code or external effects.
 
-The [SQL compiler contract](internal/database/postgres/sqlpolicy/README.md) lists
-accepted forms and conservative exclusions. It supports joins, filters, grouping,
-audited aggregates, CTEs, subqueries, typed parameters and bounded pagination.
-Custom types/functions/operators/collations, unsupported indexes and unhandled
-syntax fail closed. Literals are bound separately with exact built-in type OIDs;
-submitted SQL is never prepared during compilation. Catalog signatures are
-pinned separately for PostgreSQL 16 and 18; other majors remain unavailable for
-compilation until audited. Verification ignores incidental catalog row IDs and
-numeric planner estimates while retaining implementation and safety properties.
-The explicit allowances are cast/opclass/family-member/support-entry row OIDs,
-function `procost`/`prorows`, and aggregate `aggtransspace`/`aggmtransspace`.
-Stable built-in identities, implementation callbacks and safety flags remain
-verified; owner/ACL fields are covered by separate role/privilege checks.
-Only embedded policy and its expected SHA-256 fingerprint are cached. PostgreSQL
-computes a fresh fingerprint of the audited live metadata during compilation
-and again after locking, including queries without base relations. Each check
-returns only the catalog byte count and 32-byte digest, avoiding full catalog
-transfers on slow connections. The 2 MiB catalog bound still applies; a mismatch
-fails closed without downloading the full catalog or increasing the timeout.
-The compiler contract documents candidate export through the owned integration
-harness. The MCP `query` tool uses this executor through the service manager.
+Metadata includes relations readable through table or column SELECT grants,
+filters foreign-key endpoints by scope, and reports actual type names without
+support flags. Each page uses a single relation query, without per-table
+inspection. Signed cursors expire on profile changes, invalidation or restart.
 
-Queries use extended-protocol text results with explicit built-in OIDs. The
-compiler lowers the top-level LIMIT to the row cap plus one lookahead row while
-preserving smaller and nested limits. Results preserve duplicate column labels
-and contain complete rows only. Byte accounting includes JSON escaping, base64,
-column metadata, envelope fields and a duplicated compatibility text block.
-Oversized rows are omitted with `truncated:true`; metadata that cannot fit and
-protocol bodies over 2 MiB fail with `RESOURCE_LIMIT`. Byte truncation terminates
-the connection instead of draining remaining rows. Completed reads roll back;
-timeout/cancellation returns no partial result, and uncertain connections are
-discarded. Results are fully prepared before driver admission/state access ends.
+Queries accept one SELECT-family statement, including VALUES, TABLE, recursive
+CTEs, joins, windows, correlated/lateral queries, set operations, functions and
+casts. The guard rejects writes, modifying CTEs, SELECT INTO, locking clauses,
+multiple statements and transaction/session/utility commands. PostgreSQL receives
+the original SQL and separately bound values; there is no semantic compiler,
+SQL rewriting, catalog fingerprinting or index/role inspection.
+
+For example, the MCP query input is:
+
+```json
+{
+  "connection": "analytics",
+  "sql": "SELECT * FROM public.orders WHERE id = $1::uuid",
+  "parameters": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+PostgreSQL infers parameter types or uses explicit SQL casts. JSON strings become
+their contents, numbers retain exact decimal text, booleans become text and null
+becomes SQL NULL. Objects/arrays become compact JSON text for casts such as
+`$1::jsonb`; PostgreSQL arrays use array-text strings such as `"{a,b}"` with
+`$1::text[]`. To pass JSON null, use the string `"null"` and a JSON cast. The limit
+is 256 parameters, 64 KiB per value and 256 KiB total. Values are never inserted
+into SQL text.
 
 | PostgreSQL types | Result representation |
 | --- | --- |
 | bool, int2/int4 | JSON boolean or integer |
-| int8/numeric | Exact decimal strings; numeric special values remain strings |
-| float4/float8 | Finite JSON numbers; `NaN`, `Infinity`, `-Infinity` as strings |
-| text/varchar/bpchar/uuid | Strings; bpchar padding is preserved |
-| date/time/timestamp | ISO local strings; timestamps have no invented timezone |
+| int8/numeric | Exact strings |
+| float4/float8 | JSON numbers; special values as strings |
+| text/varchar/bpchar/uuid | Strings |
+| date/time/timestamp | Local strings; no invented timezone |
 | timestamptz | UTC ISO strings ending in `Z` |
-| bytea | Base64 strings with the column encoding marker `base64` |
-| json/jsonb | Structured JSON with exact numbers; bounded to 1 MiB and depth 64 |
-| SQL NULL | JSON null for every type |
+| bytea | Base64 with `encoding: base64` |
+| json/jsonb | Structured JSON preserving exact numbers |
+| arrays | Nested JSON arrays, preserving null elements and shape |
+| domains | Base-type representation |
+| enums, ranges, composites, other types | PostgreSQL text with actual type names and `encoding: postgres_text` |
+| SQL NULL | JSON null |
 
-Temporal infinity and BC values remain explicit strings, for example
-`infinity` and `0001-01-01T00:00:00Z BC`. Typed parameters use these JSON
-representations and canonical type names, with at most 256 parameters, 64 KiB
-per value and 256 KiB total; converted wire values obey the compiler's same byte
-limits. Temporal parameters require ISO forms; timestamptz may carry an explicit
-ISO offset. PostgreSQL validates calendar/range constraints through audited
-built-in input functions. Errors never include SQL or parameter values.
+Array lower bounds normalize to JSON indexing; array encoding markers describe
+elements. Empty arrays are `[]`. Temporal infinity and BC values remain explicit
+strings. An unfamiliar unselected column never blocks a query.
+
+Results preserve duplicate labels and contain complete rows only. Row/byte
+truncation closes the connection instead of draining the rest of the query.
+Successful operations roll back and reset the session before pool reuse;
+timeouts/cancellation return no partial result. Limits include column metadata,
+JSON escaping, base64 and both MCP result representations. Oversized metadata
+or protocol messages fail with `RESOURCE_LIMIT`.
+
+Failures distinguish `READ_ONLY_VIOLATION`, `PERMISSION_DENIED`, invalid SQL or
+parameters, query failures, connection failures and timeouts. PostgreSQL errors
+include a safe SQLSTATE but never upstream details, SQL or parameter values.
+Startup discards inherited `PG*` settings; explicit transport configuration and
+credential protection remain unchanged.
 
 Pools are lazy (two connections each, sixteen pools, five-minute idle eviction),
 with eight active operations, thirty-two waiters and a five-second queue deadline
@@ -443,7 +440,7 @@ exact key before its vault/accounting. A pending purge must be retried with
 `PURGE=1`; rebuilding cannot reactivate it. A final nonsecret receipt supports
 retry across identity/lock removal. Only inventoried files and empty directories
 are removed. Unrelated `.dev` files, external certificates and imported key
-source files remain intact. No persistent service logs or SQL manifest sidecars
+source files remain intact. No persistent service logs
 are created. Go's shared caches and unrelated build files are not installation
 artifacts and are preserved.
 
@@ -466,11 +463,10 @@ examples in `internal/contracts/testdata` and a decoder fixture in
 `internal/config/testdata`. Profiles reject unknown fields,
 duplicate keys/identities/references, malformed scopes, unsupported transports,
 and excess limits. No plaintext secret field belongs in a profile. Selected
-empty scopes expose nothing; missing scope is invalid. New profiles explicitly
-choose all. PostgreSQL codec/signature fixture formats are
+empty scopes permit no direct relations; missing scope is invalid. New profiles explicitly
+choose all. PostgreSQL codec fixture formats are
 under `internal/database/postgres/testdata` and execute in offline and PostgreSQL
-16/18 regressions. The compiler's reviewed per-major semantic manifests live under
-`internal/database/postgres/sqlpolicy`.
+16/18 regressions.
 
 See [PRD](specs/PRD.md) and [technical design](specs/DESIGN.md) for intended product
 behavior. Local implementation progress and evidence live in ignored `.misc`.

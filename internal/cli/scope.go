@@ -121,9 +121,6 @@ func scopePicker(cmd *cobra.Command, f *form, initial config.Scope, fetch func(d
 				if t.Kind == "partitioned_table" {
 					name += " (includes partitions)"
 				}
-				if !t.Supported {
-					name += " (unsupported query candidate)"
-				}
 			}
 			mark := " "
 			if chosen {
