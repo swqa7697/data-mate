@@ -8,12 +8,21 @@ case "${PURGE:-0}" in
   exit 2
   ;;
 esac
+# The checkout wrapper owns the development container, not the data-root helper.
+# Never remove contents here: unrelated files and symlinks must survive cleanup.
+trim_dev_directory() {
+  local dir="$project_dir/.dev"
+  if [[ "${PURGE:-0}" == 1 && -d "$dir" && ! -L "$dir" && -O "$dir" ]]; then
+    rmdir "$dir" 2>/dev/null || true
+  fi
+}
 root="$project_dir/.dev/data-mate"
 if [[ ! -e "$root" && ! -L "$root" ]]; then
   if [[ -e "$project_dir/.dev/bin/data-mate" || -L "$project_dir/.dev/bin/data-mate" ]]; then
     echo 'Cleanup cannot verify executable ownership without its data directory; preserved executable.' >&2
     exit 1
   fi
+  trim_dev_directory
   exit 0
 fi
 private_dir "$root"
@@ -32,4 +41,5 @@ args=(__uninstall --root "$root")
 if [[ "${PURGE:-0}" == 1 ]]; then args+=(--purge); fi
 "$helper" "${args[@]}"
 complete=1
+trim_dev_directory
 printf 'Uninstalled %s (PURGE=%s)\n' "$root" "${PURGE:-0}"

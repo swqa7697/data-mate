@@ -21,6 +21,32 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		copyCheckout(t, root)
 		installArgs := []string{"make", "install"}
 		if i == 0 {
+			// The split data/bin layout used to leave an empty .dev behind;
+			// purge retries must trim it without removing unrelated contents.
+			dev := filepath.Join(root, ".dev")
+			if err := os.Mkdir(dev, 0700); err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(dev, "unrelated")
+			if err := os.WriteFile(sentinel, []byte("sentinel"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			run(t, root, true, "make", "uninstall", "PURGE=1")
+			if b, err := os.ReadFile(sentinel); err != nil || string(b) != "sentinel" {
+				t.Fatal("purge changed unrelated contents", err)
+			}
+			if err := os.Remove(sentinel); err != nil {
+				t.Fatal(err)
+			}
+			run(t, root, true, "make", "uninstall")
+			if _, err := os.Stat(dev); err != nil {
+				t.Fatal("default uninstall removed development container", err)
+			}
+			run(t, root, true, "make", "uninstall", "PURGE=1")
+			if _, err := os.Lstat(dev); !os.IsNotExist(err) {
+				t.Fatal("purge retained empty development container", err)
+			}
+			run(t, root, true, "make", "uninstall", "PURGE=1")
 			// Dependency setup must succeed even before application source compiles,
 			// and must not create an installation or runtime state.
 			broken := filepath.Join(root, "cmd", "data-mate", "broken.go")
@@ -154,6 +180,10 @@ func TestBuildRefusesSymlinkOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, root, false, "make", "build")
+	run(t, root, true, "make", "uninstall", "PURGE=1")
+	if info, err := os.Lstat(filepath.Join(root, ".dev")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("purge changed unrelated development symlink", err)
+	}
 	entries, err := os.ReadDir(outside)
 	if err != nil || len(entries) != 0 {
 		t.Fatal("build wrote through symlink")
