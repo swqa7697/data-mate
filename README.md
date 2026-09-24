@@ -6,6 +6,8 @@ Data Mate saves database connections in a checkout-local installation and expose
 
 Data Mate currently supports macOS on Apple Silicon and PostgreSQL 16 or later. The PostgreSQL 16 and 18 releases are covered by the optional integration test matrix. Installation is for development in this checkout's `.dev` directory; there is no distributed package or automatic updater.
 
+The proposed [production distribution design](specs/DESIGN.md#13-production-distribution-and-terminal-integration-proposed) covers standalone installation, upgrades, complete uninstall, and zsh/Bash tab completion. These features are not implemented yet.
+
 ## Requirements
 
 | Requirement              | Version or purpose                                                   |

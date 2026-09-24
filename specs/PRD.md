@@ -43,7 +43,22 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 
 ### Distribution
 
-- Deferred: No distribution for now, only `.dev` installation
+#### Production
+
+- Terminal Installation: Simply installed to run a `curl` command in terminal to install latest stable standalone distribution
+  - Location: Install for user (not root), and store configs (DB connection profiles) and other stuffs under the fixed `~/.local/share/data-mate` root. Production does not accept `--root` or another configuration-root override.
+- Distribution Installer: A installation bash script (also in `scripts`) for users to install latest stable standalone binary through terminal
+- Self-Contained: Not requiring user to have Go installed
+- Standalone Upgrades: Run `data-mate upgrade` (or its alias `data-mate update`) to upgrade to the latest stable release, reusing the same upgrade path as the distribution installer
+- Complete Terminal Uninstall: `data-mate uninstall` stops Data Mate and removes its executable, MCP registrations, runtime files, logs, caches, preferences, and other installation artifacts; retain only configured DB connections and their reusable encrypted credential store, required store metadata, and Keychain encryption keys.
+  - Explicit Full Removal: `data-mate uninstall --purge` removes anything, including saved connections, encrypted credential store and associated Keychain keys, leaving literally **no residue**.
+  - Cleanup Reliability: Include previously recorded custom config roots, if any, and recorded agent config locations; legacy cleanup does not enable custom production roots. Preserve unrelated user/client files and remote databases. Report incomplete cleanup with a nonzero exit and actionable retry instructions; never report success while known targeted artifacts remain. Reinstall after default uninstall must reuse saved connections and credentials.
+  - Scope: No-residue cleanup covers Data Mate managed artifacts, not OS snapshots, user managed backups, external agent transcripts, or independent manual copies.
+
+#### Development
+
+- Isolated: Development environment (binary, configs/profiles, etc.) is isolated from production installation
+- Root Selection: Development retains `--root` and its checkout-local default; the fixed production root does not change development invocation or fixtures.
 - Shortcut: Developers can use `make dev ARGS=""` for shortcut to run the built binary under `.dev` instead of using full path of it
 
 ### CLI Experience & DB Connections
@@ -62,9 +77,16 @@ Pretty and colored CLI experience. Scrathed commands design below.
 - MCP - One shot
   - `mcp start`: Start the MCP service to expose all available DB connections with configured visible scope, to all supported agents
   - `mcp stop`: Stop the MCP service
-  - `mcp status`: Show status of the MCP service
+  - `mcp status`: Print status of the MCP service
 - General - One Shot
-  - `upgrade` / `update`: Update to latest distributed stable version; Stub until distribution lands
-  - `help`, `version`, etc.
+  - `upgrade` / `update`: Update to latest distributed stable version; not available for developement environment
+  - `uninstall [--purge]`: Uninstall; not available for developement environment
+  - `help`: Print help messages
+  - `version`: Print version
 
 **No Start-Agent Commands**: All agents are decoupled from Data Mate -- any session can find and use an active Data Mate MCP service to get information requested by users. Don't require users to do anything other than running `data-mate mcp start` before starting an agent session to analysis data. Configuring the visible scopes is optional, based on users needs.
+
+### Singleton & ENV Exclusive
+
+- Singleton: The MCP service (`data-mate mcp start`) is singleton per environment.
+- First Wins: When development and production envrionments are installed to the same machine, they can only start one service (with their own managed DB connections), but not two.

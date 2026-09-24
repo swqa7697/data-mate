@@ -2,7 +2,7 @@
 
 ## Scope and sources of truth
 
-- Data Mate is one Go executable for macOS on Apple Silicon, installed at `.dev/bin/data-mate`, with managed data directly in `.dev/data-mate/`, exposing read-only PostgreSQL access through MCP. PostgreSQL 16 and 18 are the integration test matrix.
+- Data Mate is one Go executable for macOS on Apple Silicon, exposing read-only PostgreSQL access through MCP. Development installs at `.dev/bin/data-mate` with managed data directly in `.dev/data-mate/`. The planned production installation uses `~/.local/share/data-mate/` with its executable at `bin/data-mate` and a command symlink at `~/.local/bin/data-mate`; follow DESIGN for availability and ownership contracts. PostgreSQL 16 and 18 are the integration test matrix.
 - Read [PRD](specs/PRD.md) for product scope, [DESIGN](specs/DESIGN.md) for target technical contracts, and [README](README.md) for implemented commands and setup. An accepted design may precede implementation; document that distinction and update usage documentation when behavior lands.
 - Keep retained development artifacts, such as test results, diagnostic logs and performance measurements, in ignored `.misc`. `.tmp` is developer-managed; read supplied reference material there without modifying it.
 - [CLAUDE.md](CLAUDE.md) points here. Maintain one shared set of project guidelines.
@@ -20,20 +20,23 @@
 | `internal/service` | Lifecycle, admission, private management requests, profile mutations and shared database operations |
 | `internal/mcp` | Read-only tool dispatch, MCP sessions and the stdio bridge |
 | `internal/agent` | Codex/Claude registration and ownership verification |
+| `internal/distribution` (planned) | Release acquisition and verification, production installation/upgrade, artifact inventory and recovery |
 | `internal/devtools`, `scripts`, `.github/workflows` | Developer command regressions, tooling and CI |
 
 - Keep database and authorization behavior shared across CLI/MCP callers through the service. The service owns normal OS keyset access and credential encryption/decryption; the CLI submits credential patches through the private management protocol. Agent adapters own registration and compatibility; the bridge must not acquire vault or driver responsibilities. MCP and the bridge must not acquire management, keyset-export or saved-password retrieval endpoints.
 - Keep management-only service startup separate from explicit MCP enablement. Passive listing and previews read nonsecret state without starting the service or unlocking the keyset. Ordinary connection edits use the service's loaded keyset without additional OS credential-store access; follow DESIGN for initialization, restart and cleanup exceptions.
+- The planned lifecycle permits one service per macOS user across production and development, including management-only services. First wins: a competing installation must report the owner rather than stop it or use its profiles/credentials. Preserve per-installation ownership and follow DESIGN for launchd arbitration, explicit handoff, and legacy recovery.
+- Shell completion must remain passive: suggest public commands/flags and bounded nonsecret aliases without starting a service, accessing Keychain, querying a database, or initializing state. Follow the active environment's root and command availability rules.
 - Prefer concrete packages and small functions. Introduce interfaces only at real external seams used by callers/tests; do not add a plugin framework or universal query abstraction in advance.
 - Keep deterministic parsing/validation separate from filesystem, subprocess, network and key-store effects. Follow DESIGN for lock ordering, publication and cleanup contracts.
 
 ## Go and shell conventions
 
-- Use the Go standard library for JSON, logging, filesystem/process primitives and non-credential hashing where suitable. Use Tink for credential encryption, nonce generation, authentication and ciphertext/keyset formats; do not construct a custom encryption envelope or key-wrapping scheme. Keep Tink, the SQLite driver, OS bindings and developer tools pinned in `go.mod`/`go.sum`; avoid floating versions in scripts.
+- Use the Go standard library for JSON, logging, filesystem/process primitives and non-credential hashing where suitable. Use Tink for credential encryption, nonce generation, authentication and ciphertext/keyset formats; do not construct a custom encryption envelope or key-wrapping scheme. Keep Tink, the SQLite driver, OS bindings and developer tools pinned in `go.mod`/`go.sum`; avoid floating dependency/tool versions in scripts. The production installer/updater may resolve the latest stable application release, then must pin all downloaded assets to that exact release and verify them according to DESIGN.
 - Follow established Go naming and `gofmt`; document exported contracts and non-obvious invariants. Return errors instead of panicking on user input or operational failures.
 - Propagate `context.Context` through blocking operations. Bound concurrency and resource use; make ownership, cancellation and cleanup explicit for goroutines, locks, connections and subprocesses.
 - Wrap internal errors where useful, but translate them into safe public diagnostics at CLI/MCP boundaries. Do not expose secret-bearing upstream errors.
-- Use Bash with `set -euo pipefail`, quoted expansions and argument arrays. Format scripts with the pinned shfmt through `make format`; keep reusable command logic under `scripts/`.
+- Use Bash with `set -euo pipefail`, quoted expansions and argument arrays for executable automation scripts. Format Bash scripts with the pinned shfmt through `make format`; keep reusable automation under `scripts/`. Sourced shell loaders and generated completion scripts must use their target shell's syntax and preserve the caller's shell options; do not apply executable-script strict mode to the user's interactive shell. Generate completion from the pinned CLI library and validate loaders/completion in the supported shells; do not format zsh code as Bash.
 - Make focused changes, remove dead code, and share helpers only when they express the same responsibility. Avoid speculative abstractions and unrelated cleanup.
 
 ## Security and data contracts
@@ -45,6 +48,7 @@
 - Use a dedicated operator-managed read-only PostgreSQL account and a read-only transaction for every PostgreSQL operation. Internal SQLite state changes use write transactions under the service's mutation and ownership contracts. Keep the PostgreSQL query guard limited to statement kind and direct relation scope; trust database-defined views, routines, types, indexes, partitions and RLS. Preserve resource bounds and do not reintroduce semantic manifests or exhaustive privilege audits.
 - Use explicit connection/transport configuration. Do not inherit ambient database credentials, SSH agents or proxy settings as fallback behavior.
 - Resolve the data root independently of the caller's working directory. Keep the installed executable binding separate from the data-file inventory; service launch, agent registration, and cleanup use its verified recorded path. Verify ownership and symlink safety before mutating owned state; preserve unrelated files and external certificates/key sources.
+- Production uses the fixed `~/.local/share/data-mate` root resolved from the OS account home and rejects `--root` and alternate-root environment/configuration settings, including in hidden entry points. Development retains `--root`, executable-relative defaults, and `make dev`. Select command availability from build metadata, verify matching installation identity, and keep shared storage operations parameterized by the resolved root. Production tests use injected path/account-home seams or isolated OS accounts, not a production root-override option.
 - Keep stdout reserved for requested machine/protocol output where applicable. Report diagnostics to stderr and preserve the documented success, operational failure, invalid input and cancellation exit codes.
 
 ## Development commands and validation
@@ -66,7 +70,7 @@ Use Make as the developer entry point; `make help` lists the available targets.
 | `make clean` | Alias for uninstall with purge disabled; preserves profiles and credentials |
 | `make uninstall` / `make uninstall PURGE=1` | Remove owned installation resources; purge also removes profiles and credentials |
 
-- Use the Go toolchain pinned in `go.mod` and `scripts/common.sh`, native cgo and the macOS SDK. Dependency checks must provide guidance rather than silently install system software.
+- Source builds use the Go toolchain pinned in `go.mod` and `scripts/common.sh`, native cgo and the macOS SDK. Dependency checks must provide guidance rather than silently install system software. Production installation, upgrade, and uninstall use verified prebuilt executables and must not require Go, Xcode, Homebrew, or a checkout.
 - Format changed Go/shell code with `make format`. After code changes, run this checklist in order:
   - [ ] `make format-check`
   - [ ] `make lint`
