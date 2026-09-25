@@ -211,7 +211,8 @@
       "name": "bytea-null",
       "type": "bytea",
       "wire_text": null,
-      "json": null
+      "json": null,
+      "encoding": "base64"
     },
     {
       "name": "json-null",

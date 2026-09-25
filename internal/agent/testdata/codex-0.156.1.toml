@@ -1,0 +1,3 @@
+[mcp_servers.data-mate-fixture]
+command = "/nonexistent/data-mate"
+args = ["mcp", "bridge", "--root", "/tmp/example root"]

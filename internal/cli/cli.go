@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/vault"
 )
 
 const (
@@ -20,7 +21,11 @@ const (
 )
 
 // Build contains metadata injected from VERSION by the build script.
-type Build struct{ Version, Revision, Dirty string }
+type Build struct {
+	Version, Revision, Dirty string
+	Environment              config.Environment
+	accountHome              func() (string, error)
+}
 
 // Error carries only a safe public diagnostic and process status.
 type Error struct {
@@ -68,9 +73,22 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, build Build)
 
 // New creates the CLI without touching configuration, credentials, or agents.
 func New(build Build) *cobra.Command {
+	return commandWithManagement(build, nil, nativeManagement(build))
+}
+func commandWithManagement(build Build, keys vault.KeyProvider, factory managementFactory) *cobra.Command {
 	var override string
 	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
+	if build.Environment.Kind() == config.Production {
+		root.PersistentPreRunE = func(_ *cobra.Command, args []string) error {
+			for _, arg := range args {
+				if arg == "--root" || strings.HasPrefix(arg, "--root=") {
+					return invalid("production does not accept --root")
+				}
+			}
+			return nil
+		}
+	}
 	root.Args = cobra.NoArgs
 	root.RunE = func(cmd *cobra.Command, _ []string) error { return cmd.Help() }
 	root.SetHelpCommand(&cobra.Command{Use: "help [command]", Short: "Show command help", RunE: func(_ *cobra.Command, args []string) error {
@@ -80,7 +98,9 @@ func New(build Build) *cobra.Command {
 		}
 		return target.Help()
 	}})
-	root.PersistentFlags().StringVar(&override, "root", "", "Absolute installation root (defaults to executable location)")
+	if build.Environment.Kind() == config.Development {
+		root.PersistentFlags().StringVar(&override, "root", "", "Absolute installation root (defaults to executable location)")
+	}
 	root.SetFlagErrorFunc(func(_ *cobra.Command, _ error) error { return &Error{ExitInvalid, "invalid flags; run data-mate help"} })
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Show application version and build metadata", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, err := fmt.Fprintf(cmd.OutOrStdout(), "data-mate %s (revision %s, dirty %s)\n", build.Version, build.Revision, build.Dirty)
@@ -89,41 +109,11 @@ func New(build Build) *cobra.Command {
 		}
 		return nil
 	}})
-	root.AddCommand(&cobra.Command{Use: "upgrade", Aliases: []string{"update"}, Short: "Explain local rebuilding", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		_, err := fmt.Fprintln(cmd.OutOrStdout(), "Distribution is deferred. Rebuild from your checkout with make install.")
-		if err != nil {
-			return &Error{ExitFailure, "cannot write output"}
-		}
-		return nil
-	}})
-	unavailable := func(cmd *cobra.Command, _ []string) error {
-		if err := cmd.Context().Err(); err != nil {
-			return err
-		}
-		executable, err := os.Executable()
-		if err != nil {
-			return &Error{ExitFailure, "cannot locate executable"}
-		}
-		if _, err := config.ResolveRoot(override, executable); err != nil {
-			return &Error{ExitInvalid, err.Error()}
-		}
-		return &Error{ExitFailure, "SERVICE_UNAVAILABLE: command is not ready; P0 provides foundation contracts only"}
-	}
-	db := &cobra.Command{Use: "db", Short: "Manage database profiles (not ready)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, entry := range []struct {
-		name    string
-		aliases []string
-	}{{"add", nil}, {"edit", nil}, {"remove", []string{"rm"}}, {"list", []string{"ls"}}, {"test", nil}, {"scope", nil}} {
-		args := cobra.MaximumNArgs(1)
-		if entry.name == "list" || entry.name == "add" {
-			args = cobra.NoArgs
-		}
-		db.AddCommand(&cobra.Command{Use: entry.name, Aliases: entry.aliases, Short: "Not ready", Args: args, RunE: unavailable})
-	}
-	mcp := &cobra.Command{Use: "mcp", Short: "Manage MCP service (not ready)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, name := range []string{"start", "stop", "status", "bridge"} {
-		mcp.AddCommand(&cobra.Command{Use: name, Short: "Not ready", Hidden: name == "bridge", Args: cobra.NoArgs, RunE: unavailable})
-	}
-	root.AddCommand(db, mcp)
+
+	db := newDB(&override, factory, build)
+	root.AddCommand(db, newMCP(&override, build))
+	root.AddCommand(internalServiceCommands(&override, build, keys)...)
+	addDistribution(root, build)
+	addCompletion(root, &override, build)
 	return root
 }

@@ -33,21 +33,12 @@
               "foreign_table",
               "other"
             ]
-          },
-          "supported": {
-            "type": "boolean"
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$"
           }
         },
         "required": [
           "schema",
           "name",
-          "kind",
-          "supported"
+          "kind"
         ],
         "additionalProperties": false
       },

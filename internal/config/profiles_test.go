@@ -3,19 +3,11 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"os"
+	"fmt"
 	"strings"
 	"testing"
 )
 
-func profileFixture(t *testing.T) []byte {
-	t.Helper()
-	b, err := os.ReadFile("../contracts/testdata/profiles.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
 func TestProfiles(t *testing.T) {
 	original := profileFixture(t)
 	p, rev, err := DecodeProfiles(bytes.NewReader(original))
@@ -50,10 +42,33 @@ func TestProfiles(t *testing.T) {
 		"unknown version": func(v map[string]any) { v["version"] = 2 },
 		"null list":       func(v map[string]any) { v["connections"] = nil },
 		"missing list":    func(v map[string]any) { delete(v, "connections") },
-		"duplicates": func(v map[string]any) {
-			v["connections"] = append(v["connections"].([]any), v["connections"].([]any)[0])
+		"duplicate alias": func(v map[string]any) {
+			// A distinct ID/reference ensures this fails only for the alias collision.
+			first := v["connections"].([]any)[0].(map[string]any)
+			other := make(map[string]any, len(first))
+			for key, value := range first {
+				other[key] = value
+			}
+			other["id"] = "AAAAAAAA-0000-0000-0000-000000000000"
+			delete(other, "credential_ref")
+			v["connections"] = append(v["connections"].([]any), other)
 		},
-		"too many": func(v map[string]any) { v["connections"] = make([]any, 129) },
+		"too many": func(v map[string]any) {
+			// Valid unique profiles isolate the count limit from item/identity failures.
+			first := v["connections"].([]any)[0].(map[string]any)
+			connections := make([]any, 129)
+			for i := range connections {
+				c := make(map[string]any, len(first))
+				for key, value := range first {
+					c[key] = value
+				}
+				c["id"] = fmt.Sprintf("%08x-0000-0000-0000-000000000000", i)
+				c["alias"] = fmt.Sprintf("profile-%d", i)
+				delete(c, "credential_ref")
+				connections[i] = c
+			}
+			v["connections"] = connections
+		},
 	}
 	changes := map[string]func(map[string]any){
 		"alias uppercase":     func(c map[string]any) { c["alias"] = "Analytics" },
@@ -82,7 +97,7 @@ func TestProfiles(t *testing.T) {
 			tr["proxy"] = map[string]any{"kind": "socks5", "host": "h", "port": 1080}
 		},
 		"timeout high": func(c map[string]any) {
-			c["limits"] = map[string]any{"query_timeout_ms": 30001, "max_rows": 500, "max_result_bytes": 1048576}
+			c["limits"] = map[string]any{"query_timeout_ms": 300001, "max_rows": 500, "max_result_bytes": 1048576}
 		},
 	}
 	for name, change := range changes {
@@ -135,7 +150,10 @@ func TestRevisionNormalizationAndUniqueReferences(t *testing.T) {
 		t.Fatal("normalization changed revision")
 	}
 	p.Connections[0].Scope = Scope{Mode: "selected"}
-	third, _ := encode()
+	third, err := encode()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if third == first {
 		t.Fatal("scope change did not change revision")
 	}
@@ -167,8 +185,23 @@ func TestPartialLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *p.Connections[0].Limits != (Limits{10000, 12, 1048576}) {
+	if *p.Connections[0].Limits != (Limits{60000, 12, 1048576}) {
 		t.Fatal("partial defaults")
+	}
+	// Expanded timeout bounds must survive decoding, including explicit short limits.
+	for _, tc := range []struct {
+		timeout int
+		valid   bool
+	}{{1, true}, {60000, true}, {300000, true}, {0, false}} {
+		c["limits"] = map[string]any{"query_timeout_ms": tc.timeout}
+		b, _ = json.Marshal(v)
+		got, _, err := DecodeProfiles(bytes.NewReader(b))
+		if (err == nil) != tc.valid {
+			t.Fatalf("timeout %d: %v", tc.timeout, err)
+		}
+		if tc.valid && got.Connections[0].Limits.QueryTimeoutMS != tc.timeout {
+			t.Fatalf("explicit timeout %d changed", tc.timeout)
+		}
 	}
 	c["limits"] = map[string]any{"max_rows": 0}
 	b, _ = json.Marshal(v)

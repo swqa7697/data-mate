@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "version": {
-      "const": 1
+      "const": 2
     },
     "state": {
       "enum": [
@@ -28,6 +28,7 @@
           "state": {
             "enum": [
               "unavailable",
+              "disabled",
               "pending",
               "ready",
               "conflict",
@@ -41,12 +42,56 @@
         ],
         "additionalProperties": false
       }
+    },
+    "mcp_enabled": {
+      "type": "boolean"
+    },
+    "keyset_state": {
+      "enum": [
+        "absent",
+        "locked",
+        "ready",
+        "unavailable"
+      ]
+    },
+    "blocking_owner": {
+      "type": "object",
+      "properties": {
+        "environment": {
+          "enum": [
+            "development",
+            "production"
+          ]
+        },
+        "root": {
+          "type": "string"
+        },
+        "installation": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "stop_command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "root",
+        "installation",
+        "executable",
+        "stop_command"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "version",
     "state",
-    "agents"
+    "agents",
+    "mcp_enabled",
+    "keyset_state"
   ],
   "additionalProperties": false
 }

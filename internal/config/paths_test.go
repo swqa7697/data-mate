@@ -7,15 +7,40 @@ import (
 )
 
 func TestRoots(t *testing.T) {
-	parent := t.TempDir()
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("fixed production account path is passive", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		root, err := ProductionRoot(parent)
+		if err != nil || root.Path != filepath.Join(parent, ".local", "share", "data-mate") || root.Environment != Production {
+			t.Fatal(root, err)
+		}
+		if _, err := os.Stat(root.Path); !os.IsNotExist(err) {
+			t.Fatal("resolution initialized root")
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(parent, ".local")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ProductionRoot(parent); err == nil {
+			t.Fatal("production followed symlink")
+		}
+		if err := os.Remove(filepath.Join(parent, ".local")); err != nil {
+			t.Fatal(err)
+		}
+	})
 	var last Root
 	for _, name := range []string{"first checkout", "second checkout"} {
-		path := filepath.Join(parent, name, ".dev")
-		bin := filepath.Join(path, "bin", "data-mate")
+		path := filepath.Join(parent, name, ".dev", "data-mate")
+		bin := filepath.Join(filepath.Dir(path), "bin", "data-mate")
 		if err := os.MkdirAll(filepath.Dir(bin), 0700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(bin, nil, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 		root, err := ResolveRoot("", bin)

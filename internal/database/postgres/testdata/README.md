@@ -4,10 +4,11 @@
 values with exact JSON values. JSON numbers must be read with `UseNumber`;
 int8/numeric are strings. `encoding` marks bytea base64. Local timestamps omit
 zones; timestamptz is UTC; BC and infinity remain explicit strings. All types
-include SQL NULL. These are downstream acceptance inputs, not a working codec.
+include SQL NULL; bytea columns retain their encoding marker even for NULL.
+The offline codec regression and owned PostgreSQL 16/18 scenario execute these
+values as separately bound parameters with SQL casts and as stored columns.
 
-`signatures.json` freezes the per-major catalog fixture shape: kind, exact
-namespace/name, argument types, result type, and implementation identity.
-The two addition examples do not constitute a compiler allowlist. P4 must fill
-and verify complete signatures against PostgreSQL 16 and 18, including aggregate
-transition/final functions and cast implementations, before authorizing SQL.
+The owned query scenario also covers mixed enum/array tables, nested arrays,
+domains, text fallbacks, view/function dependencies and column-level grants.
+The query guard has its own bounded syntax/scope corpus; no semantic manifests
+or signature allowlists are maintained.

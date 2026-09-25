@@ -29,9 +29,6 @@
         "other"
       ]
     },
-    "supported": {
-      "type": "boolean"
-    },
     "columns": {
       "type": "array",
       "items": {
@@ -50,16 +47,12 @@
           },
           "nullable": {
             "type": "boolean"
-          },
-          "supported": {
-            "type": "boolean"
           }
         },
         "required": [
           "name",
           "type",
-          "nullable",
-          "supported"
+          "nullable"
         ],
         "additionalProperties": false
       }
@@ -156,7 +149,6 @@
     "schema",
     "table",
     "kind",
-    "supported",
     "columns",
     "keys",
     "relationships"

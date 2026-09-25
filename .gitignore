@@ -76,5 +76,6 @@ Temporary Items
 
 # Development artifacts
 .dev/
+.dist/
 .misc/
 .tmp/

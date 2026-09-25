@@ -1,4 +1,69 @@
 {
   "version": 1,
-  "results": []
+  "results": [
+    {
+      "alias": "analytics",
+      "ok": true,
+      "stage": "read_only",
+      "stages": [
+        {
+          "stage": "config",
+          "ok": true
+        },
+        {
+          "stage": "vault",
+          "ok": true
+        },
+        {
+          "stage": "dial",
+          "ok": true
+        },
+        {
+          "stage": "authentication",
+          "ok": true
+        },
+        {
+          "stage": "version",
+          "ok": true
+        },
+        {
+          "stage": "read_only",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "alias": "reporting",
+      "ok": false,
+      "stage": "authentication",
+      "stages": [
+        {
+          "stage": "config",
+          "ok": true
+        },
+        {
+          "stage": "vault",
+          "ok": true
+        },
+        {
+          "stage": "dial",
+          "ok": true
+        },
+        {
+          "stage": "authentication",
+          "ok": false,
+          "error": {
+            "code": "CONNECT_FAILED",
+            "message": "PostgreSQL operation failed; check endpoint, TLS and credentials",
+            "retryable": true
+          }
+        }
+      ],
+      "error": {
+        "code": "CONNECT_FAILED",
+        "message": "PostgreSQL operation failed; check endpoint, TLS and credentials",
+        "retryable": true
+      }
+    }
+  ]
 }

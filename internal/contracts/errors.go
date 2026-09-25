@@ -13,7 +13,9 @@ const (
 	QueryUnsupported   Code = "QUERY_UNSUPPORTED"
 	QueryTimeout       Code = "QUERY_TIMEOUT"
 	ResourceLimit      Code = "RESOURCE_LIMIT"
-	PolicyUnsafe       Code = "POLICY_UNSAFE"
+	ReadOnlyViolation  Code = "READ_ONLY_VIOLATION"
+	PermissionDenied   Code = "PERMISSION_DENIED"
+	QueryFailed        Code = "QUERY_FAILED"
 	StaleCursor        Code = "STALE_CURSOR"
 	InvalidArgument    Code = "INVALID_ARGUMENT"
 	ServiceUnavailable Code = "SERVICE_UNAVAILABLE"
@@ -25,4 +27,5 @@ type Failure struct {
 	Code      Code   `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
+	SQLState  string `json:"sqlstate,omitempty"`
 }
