@@ -327,7 +327,8 @@ func command(parent context.Context, exe string, args ...string) ([]byte, error)
 	return []byte(out.String()), nil
 }
 
-// VerifyNative checks publisher identity and online notarization before executing code.
+// VerifyNative checks publisher identity and platform compatibility before executing code.
+// Notarization is checked during release publication; macOS owns runtime policy.
 // Bare Mach-O tools are not assessed as application bundles by spctl.
 func VerifyNative(ctx context.Context, path string, m Metadata) error {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" || os.Geteuid() == 0 || !m.valid() {
@@ -354,8 +355,17 @@ func VerifyNative(ctx context.Context, path string, m Metadata) error {
 	if err != nil || !semver.IsValid("v"+host) || semver.Compare("v"+host, "v"+minimum) < 0 {
 		return ErrRelease
 	}
-	requirement := `=anchor apple generic and identifier "` + CodeIdentifier + `" and certificate leaf[subject.OU] = "` + TeamID + `" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and notarized`
-	_, err = command(ctx, "/usr/bin/codesign", "--verify", "--strict", "--check-notarization", "-R", requirement, path)
+	return verifyCodeSignature(ctx, path, command)
+}
+
+// Keep the publisher requirement independent of Apple's online notarization
+// service. macOS may still enforce its own certificate and execution policies.
+func verifyCodeSignature(ctx context.Context, path string, run func(context.Context, string, ...string) ([]byte, error)) error {
+	requirement := `=anchor apple generic and identifier "` + CodeIdentifier + `" and certificate leaf[subject.OU] = "` + TeamID + `" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists`
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	_, err := run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", requirement, path)
 	return err
 }
 
