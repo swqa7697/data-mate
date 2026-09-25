@@ -120,15 +120,23 @@ func (l *Lease) RemoveBinary() error {
 		return err
 	}
 	defer d.close()
-	f, err := checkBinary(int(d.dir.Fd()), "data-mate", true)
-	if err != nil || f == nil {
+	// Cleanup unlinks the inventoried name even if its contents, permissions or
+	// symlink target changed. Never open or follow the executable during removal.
+	var st unix.Stat_t
+	err = unix.Fstatat(int(d.dir.Fd()), "data-mate", &st, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	defer f.Close()
+	if st.Uid != uint32(os.Geteuid()) || (st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFLNK) {
+		return ErrOwnership
+	}
 	if err = l.check(); err != nil {
 		return err
 	}
-	if d.check() != nil || !sameNamed(int(d.dir.Fd()), "data-mate", f) {
+	if d.check() != nil {
 		return ErrStale
 	}
 	if err = unix.Unlinkat(int(d.dir.Fd()), "data-mate", 0); err != nil {

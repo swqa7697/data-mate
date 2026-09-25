@@ -253,11 +253,65 @@ func TestDistributionPublication(t *testing.T) {
 		}
 		checkState(false)
 		source := e.Candidate
+		// Regression ladder 2: uninstall owns these recorded paths even after
+		// edits, replacement, chmod, hard links, retargeting or device renumbering.
+		// Reuse both retention and purge to cover the real config cleanup boundary.
+		sentinel := filepath.Join(e.Home, "unrelated")
+		if err = os.WriteFile(sentinel, []byte("preserve this target"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		modifyArtifacts := func(purge bool) {
+			t.Helper()
+			receipt, err := e.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, a := range receipt.Artifacts {
+				if err = os.Remove(a.Path); err != nil {
+					t.Fatal(err)
+				}
+				switch {
+				case a.File.Target != "" || (purge && a.Path == config.ExecutablePath(e.Root)):
+					err = os.Symlink(sentinel, a.Path)
+				case strings.HasSuffix(a.Path, "completion.zsh"):
+					err = os.Link(sentinel, a.Path)
+				case strings.HasSuffix(a.Path, "loader.bash"):
+					// An already removed artifact must not prevent retry.
+				default:
+					err = os.WriteFile(a.Path, []byte("edited artifact"), 0000)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				receipt.Artifacts[i].File.Device++
+				receipt.Artifacts[i].File.Inode++
+			}
+			for i := range receipt.Directories {
+				receipt.Directories[i].Device++
+				receipt.Directories[i].Inode++
+			}
+			receipt.Helper.File.Device++
+			receipt.Helper.File.Inode++
+			if err = e.save(receipt); err != nil {
+				t.Fatal(err)
+			}
+			if retry, err := prepareHelper(t, e); err != nil || retry != receipt.Helper.Path {
+				t.Fatal("unchanged helper rejected after remount", err)
+			}
+		}
+		checkSentinel := func() {
+			t.Helper()
+			raw, err := os.ReadFile(sentinel)
+			if err != nil || string(raw) != "preserve this target" {
+				t.Fatal("cleanup followed a symlink or modified a hard-link target", err)
+			}
+		}
 		helper, err := prepareHelper(t, e)
 		if err != nil {
 			t.Fatal(err)
 		}
 		e.Candidate = helper
+		modifyArtifacts(false)
 		if err = e.Uninstall(t.Context(), false); err != nil {
 			t.Fatal("uninstall", err)
 		}
@@ -268,6 +322,7 @@ func TestDistributionPublication(t *testing.T) {
 			t.Fatal("uninstall replaced credential namespace")
 		}
 		checkState(false)
+		checkSentinel()
 		e.Candidate = source
 		if err = e.Install(t.Context()); err != nil {
 			t.Fatal("retained reinstall", err)
@@ -278,12 +333,14 @@ func TestDistributionPublication(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.Candidate = helper
+		modifyArtifacts(true)
 		if err = e.Uninstall(t.Context(), true); err != nil {
 			t.Fatal("purge", err)
 		}
 		if !absent(e.Root.Path) || !absent(helper) {
 			t.Fatal("purge left managed residue")
 		}
+		checkSentinel()
 	})
 	t.Run("interrupted replacement restores old artifacts", func(t *testing.T) {
 		e := fixture(t)
@@ -410,6 +467,34 @@ func TestDistributionPublication(t *testing.T) {
 		raw, _ := os.ReadFile(collision)
 		if string(raw) != "unrelated" {
 			t.Fatal("unrelated command changed")
+		}
+		if err := os.Remove(collision); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Install(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		helper, err := prepareHelper(t, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Candidate = helper
+		// A changed leaf is removable; redirecting its parent must not authorize
+		// deletion outside the recorded directory. Retain the helper for retry.
+		shell := filepath.Join(e.Root.Path, "shell")
+		external := filepath.Join(e.Home, "external")
+		if err = os.Rename(shell, external); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Symlink(external, shell); err != nil {
+			t.Fatal(err)
+		}
+		if err = e.Uninstall(t.Context(), false); err == nil {
+			t.Fatal("cleanup followed a replaced parent directory")
+		}
+		raw, err = os.ReadFile(filepath.Join(external, "completion.bash"))
+		if err != nil || string(raw) != "# synthetic completion\n" || absent(helper) || absent(config.ExecutablePath(e.Root)) {
+			t.Fatal("unsafe path lost external data or retry authority", err)
 		}
 	})
 }

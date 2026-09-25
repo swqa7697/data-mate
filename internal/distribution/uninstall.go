@@ -3,6 +3,7 @@ package distribution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,24 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"golang.org/x/sys/unix"
 )
+
+// ArtifactError reports a recorded cleanup path without exposing its contents.
+type ArtifactError struct {
+	Path  string
+	Cause error
+}
+
+func (e *ArtifactError) Error() string {
+	return fmt.Sprintf("cannot remove recorded artifact %q; check access and path ownership", e.Path)
+}
+func (e *ArtifactError) Unwrap() error { return e.Cause }
+
+// helperMatches verifies recorded executable bytes without treating a previous
+// mount's device/inode as execution authority. Native verification still applies.
+func helperMatches(path string, expected File) bool {
+	current, _, err := inspect(path)
+	return err == nil && current.Target == "" && contentEqual(current, expected)
+}
 
 // PrepareHelper verifies and records a private temporary copy before execution.
 // Existing retry helpers remain authoritative until a successful cleanup.
@@ -31,7 +50,7 @@ func (e *Engine) PrepareHelper(ctx context.Context) (string, error) {
 		return "", config.ErrPending
 	}
 	if inv.Helper != nil {
-		if exact(inv.Helper.Path, inv.Helper.File) == nil {
+		if helperMatches(inv.Helper.Path, inv.Helper.File) {
 			return inv.Helper.Path, nil
 		}
 		// A crash after unlinking the helper can be resumed by a verified bootstrap.
@@ -129,7 +148,7 @@ func (e *Engine) Uninstall(ctx context.Context, purge bool) error {
 	if err != nil {
 		return err
 	}
-	if inv.Helper == nil || inv.Helper.Path != e.Candidate || exact(e.Candidate, inv.Helper.File) != nil {
+	if inv.Helper == nil || inv.Helper.Path != e.Candidate || !helperMatches(e.Candidate, inv.Helper.File) {
 		return ErrConflict
 	}
 	if inv.Phase == "publishing" || inv.Phase == "committed" || (inv.Purge && !purge) {
@@ -209,10 +228,15 @@ func (e *Engine) Uninstall(ctx context.Context, purge bool) error {
 			return err
 		}
 	}
-	// Validate every remaining managed artifact before invoking credential cleanup.
+	// The recorded path grants deletion authority even if an installed artifact
+	// was edited or replaced. Check path safety before credential cleanup.
 	for _, a := range inv.Artifacts {
-		if !absent(a.Path) && exact(a.Path, a.File) != nil {
-			return ErrConflict
+		p, err := removalParent(a.Path)
+		if err != nil {
+			return &ArtifactError{Path: a.Path, Cause: err}
+		}
+		if p != nil {
+			p.close()
 		}
 	}
 	if e.Cleanup != nil {
@@ -221,7 +245,7 @@ func (e *Engine) Uninstall(ctx context.Context, purge bool) error {
 		}
 	}
 	for _, a := range inv.Artifacts {
-		if err = removeExact(a.Path, a.File); err != nil {
+		if err = removeRecorded(a.Path); err != nil {
 			return err
 		}
 	}
@@ -286,7 +310,7 @@ func removeHelper(helper *Artifact) error {
 	if helper == nil {
 		return nil
 	}
-	if err := removeExact(helper.Path, helper.File); err != nil {
+	if err := removeRecorded(helper.Path); err != nil {
 		return err
 	}
 	dir := filepath.Dir(helper.Path)
@@ -416,8 +440,7 @@ func removeDirectory(d Directory) error {
 	if absent(d.Path) {
 		return nil
 	}
-	current, err := directoryIdentity(d.Path)
-	if err != nil || current != d {
+	if _, err := directoryIdentity(d.Path); err != nil {
 		return ErrConflict
 	}
 	p, err := pinParent(d.Path)

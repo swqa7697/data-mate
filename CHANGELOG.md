@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove recorded installation artifacts during uninstall even after edits, replacement, permission changes, or filesystem device renumbering; preserve unrelated files and symlink targets, and report the path when cleanup fails.
+
 ## [0.1.1] - 2026-09-25
 
 ### Fixed
