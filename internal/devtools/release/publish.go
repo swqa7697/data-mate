@@ -82,13 +82,30 @@ func releaseAssets(dir string) (map[string]asset, error) {
 	return assets, nil
 }
 
-func (a *app) releaseInfo(tag string) (githubRelease, error) {
-	raw, err := a.gh("api", "repos/"+repository+"/releases/tags/"+tag)
-	var release githubRelease
+func (a *app) releaseList() ([][]githubRelease, error) {
+	// The tag endpoint only returns published releases. Authenticated listing
+	// includes drafts and must succeed before treating a release as absent.
+	raw, err := a.gh("api", "--paginate", "--slurp", "repos/"+repository+"/releases?per_page=100")
+	var pages [][]githubRelease
 	if err == nil {
-		err = json.Unmarshal([]byte(raw), &release)
+		err = json.Unmarshal([]byte(raw), &pages)
 	}
-	return release, err
+	return pages, err
+}
+
+func (a *app) releaseInfo(tag string) (githubRelease, error) {
+	pages, err := a.releaseList()
+	if err != nil {
+		return githubRelease{}, err
+	}
+	for _, page := range pages {
+		for _, release := range page {
+			if release.Tag == tag {
+				return release, nil
+			}
+		}
+	}
+	return githubRelease{}, fmt.Errorf("release %s not found in authenticated release listing", tag)
 }
 
 func verifyUploaded(release githubRelease, tag string, assets map[string]asset) error {
@@ -155,14 +172,8 @@ func (a *app) publish(tag, dir string) (err error) {
 	if err = a.remoteTag(tag, head); err != nil {
 		return err
 	}
-	// List authenticated releases (including drafts). A network/authentication
-	// failure must never be confused with a nonexistent release.
-	raw, err := a.gh("api", "--paginate", "--slurp", "repos/"+repository+"/releases?per_page=100")
+	pages, err := a.releaseList()
 	if err != nil {
-		return err
-	}
-	var pages [][]githubRelease
-	if err = json.Unmarshal([]byte(raw), &pages); err != nil {
 		return err
 	}
 	for _, page := range pages {

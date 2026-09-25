@@ -132,7 +132,18 @@ printf '%s\n' "$*" >> "$base/calls"
 case "$1 $2" in
   'api --paginate')
     [[ "$FAKE_GH_MODE" != list-error ]] || exit 1
-    cat "$base/list.json" ;;
+    if [[ -e "$base/created" ]]; then
+      [[ "$FAKE_GH_MODE" != draft-list-error ]] || exit 1
+      if [[ "$FAKE_GH_MODE" == missing-draft ]]; then
+        printf '[[]]'
+        exit 0
+      fi
+      printf '[[{"tag_name":"v0.0.1"}],['
+      if [[ -e "$base/published" ]]; then cat "$base/published.json"; else cat "$base/draft.json"; fi
+      printf ']]'
+    else
+      cat "$base/list.json"
+    fi ;;
   'release create')
     [[ "$*" == *'--draft --verify-tag'* && "$*" == *'--notes-file /tmp/'* ]]
     touch "$base/created" ;;
@@ -141,8 +152,13 @@ case "$1 $2" in
     [[ "$*" != *--clobber* ]]
     [[ "$#" == 9 ]] ;;
   'release edit') touch "$base/published" ;;
-  api*)
-    if [[ -e "$base/published" ]]; then cat "$base/published.json"; else cat "$base/draft.json"; fi ;;
+  'api repos/swqa7697/data-mate/releases/tags/v1.2.3')
+    # GitHub's tag endpoint only returns published releases, never drafts.
+    if [[ ! -e "$base/published" ]]; then
+      printf 'gh: Not Found (HTTP 404)\n' >&2
+      exit 1
+    fi
+    cat "$base/published.json" ;;
   *) exit 2 ;;
 esac
 `

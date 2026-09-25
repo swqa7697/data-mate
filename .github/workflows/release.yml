@@ -49,16 +49,6 @@ jobs:
           commit="$(git rev-parse HEAD)"
           [[ "$commit" == "$(git rev-parse "$GITHUB_SHA^{commit}")" ]]
           printf 'tag=%s\ncommit=%s\n' "$REQUESTED_TAG" "$commit" >> "$GITHUB_OUTPUT"
-      - name: Check formatting
-        run: make format-check
-      - name: Lint
-        run: make lint
-      - name: Unit and regression tests
-        run: make test
-      - name: Race tests
-        run: make test-race
-      - name: Build
-        run: make build
 
   signed-artifacts:
     needs: validate

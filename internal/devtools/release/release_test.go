@@ -210,7 +210,9 @@ func TestPushFailuresRetainRecoveryState(t *testing.T) {
 }
 
 func TestPublicationPreservesDraftUntilAssetsVerify(t *testing.T) {
-	for _, scenario := range []string{"success", "existing", "draft", "list-error", "upload-error", "digest", "checksum", "moved-tag"} {
+	// Drafts are absent from the tag endpoint. Verify through authenticated
+	// pagination, and preserve the draft if that lookup fails or loses the tag.
+	for _, scenario := range []string{"success", "existing", "draft", "list-error", "upload-error", "draft-list-error", "missing-draft", "digest", "checksum", "moved-tag"} {
 		t.Run(scenario, func(t *testing.T) {
 			a := taggedFixture(t)
 			dir := artifactFixture(t)
@@ -240,7 +242,7 @@ func TestPublicationPreservesDraftUntilAssetsVerify(t *testing.T) {
 				if !os.IsNotExist(publishedErr) {
 					t.Fatal("published despite failed prerequisite")
 				}
-				if scenario == "upload-error" || scenario == "digest" {
+				if scenario == "upload-error" || scenario == "draft-list-error" || scenario == "missing-draft" || scenario == "digest" {
 					if _, err := os.Stat(filepath.Join(fake, "created")); err != nil {
 						t.Fatal("draft was not retained", err)
 					}
