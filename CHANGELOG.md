@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-25
+
 ### Fixed
 
 - Prevent installation and upgrades from failing on an additional online notarization lookup; retain checksum and pinned publisher-signature verification, release notarization, and macOS security enforcement.
