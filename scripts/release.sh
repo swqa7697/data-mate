@@ -62,4 +62,4 @@ xcrun notarytool log "$submission" "${notary_args[@]}" "$output/notarization-log
 cp scripts/install-release.sh "$output/install.sh"
 (cd "$output" && /usr/bin/shasum -a 256 install.sh data-mate_darwin_arm64 release.txt >SHA256SUMS)
 rm "$output/notarization.zip"
-printf 'Verified artifacts: %s\nClean macOS 15 acceptance is still required before publication.\n' "$output"
+printf 'Verified artifacts: %s\nThe hosted release workflow runs fresh macOS 15 acceptance before publication.\n' "$output"

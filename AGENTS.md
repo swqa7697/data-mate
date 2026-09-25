@@ -123,6 +123,7 @@ Use Make as the developer entry point; `make help` lists the available targets.
 
 - Develop on `dev` or a focused topic branch; never commit directly to `main` or `master`. Preserve unrelated staged and working-tree changes. Staging, committing and pushing each require the user's explicit authorization.
 - Keep commits focused and use English Conventional Commit subjects: `type(scope): imperative summary`, lowercase subject, no trailing period, at most 72 characters. Use concise bullet points for a body when useful.
+- Release preparation is the exception: `make release-commit` uses exactly `release data-mate: X.Y.Z`, matching the imported Arisu release workflow. Use that same subject as the release PR title.
 
 | Types | Use |
 | --- | --- |

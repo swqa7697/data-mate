@@ -1,18 +1,67 @@
-name: Release artifacts
+name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Clean v<VERSION> tag to build
-        required: true
-        type: string
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      - name: Require a stable tag event
+        env:
+          REQUESTED_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$GITHUB_REF" == "refs/tags/$REQUESTED_TAG" ]]
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Prepare pinned dependencies
+        run: make setup
+      - name: Validate tag, changelog and main ancestry
+        id: resolve
+        env:
+          REQUESTED_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          ./scripts/release-tools.sh validate "$REQUESTED_TAG"
+          commit="$(git rev-parse HEAD)"
+          [[ "$commit" == "$(git rev-parse "$GITHUB_SHA^{commit}")" ]]
+          printf 'tag=%s\ncommit=%s\n' "$REQUESTED_TAG" "$commit" >> "$GITHUB_OUTPUT"
+      - name: Check formatting
+        run: make format-check
+      - name: Lint
+        run: make lint
+      - name: Unit and regression tests
+        run: make test
+      - name: Race tests
+        run: make test-race
+      - name: Build
+        run: make build
+
   signed-artifacts:
+    needs: validate
     # This environment must restrict eligible tags and access to signing secrets.
     environment: release
     runs-on: macos-15
@@ -20,7 +69,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@v7.0.0
         with:
@@ -28,15 +78,15 @@ jobs:
           cache: true
       - name: Require native arm64 and matching stable tag
         env:
-          REQUESTED_TAG: ${{ inputs.tag }}
+          REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
-          test "$REQUESTED_TAG" = "v$(cat VERSION)"
-          test "$(git describe --exact-match --tags HEAD)" = "$REQUESTED_TAG"
+          ./scripts/release-tools.sh validate "$REQUESTED_TAG"
       - name: Prepare pinned dependencies
         run: make setup
       - name: Build, sign and notarize
+        id: sign
         env:
           APPLE_SIGNING_P12_BASE64: ${{ secrets.APPLE_SIGNING_P12_BASE64 }}
           APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
@@ -66,11 +116,60 @@ jobs:
           export DATA_MATE_NOTARY_KEYCHAIN="$signing_keychain"
           export DATA_MATE_RELEASE_OUTPUT="$RUNNER_TEMP/data-mate-release"
           ./scripts/release.sh
+      - name: Verify signed candidate and tamper rejection
+        env:
+          DATA_MATE_NATIVE_TEST: '1'
+          DATA_MATE_DISTRIBUTION_CANDIDATE: ${{ runner.temp }}/data-mate-release/data-mate_darwin_arm64
+        run: go test -mod=readonly -count=1 -run '^TestNativeRelease$' ./internal/distribution
       - uses: actions/upload-artifact@v7.0.0
+        if: ${{ always() && steps.sign.outcome != 'skipped' }}
         with:
           name: signed-release-candidate
           path: ${{ runner.temp }}/data-mate-release/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
-      # Publication remains a separate, explicit operator action after clean-host
-      # acceptance and immutable-release configuration are verified.
+
+  acceptance:
+    needs: [validate, signed-artifacts]
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: signed-release-candidate
+          path: ${{ runner.temp }}/data-mate-release
+      - name: Accept signed candidate with system tools
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: ./scripts/release-accept.sh "$RUNNER_TEMP/data-mate-release" "$RELEASE_TAG"
+
+  publish:
+    needs: [validate, acceptance]
+    environment: release
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: signed-release-candidate
+          path: ${{ runner.temp }}/data-mate-release
+      - name: Upload, verify and publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: ./scripts/release-tools.sh publish "$RELEASE_TAG" "$RUNNER_TEMP/data-mate-release"

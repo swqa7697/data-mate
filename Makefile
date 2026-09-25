@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup install build dev clean uninstall format tidy format-check lint test test-race test-integration release
+.PHONY: help setup install build dev clean uninstall format tidy format-check lint test test-race test-integration release bump-major bump-minor bump-patch release-commit tag
 
 VERBOSE ?= 0
 export VERBOSE
@@ -48,3 +48,18 @@ test-integration: ## Run owned PostgreSQL 16/18 Docker fixtures (never in CI)
 
 release: ## Build signed/notarized production artifacts (explicit signing settings required)
 	@./scripts/release.sh
+
+bump-major: ## Bump VERSION major and roll CHANGELOG; no Git mutations
+	@./scripts/release-tools.sh bump major
+
+bump-minor: ## Bump VERSION minor and roll CHANGELOG; no Git mutations
+	@./scripts/release-tools.sh bump minor
+
+bump-patch: ## Bump VERSION patch and roll CHANGELOG; no Git mutations
+	@./scripts/release-tools.sh bump patch
+
+release-commit: ## Preview, stage, commit and push release files (YES=1 confirms)
+	@./scripts/release-tools.sh commit $(if $(filter 1 true yes,$(YES)),--yes)
+
+tag: ## On clean latest main, confirm CAPTCHA and push the release tag for publication
+	@./scripts/release-tools.sh tag
