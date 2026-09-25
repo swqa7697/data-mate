@@ -123,8 +123,16 @@ func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r
 	return nil
 }
 
-// Start starts or reuses this exact installation, then ensures CLI agent registrations.
-func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
+// EnsureManagement starts or reuses this exact installation's management service.
+func (c *Controller) EnsureManagement(parent context.Context) (result Status, resultErr error) {
+	defer func() {
+		// A competing root can win at any inspection or at bootstrap. Preserve
+		// the verified owner in structured output as well as the diagnostic.
+		var conflict *OwnerConflict
+		if errors.As(resultErr, &conflict) {
+			result.BlockingOwner = &conflict.Owner
+		}
+	}()
 	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
 	defer cancel()
 	if owner, err := c.blocker(ctx); err != nil {
@@ -189,6 +197,10 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 			return status("stale"), e
 		}
 		if j.Present {
+			// Another root may have won since the initial passive check.
+			if owner, e := c.owner(ctx, j); e == nil && owner.Root != c.Root.Path {
+				return status("stopped"), &OwnerConflict{*owner}
+			}
 			return status("stale"), ErrConflict
 		}
 	}

@@ -19,32 +19,51 @@ import (
 // New owning scenario (regression ladder 3): P7 had no service controller or
 // native socket preamble. This exercises real sockets with only launchd faked.
 func TestLifecycleIdentityAndReadiness(t *testing.T) {
-	t.Run("simultaneous development and production management admission", func(t *testing.T) {
-		development, registry, _ := controllerFixture(t)
-		production, _, _ := controllerFixture(t, config.Production)
-		production.launcher = registry
-		start := make(chan struct{})
-		results := make(chan error, 2)
-		for _, controller := range []*Controller{development, production} {
-			go func() { <-start; _, err := controller.EnsureManagement(t.Context()); results <- err }()
-		}
-		close(start)
-		first, second := <-results, <-results
-		if (first == nil) == (second == nil) {
-			t.Fatal("expected exactly one winner", first, second)
-		}
-		loser := first
-		if loser == nil {
-			loser = second
-		}
-		var owner *OwnerConflict
-		if !errors.As(loser, &owner) {
-			t.Fatal("loser lacks verified owner", loser)
-		}
-		if registry.starts != 1 {
-			t.Fatal("multiple services admitted", registry.starts)
-		}
-	})
+	// Extend the admission regression (ladder 2) with deterministic interleavings:
+	// a winner after the passive check used to lose its owner diagnostic/status.
+	for _, boundary := range []string{"inspection", "bootstrap"} {
+		t.Run("competing management admission at "+boundary, func(t *testing.T) {
+			development, registry, _ := controllerFixture(t)
+			production, _, _ := controllerFixture(t, config.Production)
+			production.launcher = registry
+			winner, loser := development, production
+			if boundary == "bootstrap" {
+				winner, loser = production, development
+			}
+			startWinner := func() {
+				if _, err := winner.EnsureManagement(t.Context()); err != nil {
+					t.Fatal("competing start", err)
+				}
+			}
+			launcher := admissionLaunch{launchManager: registry}
+			if boundary == "inspection" {
+				inspections := 0
+				launcher.beforeInspect = func() {
+					inspections++
+					if inspections == 2 {
+						startWinner()
+					}
+				}
+			} else {
+				launcher.beforeBootstrap = startWinner
+			}
+			loser.launcher = launcher
+			blocked, err := loser.EnsureManagement(t.Context())
+			var owner *OwnerConflict
+			if !errors.As(err, &owner) || owner.Owner.Root != winner.Root.Path || owner.Owner.Environment != winner.Root.Environment.Kind() {
+				t.Fatal("loser lacks verified owner", blocked, err)
+			}
+			if blocked.State != "stopped" || blocked.BlockingOwner == nil || *blocked.BlockingOwner != owner.Owner {
+				t.Fatal("loser status lacks verified owner", blocked, err)
+			}
+			if registry.starts != 1 || registry.stops != 0 {
+				t.Fatal("competing start disturbed winner", registry.starts, registry.stops)
+			}
+			if state, err := winner.Inspect(t.Context()); err != nil || state.State != "running" {
+				t.Fatal("winner no longer healthy", state, err)
+			}
+		})
+	}
 	c, f, s := controllerFixture(t)
 	lease, _ := s.ReadLease(t.Context())
 	expectedAccount := lease.Identity().KeyAccount
@@ -267,12 +286,15 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	}
 	// A verified job that never becomes ready is cleaned on timeout.
 	f.noReady = true
+	readiness := c.readiness
+	c.readiness = 150 * time.Millisecond
 	if _, e = c.Start(t.Context()); !errors.Is(e, ErrStartup) {
 		t.Fatal("readiness timeout", e)
 	}
 	if f.job.Present {
 		t.Fatal("partial job leaked")
 	}
+	c.readiness = readiness
 	// Symlink-substituted runtime directory is never followed or removed.
 	sentinel := t.TempDir()
 	if e = os.Symlink(sentinel, socketDir(c.Root)); e != nil {

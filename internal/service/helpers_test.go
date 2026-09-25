@@ -108,6 +108,27 @@ type fakeLaunch struct {
 	driver        database.Driver
 }
 
+// admissionLaunch schedules a competing start at a specific launchd boundary.
+type admissionLaunch struct {
+	launchManager
+	beforeInspect   func()
+	beforeBootstrap func()
+}
+
+func (l admissionLaunch) Inspect(ctx context.Context, root config.Root) (job, error) {
+	if l.beforeInspect != nil {
+		l.beforeInspect()
+	}
+	return l.launchManager.Inspect(ctx, root)
+}
+
+func (l admissionLaunch) Bootstrap(ctx context.Context, root config.Root) error {
+	if l.beforeBootstrap != nil {
+		l.beforeBootstrap()
+	}
+	return l.launchManager.Bootstrap(ctx, root)
+}
+
 func (f *fakeLaunch) Inspect(_ context.Context, _ config.Root) (job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -229,7 +250,7 @@ func controllerFixture(t *testing.T, environments ...config.Environment) (*Contr
 	f := &fakeLaunch{}
 	c := New(root, Build{"test", "fixture", hash})
 	c.launcher = f
-	c.readiness = 150 * time.Millisecond
+	c.readiness = 5 * time.Second
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
