@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup install build dev clean uninstall format tidy format-check lint test test-race test-integration
+.PHONY: help setup install build dev clean uninstall format tidy format-check lint test test-race test-integration release
 
 VERBOSE ?= 0
 export VERBOSE
@@ -45,3 +45,6 @@ test-race: ## Run the same suite with Go's race detector
 
 test-integration: ## Run owned PostgreSQL 16/18 Docker fixtures (never in CI)
 	@./scripts/test-integration.sh
+
+release: ## Build signed/notarized production artifacts (explicit signing settings required)
+	@./scripts/release.sh

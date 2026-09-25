@@ -24,6 +24,7 @@ import (
 var (
 	ErrOwnership     = errors.New("installation ownership or file safety check failed")
 	ErrStale         = errors.New("installation changed; reopen before retrying")
+	ErrPending       = errors.New("distribution operation is pending; rerun installer or cleanup")
 	ErrPurging       = errors.New("installation purge is pending")
 	ErrCommitUnknown = errors.New("SQLite commit outcome uncertain; read current state before retrying")
 	ErrObsolete      = errors.New("obsolete development state; preserve it and recreate this installation with re-entered credentials")
@@ -51,14 +52,16 @@ func NewID() (string, error) {
 // Identity is nonsecret authority for this root. Purging is a durable tombstone:
 // ordinary work cannot resume after key deletion even if cleanup was interrupted.
 type Identity struct {
-	Version             int      `json:"version"`
-	ID                  string   `json:"installation_id"`
-	RootDigest          string   `json:"root_digest"`
-	ProfilesEstablished bool     `json:"profiles_established"`
-	Purging             bool     `json:"purging"`
-	Owned               []string `json:"owned"`
-	KeyAccount          string   `json:"key_account"`
-	Executable          string   `json:"executable,omitempty"`
+	Version             int         `json:"version"`
+	Environment         Environment `json:"environment,omitempty"`
+	ID                  string      `json:"installation_id"`
+	RootDigest          string      `json:"root_digest"`
+	ProfilesEstablished bool        `json:"profiles_established"`
+	Purging             bool        `json:"purging"`
+	Pending             bool        `json:"pending,omitempty"`
+	Owned               []string    `json:"owned"`
+	KeyAccount          string      `json:"key_account"`
+	Executable          string      `json:"executable,omitempty"`
 }
 
 var ownedPaths = []string{
@@ -122,8 +125,12 @@ func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err e
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	actual, err := ResolveRoot(root.Path, "")
-	if err != nil || actual != root {
+	if root.Environment.Kind() == Production {
+		if _, e := os.Lstat(root.Path); errors.Is(e, os.ErrNotExist) {
+			return nil, os.ErrNotExist
+		}
+	}
+	if validateRoot(root) != nil {
 		return nil, ErrOwnership
 	}
 	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -147,6 +154,9 @@ func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err e
 	if err = decodeIdentity(raw, root, &s.identity); err != nil {
 		return nil, err
 	}
+	if s.identity.Pending && !cleanup {
+		return nil, ErrPending
+	}
 	if s.identity.Purging && !cleanup {
 		return nil, ErrPurging
 	}
@@ -159,8 +169,7 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	actual, err := ResolveRoot(root.Path, "")
-	if err != nil || actual != root {
+	if validateRoot(root) != nil {
 		return nil, ErrOwnership
 	}
 	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -214,7 +223,7 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 			return nil, e
 		}
 		sum := sha256.Sum256([]byte(root.Digest + ":" + id))
-		s.identity = Identity{Version: 2, ID: id, RootDigest: root.Digest, KeyAccount: hex.EncodeToString(sum[:]), Owned: slices.Clone(ownedPaths)}
+		s.identity = Identity{Version: 3, Environment: root.Environment.Kind(), ID: id, RootDigest: root.Digest, KeyAccount: hex.EncodeToString(sum[:]), Owned: slices.Clone(ownedPaths)}
 		if err = s.writeIdentity(); err != nil {
 			return nil, err
 		}
@@ -227,7 +236,9 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 		}
 		// Upgrade only an exact historical inventory, under the lifecycle lease.
 		// Identity, credential namespace and existing owned data remain intact.
-		if !slices.Equal(s.identity.Owned, ownedPaths) {
+		if s.identity.Version == 2 || !slices.Equal(s.identity.Owned, ownedPaths) {
+			s.identity.Version = 3
+			s.identity.Environment = root.Environment.Kind()
 			s.identity.Owned = slices.Clone(ownedPaths)
 			if err = s.writeIdentity(); err != nil {
 				return nil, err
@@ -277,11 +288,14 @@ func decodeIdentity(raw []byte, root Root, id *Identity) error {
 	if err := DecodeStrict(raw, 8192, id); err != nil {
 		return ErrOwnership
 	}
-	if id.Executable != "" && (id.Executable != DevelopmentExecutable(root) || strings.ContainsAny(id.Executable, "\x00\n\r\t")) {
+	if id.Executable != "" && (id.Executable != ExecutablePath(root) || strings.ContainsAny(id.Executable, "\x00\n\r\t")) {
 		return ErrOwnership
 	}
-	if id.Version != 2 {
+	if id.Version != 2 && id.Version != 3 {
 		return ErrObsolete
+	}
+	if id.Environment.Kind() != root.Environment.Kind() || (id.Version == 2 && id.Environment != "") || (id.Version == 3 && id.Environment == "") {
+		return ErrOwnership
 	}
 	sum := sha256.Sum256([]byte(root.Digest + ":" + id.ID))
 	if !ValidUUID(id.ID) || id.RootDigest != root.Digest || id.KeyAccount != hex.EncodeToString(sum[:]) || !slices.Equal(id.Owned, ownedPaths) {
@@ -586,6 +600,9 @@ func (s *Store) verifyIdentity() error {
 	}
 	if current.Purging {
 		return ErrPurging
+	}
+	if current.Pending {
+		return ErrPending
 	}
 	if !current.ProfilesEstablished {
 		return ErrStale

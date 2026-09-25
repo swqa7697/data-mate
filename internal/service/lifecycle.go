@@ -17,15 +17,16 @@ type AgentStatus = agent.Status
 
 // Status is the versioned passive lifecycle report.
 type Status struct {
-	Version     int           `json:"version"`
-	State       string        `json:"state"`
-	Agents      []AgentStatus `json:"agents"`
-	MCPEnabled  bool          `json:"mcp_enabled"`
-	KeysetState string        `json:"keyset_state"`
+	Version       int           `json:"version"`
+	State         string        `json:"state"`
+	Agents        []AgentStatus `json:"agents"`
+	MCPEnabled    bool          `json:"mcp_enabled"`
+	KeysetState   string        `json:"keyset_state"`
+	BlockingOwner *Owner        `json:"blocking_owner,omitempty"`
 }
 
 func status(state string) Status {
-	return Status{Version: 1, State: state, KeysetState: "absent", Agents: []AgentStatus{{Name: "codex", State: "pending"}, {Name: "claude", State: "pending"}}}
+	return Status{Version: 2, State: state, KeysetState: "absent", Agents: []AgentStatus{{Name: "codex", State: "pending"}, {Name: "claude", State: "pending"}}}
 }
 
 // Controller serializes lifecycle mutations through the installation store.
@@ -49,6 +50,9 @@ func (c *Controller) inspect(ctx context.Context, r record, l *config.LifecycleL
 	}
 	if j.Present {
 		if !matching(j, r) {
+			if owner, e := c.owner(ctx, j); e == nil && owner.Root != c.Root.Path {
+				return j, &OwnerConflict{*owner}
+			}
 			return j, ErrConflict
 		}
 		b, err := l.Read("service.plist", 16384)
@@ -71,6 +75,11 @@ func (c *Controller) clearRuntime(r record) error {
 }
 func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r record) error {
 	j, err := c.inspect(ctx, r, l)
+	var foreign *OwnerConflict
+	if errors.As(err, &foreign) {
+		j = job{}
+		err = nil
+	}
 	if err != nil {
 		return err
 	}
@@ -118,6 +127,13 @@ func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r
 func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
 	defer cancel()
+	if owner, err := c.blocker(ctx); err != nil {
+		return status("stale"), err
+	} else if owner != nil {
+		result := status("stopped")
+		result.BlockingOwner = owner
+		return result, &OwnerConflict{*owner}
+	}
 	if !safePath(c.Root) {
 		return status("stale"), ErrState
 	}
@@ -180,7 +196,7 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 	if err != nil {
 		return status("stopped"), ErrStartup
 	}
-	r = record{2, installation(c.Root, l.Identity()), c.Build, nonce, 0, l.Identity().Executable}
+	r = record{3, installation(c.Root, l.Identity()), c.Build, nonce, 0, l.Identity().Executable}
 	runtime, err := openRuntime(c.Root, r.Identity, true)
 	if err != nil {
 		return status("stale"), err
@@ -202,6 +218,11 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 		return status("stopped"), err
 	}
 	bootErr := c.launcher.Bootstrap(ctx, c.Root)
+	if bootErr != nil {
+		if owner, err := c.blocker(ctx); err == nil && owner != nil {
+			bootErr = &OwnerConflict{*owner}
+		}
+	}
 	if bootErr == nil {
 		ready, done := context.WithTimeout(ctx, c.readiness)
 		defer done()
@@ -261,7 +282,7 @@ func (c *Controller) EnsureManagement(parent context.Context) (Status, error) {
 func (c *Controller) Stop(ctx context.Context) (Status, error) {
 	s, err := config.OpenLifecycle(ctx, c.Root)
 	if errors.Is(err, os.ErrNotExist) {
-		j, e := c.launcher.Inspect(ctx, c.Root)
+		j, e := c.inspectSelected(ctx)
 		if e != nil {
 			return status("stale"), e
 		}
@@ -281,7 +302,7 @@ func (c *Controller) Stop(ctx context.Context) (Status, error) {
 	defer l.Release()
 	r, err := readRecord(l.Read, c.Root, l.Identity())
 	if errors.Is(err, os.ErrNotExist) {
-		j, e := c.launcher.Inspect(ctx, c.Root)
+		j, e := c.inspectSelected(ctx)
 		if e != nil {
 			return status("stale"), e
 		}
@@ -303,6 +324,13 @@ func (c *Controller) Stop(ctx context.Context) (Status, error) {
 // connections, registration commands, process startup or state repair occur.
 func (c *Controller) Inspect(ctx context.Context) (result Status, resultErr error) {
 	defer func() {
+		owner, err := c.blocker(ctx)
+		result.BlockingOwner = owner
+		if resultErr == nil {
+			resultErr = err
+		}
+	}()
+	defer func() {
 		if c.Agents != nil {
 			states, err := c.Agents.Inspect(ctx)
 			result.Agents = states
@@ -317,7 +345,7 @@ func (c *Controller) Inspect(ctx context.Context) (result Status, resultErr erro
 	}
 	s, err := config.OpenExisting(ctx, c.Root)
 	if errors.Is(err, os.ErrNotExist) {
-		j, e := c.launcher.Inspect(ctx, c.Root)
+		j, e := c.inspectSelected(ctx)
 		if e != nil {
 			return status("stale"), e
 		}
@@ -346,7 +374,7 @@ func (c *Controller) Inspect(ctx context.Context) (result Status, resultErr erro
 	}()
 	r, recordErr := readRecord(l.Read, c.Root, l.Identity())
 	l.Release()
-	j, err := c.launcher.Inspect(ctx, c.Root)
+	j, err := c.inspectSelected(ctx)
 	if err != nil {
 		return status("stale"), err
 	}

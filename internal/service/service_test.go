@@ -19,6 +19,32 @@ import (
 // New owning scenario (regression ladder 3): P7 had no service controller or
 // native socket preamble. This exercises real sockets with only launchd faked.
 func TestLifecycleIdentityAndReadiness(t *testing.T) {
+	t.Run("simultaneous development and production management admission", func(t *testing.T) {
+		development, registry, _ := controllerFixture(t)
+		production, _, _ := controllerFixture(t, config.Production)
+		production.launcher = registry
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		for _, controller := range []*Controller{development, production} {
+			go func() { <-start; _, err := controller.EnsureManagement(t.Context()); results <- err }()
+		}
+		close(start)
+		first, second := <-results, <-results
+		if (first == nil) == (second == nil) {
+			t.Fatal("expected exactly one winner", first, second)
+		}
+		loser := first
+		if loser == nil {
+			loser = second
+		}
+		var owner *OwnerConflict
+		if !errors.As(loser, &owner) {
+			t.Fatal("loser lacks verified owner", loser)
+		}
+		if registry.starts != 1 {
+			t.Fatal("multiple services admitted", registry.starts)
+		}
+	})
 	c, f, s := controllerFixture(t)
 	lease, _ := s.ReadLease(t.Context())
 	expectedAccount := lease.Identity().KeyAccount
@@ -51,6 +77,22 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+
+	// Another installation shares the launchd slot, never the owner's store.
+	otherController, _, _ := controllerFixture(t, config.Production)
+	otherController.launcher = f
+	blocked, conflict := otherController.EnsureManagement(t.Context())
+	var ownerConflict *OwnerConflict
+	if !errors.As(conflict, &ownerConflict) || blocked.BlockingOwner == nil || blocked.BlockingOwner.Root != c.Root.Path {
+		t.Fatal("foreign owner was not reported", blocked, conflict)
+	}
+	state, err := otherController.Inspect(t.Context())
+	if err != nil || state.State != "stopped" || state.BlockingOwner == nil {
+		t.Fatal("selected status conflated with owner", state, err)
+	}
+	if _, err = otherController.Stop(t.Context()); err != nil || f.stops != 0 {
+		t.Fatal("foreign stop disturbed owner", err)
+	}
 	if f.starts != 1 {
 		t.Fatal("duplicate bootstrap", f.starts)
 	}
@@ -69,6 +111,11 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	l.Release()
 	if e != nil {
 		t.Fatal(e)
+	}
+	// A durable launch intent alone cannot authorize direct daemon invocation.
+	rejectedLaunch := &fakeLaunch{job: job{true, os.Getpid() + 1, filepath.Join(c.Root.Path, "service.plist"), rec.args()}}
+	if err := serve(t.Context(), c.Root, c.Build, rec.Nonce, noKeys{}, rejectedLaunch); !errors.Is(err, ErrConflict) {
+		t.Fatal("direct service bypassed launchd admission", err)
 	}
 	other := rec
 	other.Identity.Digest = "wrong"

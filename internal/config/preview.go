@@ -35,6 +35,12 @@ func PreviewKnownHosts(ctx context.Context, root Root) ([]byte, error) {
 // state. A confirmed writer must reopen and compare the returned revision under
 // its write lease. An empty uninitialized root remains a passive empty snapshot.
 func Preview(ctx context.Context, root Root) (Profiles, Revision, error) {
+	if root.Environment.Kind() == Production {
+		if _, err := os.Lstat(root.Path); errors.Is(err, os.ErrNotExist) && CheckPath(root.Path) == nil {
+			p, digest, err := DecodeProfiles(bytes.NewReader([]byte(`{"version":1,"connections":[]}`)))
+			return p, databaseRevision(digest, 0), err
+		}
+	}
 	s, err := OpenExisting(ctx, root)
 	if errors.Is(err, os.ErrNotExist) {
 		fd, e := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)

@@ -7,11 +7,36 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/swqa7697/data-mate/internal/config"
 )
 
 const recordPath = "registrations.json"
+
+// CleanupLocations passively reports exact recorded configuration locations.
+// Current agent environment settings never redirect previously owned cleanup.
+func (m *Manager) CleanupLocations(ctx context.Context) ([]string, error) {
+	s, err := config.OpenExisting(ctx, m.root)
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close()
+	l, err := s.ReadLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Release()
+	owned, err := m.readOwnership(l.Read, l.Identity())
+	if err != nil {
+		return nil, err
+	}
+	paths := []string{}
+	for _, entry := range owned.Entries {
+		paths = append(paths, entry.Config)
+	}
+	return paths, nil
+}
 
 type ownedEntry struct {
 	Agent       string   `json:"agent"`
@@ -54,7 +79,7 @@ func (m *Manager) readOwnership(read func(string, int) ([]byte, error), id confi
 		if e.Fingerprint != fingerprint(m.desired(adapter{name: e.Agent}, id.Executable)) {
 			return want, ErrInspection
 		}
-		if (e.Agent != "codex" && e.Agent != "claude") || seen[e.Agent] || e.Name != Name(m.root) || !filepath.IsAbs(e.Config) || e.Command != id.Executable || !slices.Equal(e.Args, []string{"mcp", "bridge", "--root", m.root.Path}) || len(e.Fingerprint) != 64 || (e.Phase != "intent" && e.Phase != "owned") {
+		if (e.Agent != "codex" && e.Agent != "claude") || seen[e.Agent] || e.Name != Name(m.root) || !filepath.IsAbs(e.Config) || e.Command != id.Executable || !slices.Equal(e.Args, m.bridgeArgs()) || len(e.Fingerprint) != 64 || (e.Phase != "intent" && e.Phase != "owned") {
 			return want, ErrInspection
 		}
 		seen[e.Agent] = true
@@ -190,7 +215,21 @@ func (m *Manager) RemoveOwned(ctx context.Context, l *config.LifecycleLease) err
 		}
 		e := o.Entries[i]
 		if a.path != e.Config {
-			return ErrConflict
+			if config.CheckPath(filepath.Dir(e.Config)) != nil {
+				return ErrConflict
+			}
+			a.path, a.err = e.Config, nil
+			key := "CODEX_HOME="
+			if a.name == "claude" {
+				key = "CLAUDE_CONFIG_DIR="
+			}
+			env := []string{}
+			for _, entry := range a.env {
+				if !strings.HasPrefix(entry, key) {
+					env = append(env, entry)
+				}
+			}
+			a.env = append(env, key+filepath.Dir(e.Config))
 		}
 		before, err := a.inspect(e.Name)
 		if err != nil {

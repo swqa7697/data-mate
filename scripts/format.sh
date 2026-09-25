@@ -14,8 +14,8 @@ if [[ "${1:-}" == --check ]]; then
     printf 'Run make format:\n%s\n' "$unformatted" >&2
     exit 1
   fi
-  go tool shfmt -d -i 2 scripts
+  go tool shfmt -d -i 2 scripts internal/cli/completion_bash.sh
 else
   gofmt -w "${go_files[@]}"
-  go tool shfmt -w -i 2 scripts
+  go tool shfmt -w -i 2 scripts internal/cli/completion_bash.sh
 fi

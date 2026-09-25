@@ -62,6 +62,15 @@ func launch(ctx context.Context, args ...string) (string, error) {
 	return out.String(), err
 }
 func (launchd) Inspect(ctx context.Context, root config.Root) (job, error) {
+	// Legacy development jobs must be stopped by their original executable.
+	if _, err := launch(ctx, "print", domain()+"/com.data-mate.dev."+root.Digest[:16]); err == nil {
+		return job{}, ErrConflict
+	} else {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 113 {
+			return job{}, ErrUnavailable
+		}
+	}
 	out, err := launch(ctx, "print", target(root))
 	if err != nil {
 		var e *exec.ExitError

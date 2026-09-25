@@ -8,7 +8,7 @@ This document defines the implemented architecture and technical contracts for T
 
 The supported platform is macOS on Apple Silicon, with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax is bounded by the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
 
-Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are designed in section 13 but are not implemented. Currently, `upgrade` and `update` are informational local-rebuild stubs. Other database drivers, Linux, unattended updates, credential export, and key rotation remain deferred. The key-provider boundary accommodates a future Linux Secret Service implementation without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, PostgreSQL migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
+Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are implemented under section 13. Public installation remains unavailable until a stable release is published and its native acceptance gates pass. Other database drivers, Linux, unattended updates, credential export, and key rotation remain deferred. The key-provider boundary accommodates a future Linux Secret Service implementation without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, PostgreSQL migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
 
 The design follows these principles:
 
@@ -76,7 +76,7 @@ Implementation dependencies are pinned in [go.mod](../go.mod) and `go.sum`. The 
 
 During development, `make dev ARGS="..."` invokes the installed binary with the checkout's absolute `.dev/data-mate` data root.
 
-The table below describes implemented commands. Section 13.1 defines the planned production commands and completion addition.
+The table below describes implemented commands. Section 13.1 defines production command availability and completion.
 
 | Command                              | Behavior                                                                            |
 | ------------------------------------ | ----------------------------------------------------------------------------------- |
@@ -89,7 +89,7 @@ The table below describes implemented commands. Section 13.1 defines the planned
 | `mcp start`                          | Start or reuse the service, then ensure supported-agent registrations               |
 | `mcp stop`                           | Stop the service and sessions; preserve profiles and registrations                  |
 | `mcp status`                         | Passively report service and supported-agent registration states                    |
-| `upgrade`, `update`                  | Explain local rebuilding without a network request                                  |
+| `upgrade`, `update`                  | Install the latest verified stable release in production; development uses Make                                  |
 | `help`, `version`                    | Show usage or build version                                                         |
 
 Confirmed profile changes start or reuse the management-only service without exposing MCP or registering agents. `db test` and interactive catalog browsing also use that service. Listing and previews remain passive nonsecret reads. `mcp start` explicitly enables agent access. There is no activation command, login, or per-agent grant workflow.
@@ -146,11 +146,11 @@ codex mcp add <registration-name> -- <absolute-binary> mcp bridge --root <absolu
 claude mcp add --transport stdio --scope user <registration-name> -- <absolute-binary> mcp bridge --root <absolute-root>
 ```
 
-The development registration name is `data-mate-dev-<root-hash>`, using the first 16 hexadecimal characters of the canonical root digest. Absolute binary/root paths isolate checkouts. Planned production registrations omit `--root` as specified in section 13.2. Start output identifies the registration and root. New agent sessions load the registration; existing sessions may need their normal reconnect or restart. Native approval, trust, sandbox, managed policy, and project overrides remain the client's responsibility.
+The development registration name is `data-mate-dev-<root-hash>`, using the first 16 hexadecimal characters of the canonical root digest. Absolute binary/root paths isolate checkouts. Production registrations use `data-mate` and omit `--root` as specified in section 13.2. Start output identifies the registration and root. New agent sessions load the registration; existing sessions may need their normal reconnect or restart. Native approval, trust, sandbox, managed policy, and project overrides remain the client's responsibility.
 
 Inspection reads Codex TOML and Claude user-scope JSON directly, without invoking client health checks. Codex uses `$CODEX_HOME/config.toml` or `~/.codex/config.toml`; Claude uses `$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`. Overrides must be absolute. Reads are capped at 4 MiB and reject unsafe files, duplicate keys, and unsupported layouts. Only absolute PATH directories participate in detection and child PATH. Registration subprocesses run from `/` with eight-second and 64-KiB output bounds; their output is discarded.
 
-`registrations.json` binds its version, installation UUID, full root/digest, client/config location, name, expected command/arguments, canonical entry fingerprint, and intent/owned phase. Add intent is durable before the client write. A retry reconciles an interrupted add only when the entry matches exactly. Matching unrecorded entries are usable without granting deletion authority. Removal requires recorded ownership and an unchanged fingerprint. A relocated config override or unrelated same-name entry is a conflict.
+`registrations.json` binds its version, installation UUID, full root/digest, client/config location, name, expected command/arguments, canonical entry fingerprint, and intent/owned phase. Add intent is durable before the client write. A retry reconciles an interrupted add only when the entry matches exactly. Matching unrecorded entries are usable without granting deletion authority. Removal requires recorded ownership and an unchanged fingerprint. A relocated config override remains a start conflict; cleanup uses the exact recorded configuration location. Unrelated same-name entries remain conflicts.
 
 Configuration is inspected immediately before and after client writes; unrelated values must remain unchanged. External client edits are not transactionally locked by Data Mate. Observed changes produce a conflict, and Data Mate does not overwrite user changes through wholesale rollback.
 
@@ -160,7 +160,7 @@ Agent states are `unavailable`, `pending`, `ready`, `disabled`, `conflict`, and 
 
 The lifecycle manager uses one job in the current user's GUI launchd domain. Its generated plist lives beneath the installation root. A confirmed mutation or explicit CLI database operation may bootstrap the job in management-only mode; `mcp start` starts or enables MCP on the same process. There is no login item. `RunAtLoad=true` applies to bootstrap, `KeepAlive=false` disables crash restart, and `ExitTimeOut=5` delegates forced termination to the verified job. The management service persists across CLI invocations until stopped or the login session ends.
 
-Current lifecycle isolation is per installation. Section 13.6 adds first-wins exclusion across production and development roots, including management-only services; the remaining ownership and readiness checks still apply.
+Section 13.6 enforces first-wins exclusion across production and development roots, including management-only services; per-installation ownership and readiness checks still apply.
 
 Start serializes these operations under the lifecycle lock:
 
@@ -218,7 +218,7 @@ Files are created when their owning operation needs them. Install/build initiali
 
 The installation identity records its UUID, full root digest, established-profile state, purge tombstone, and a separately recorded absolute executable path. The data-file inventory contains exact root-relative names, including the SQLite database/journal and fixed publication siblings for remaining JSON metadata. Only the corresponding exclusive writer can recover interrupted publication; unknown files remain untouched. Verify directories, database, and sidecars for ownership and symlink safety before SQLite opens them. SQLite schema changes require exclusive lifecycle/state ownership and transactional migration; unknown schema versions fail closed. An ownership-checked database must also match the installation UUID/root in its metadata. Do not replace a live database by rename or manually delete a hot journal; recovery belongs to SQLite under exclusive state ownership.
 
-`--root` identifies the canonical data directory. Without an override, the development executable resolves the sibling `data-mate/` directory from its real executable location, independently of the caller's working directory. The developer installer creates that directory and accepts only a verified sibling `bin/data-mate` executable, recording its absolute path before atomic publication. Runtime launch and agent registration use the recorded executable path and pin the data root. Cleanup verifies the executable directory separately and retains its binding in the purge receipt; missing identity never grants deletion authority. Installations never fall back to shared user configuration or another checkout's Keychain namespace. Section 13.2 specifies the planned production layout under `~/.local/share/data-mate/`; production root defaults and installation tooling are not implemented.
+`--root` identifies the canonical data directory. Without an override, the development executable resolves the sibling `data-mate/` directory from its real executable location, independently of the caller's working directory. The developer installer creates that directory and accepts only a verified sibling `bin/data-mate` executable, recording its absolute path before atomic publication. Runtime launch and agent registration use the recorded executable path and pin the data root. Cleanup verifies the executable directory separately and retains its binding in the purge receipt; missing identity never grants deletion authority. Installations never fall back to shared user configuration or another checkout's Keychain namespace. Section 13.2 specifies the production layout under `~/.local/share/data-mate/`; production roots resolve from the OS account home and reject overrides.
 
 ### 5.2 Profile schema and revisions
 
@@ -539,13 +539,13 @@ Native Keychain, launchd, registration, and agent round-trip checks have explici
 
 The end-to-end acceptance workflow is local installation, profile creation through the management-only service, optional scope narrowing, `mcp start`, and independently launched Codex/Claude Code sessions using the four tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, fresh scope enforcement, bounded read-only execution, and ownership-safe default uninstall/purge across the supported PostgreSQL matrix.
 
-## 13. Production distribution and terminal integration (proposed)
+## 13. Production distribution and terminal integration
 
-This section is a design for the updated PRD, not a description of shipped behavior. It extends the existing ownership, SQLite, Keychain, and lifecycle contracts. Production installation requires neither a checkout nor Go, Xcode, Homebrew, Docker, or administrator access. The first release targets native macOS arm64; the release declares its minimum supported macOS version and is tested on that version before publication.
+This section defines the implemented distribution contract. Public release availability still requires publication and the native acceptance gates in section 13.8; implementation alone does not establish release readiness. It extends the existing ownership, SQLite, Keychain, and lifecycle contracts. Production installation requires neither a checkout nor Go, Xcode, Homebrew, Docker, or administrator access. The first release targets native macOS arm64; the release declares its minimum supported macOS version and is tested on that version before publication.
 
 ### 13.1 User workflow and command availability
 
-Publish the bootstrap as a GitHub release asset built from `scripts/install-release.sh`; retain `scripts/install.sh` for development. The planned installation command is:
+Publish the bootstrap as a GitHub release asset built from `scripts/install-release.sh`; retain `scripts/install.sh` for development. The installation command, available after the first stable publication, is:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/swqa7697/data-mate/releases/latest/download/install.sh | /bin/bash
@@ -553,7 +553,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/swqa7697/data-mate/rele
 
 This URL becomes usable only when the first stable release is published. The bootstrap contains function definitions followed by one final entry call so a truncated download cannot execute a partially received installation sequence. It installs for the invoking user, refuses root execution, and reports the installed version, absolute executable path, and shell activation instructions. It never starts the service, registers agents, or accesses Keychain.
 
-| Command                                                 | Planned behavior                                                                                                                  |
+| Command                                                 | Behavior                                                                                                                  |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `data-mate upgrade`, `data-mate update`                 | Install the latest stable release through the shared release engine; an already-current installation succeeds without replacement |
 | `data-mate uninstall [--purge] [--yes]`                 | Preview and confirm the production cleanup scope; `--yes` supplies explicit noninteractive confirmation                           |
@@ -583,7 +583,7 @@ Production agent registration uses `<absolute-binary> mcp bridge` without a root
 
 New production installations have one root and no custom-root enrollment. The PRD's previously recorded custom-root cleanup requirement is recovery-only: if a supported legacy inventory contains exact owned roots, retain and verify that inventory for cleanup, never expose those roots for normal production use or silently migrate them. An initial release with no such records needs no root index; unknown legacy formats fail closed with recovery guidance. Cleanup must preserve unrelated development roots.
 
-The versioned distribution inventory records exact artifact paths, file identities/digests or symlink targets, managed shell blocks, root identities, agent configuration locations, and pending publication/cleanup steps. Writes use the existing strict decoding, ownership checks, durable intent, and atomic publication conventions. Never discover cleanup targets by scanning arbitrary home directories. Refuse an unrelated existing `~/.local/bin/data-mate`; do not overwrite or adopt it based on its name. Use private directories and state files, with only the owned command symlink exposed through the user's bin directory.
+Installation identity version 3 adds environment and pending-distribution state while retaining verified version-2 development UUIDs and credential namespaces. Service records use protocol 3, and status JSON version 2 adds a separate optional blocking owner. The versioned distribution inventory records exact artifact paths, file identities/digests or symlink targets, managed shell blocks, root identities, agent configuration locations, and pending publication/cleanup steps. Writes use the existing strict decoding, ownership checks, durable intent, and atomic publication conventions. Never discover cleanup targets by scanning arbitrary home directories. Refuse an unrelated existing `~/.local/bin/data-mate`; do not overwrite or adopt it based on its name. Use private directories and state files, with only the owned command symlink exposed through the user's bin directory.
 
 ### 13.3 Release artifacts and trust
 
@@ -652,6 +652,8 @@ Production uninstall uses the complete recorded distribution inventory for the f
 Recover/close SQLite before cleanup; preserve a journal needed for recovery rather than claiming completion while the store is unusable. Default uninstall compacts the distribution inventory to store identity and required reuse/recovery metadata; it does not retain release history, completion preferences, or runtime settings. Reinstallation reuses the same fixed-root UUID, ciphertext and Keychain item without credential re-entry. Preserve any legacy store's ownership records until explicitly purged or recovered; default uninstall never silently deletes or adopts that store into the fixed root. Successful purge removes that inventory, stable locks, terminal receipts, and owned empty directories too. External certificates/source keys, unrelated files, OS snapshots, manual backups/copies, and agent transcripts remain outside the managed scope specified in the PRD.
 
 Run cleanup from a verified copy of the installed executable in a private `/tmp` helper directory so the installed binary can be removed without Go or a download. Record helper ownership before use. Preserve the binary until external cleanup has succeeded where possible. On failure, retain only the authority and helper needed to retry, print the exact retry command and remaining targets, and exit nonzero. On success the helper removes its own file/directory and verifies their absence before reporting completion; retained retry helpers are outstanding cleanup, never a successful no-residue purge.
+
+Terminal production purge uses an owned `~/.data-mate-cleanup.json` receipt and `.data-mate-cleanup.lock` only while removing the data root and its owned empty parents. The receipt retains the verified helper and exact directory identities, blocks installation, and is removed last after helper cleanup. These files resolve from the OS account home and are included in managed cleanup.
 
 Extend the existing tombstone/terminal-receipt protocol to the fixed production installation and any verified legacy cleanup records: acquire the distribution lease, affected lifecycle leases in canonical path order, then state leases; record cleanup intent before the first deletion, reject install/upgrade/start while cleanup is incomplete, delete each exact Keychain item before discarding its root metadata, and remove the top-level receipt last. If default uninstall has already removed the command, a verified installer bootstrap option `--uninstall --purge` obtains a temporary helper and resumes cleanup from the fixed-root inventory without reinstalling runtime artifacts or accepting `--root`.
 

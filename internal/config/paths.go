@@ -10,8 +10,9 @@ import (
 
 // Root identifies a canonical data directory without creating state.
 type Root struct {
-	Path   string
-	Digest string
+	Path        string
+	Digest      string
+	Environment Environment
 }
 
 // ResolveRoot uses an absolute override or an installed bin/data-mate executable.
@@ -41,5 +42,5 @@ func ResolveRoot(override, executable string) (Root, error) {
 		return Root{}, errors.New("root must be an existing directory")
 	}
 	sum := sha256.Sum256([]byte(real))
-	return Root{real, hex.EncodeToString(sum[:])}, nil
+	return Root{Path: real, Digest: hex.EncodeToString(sum[:])}, nil
 }

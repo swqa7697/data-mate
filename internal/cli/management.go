@@ -18,7 +18,11 @@ type nativeClient struct{ *service.Controller }
 func (nativeClient) Close() {}
 func nativeManagement(build Build) managementFactory {
 	return func(ctx context.Context, root config.Root) (managementClient, error) {
-		c, err := serviceController(root.Path, build)
+		override := root.Path
+		if build.Environment.Kind() == config.Production {
+			override = ""
+		}
+		c, err := serviceController(override, build)
 		if err != nil {
 			return nil, err
 		}

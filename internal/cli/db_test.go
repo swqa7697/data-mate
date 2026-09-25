@@ -219,6 +219,23 @@ func TestConnectionCRUD(t *testing.T) {
 	if p.Connections[0].ID != id || p.Connections[0].CredentialRef != ref || p.Connections[0].Scope.ContainsName("public", "t") {
 		t.Fatal("rename/empty scope/credential preservation")
 	}
+
+	// Completion reuses this CRUD fixture and must not unlock credentials or write.
+	completionBefore := files(t, root)
+	completionCalls := keys.calls
+	for _, action := range []string{"edit", "scope", "remove", "rm", "test"} {
+		cmd := newCommand(Build{}, keys)
+		var output bytes.Buffer
+		cmd.SetOut(&output)
+		cmd.SetErr(&output)
+		cmd.SetArgs([]string{"--root", root, "__complete", "db", action, "ren"})
+		if err := cmd.ExecuteContext(t.Context()); err != nil || !strings.Contains(output.String(), "renamed\n") {
+			t.Fatal("alias completion", action, err, output.String())
+		}
+	}
+	if keys.calls != completionCalls || !reflect.DeepEqual(completionBefore, files(t, root)) {
+		t.Fatal("completion accessed secrets or mutated state")
+	}
 	calls := keys.calls
 	out, diag = command(t, root, keys, "", 0, "ls", "--json")
 	if contracts.Validate("db-list.output", []byte(out)) != nil || keys.calls != calls || diag != "" || strings.Contains(out, "credential_ref") {

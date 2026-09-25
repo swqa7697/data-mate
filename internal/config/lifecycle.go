@@ -96,7 +96,7 @@ func (l *LifecycleLease) InstallBinary(ctx context.Context, name string) error {
 	if err := l.lease.check(); err != nil {
 		return err
 	}
-	if err := s.verifyIdentity(); err != nil {
+	if err := s.verifyIdentity(); err != nil && !errors.Is(err, ErrPending) {
 		return err
 	}
 	d, err := s.binaryDirectory()
@@ -137,7 +137,7 @@ func (l *LifecycleLease) InstallBinary(ctx context.Context, name string) error {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	s.identity.Executable = DevelopmentExecutable(s.root)
+	s.identity.Executable = ExecutablePath(s.root)
 	if err = s.writeIdentity(); err != nil {
 		return err
 	}
@@ -165,4 +165,21 @@ func (l *LifecycleLease) InstallBinary(ctx context.Context, name string) error {
 		return errors.New("cannot publish executable")
 	}
 	return dir.Sync()
+}
+
+// SetDistributionPending gates ordinary startup and state access during publication.
+// The caller holds the distribution lease before acquiring this lifecycle lease.
+func (l *LifecycleLease) SetDistributionPending(ctx context.Context, pending bool) error {
+	state, err := l.CleanupLease(ctx)
+	if err != nil {
+		return err
+	}
+	defer state.Release()
+	s := l.lease.store
+	s.identity.Pending = pending
+	if err = s.writeIdentity(); err != nil {
+		return err
+	}
+	l.identity = s.identity
+	return nil
 }

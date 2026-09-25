@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
 
@@ -19,7 +21,11 @@ const (
 )
 
 // Build contains metadata injected from VERSION by the build script.
-type Build struct{ Version, Revision, Dirty string }
+type Build struct {
+	Version, Revision, Dirty string
+	Environment              config.Environment
+	accountHome              func() (string, error)
+}
 
 // Error carries only a safe public diagnostic and process status.
 type Error struct {
@@ -73,6 +79,16 @@ func commandWithManagement(build Build, keys vault.KeyProvider, factory manageme
 	var override string
 	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
+	if build.Environment.Kind() == config.Production {
+		root.PersistentPreRunE = func(_ *cobra.Command, args []string) error {
+			for _, arg := range args {
+				if arg == "--root" || strings.HasPrefix(arg, "--root=") {
+					return invalid("production does not accept --root")
+				}
+			}
+			return nil
+		}
+	}
 	root.Args = cobra.NoArgs
 	root.RunE = func(cmd *cobra.Command, _ []string) error { return cmd.Help() }
 	root.SetHelpCommand(&cobra.Command{Use: "help [command]", Short: "Show command help", RunE: func(_ *cobra.Command, args []string) error {
@@ -82,7 +98,9 @@ func commandWithManagement(build Build, keys vault.KeyProvider, factory manageme
 		}
 		return target.Help()
 	}})
-	root.PersistentFlags().StringVar(&override, "root", "", "Absolute installation root (defaults to executable location)")
+	if build.Environment.Kind() == config.Development {
+		root.PersistentFlags().StringVar(&override, "root", "", "Absolute installation root (defaults to executable location)")
+	}
 	root.SetFlagErrorFunc(func(_ *cobra.Command, _ error) error { return &Error{ExitInvalid, "invalid flags; run data-mate help"} })
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Show application version and build metadata", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, err := fmt.Fprintf(cmd.OutOrStdout(), "data-mate %s (revision %s, dirty %s)\n", build.Version, build.Revision, build.Dirty)
@@ -91,15 +109,11 @@ func commandWithManagement(build Build, keys vault.KeyProvider, factory manageme
 		}
 		return nil
 	}})
-	root.AddCommand(&cobra.Command{Use: "upgrade", Aliases: []string{"update"}, Short: "Explain local rebuilding", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		_, err := fmt.Fprintln(cmd.OutOrStdout(), "Distribution is deferred. Rebuild from your checkout with make install.")
-		if err != nil {
-			return &Error{ExitFailure, "cannot write output"}
-		}
-		return nil
-	}})
-	db := newDB(&override, factory)
+
+	db := newDB(&override, factory, build)
 	root.AddCommand(db, newMCP(&override, build))
 	root.AddCommand(internalServiceCommands(&override, build, keys)...)
+	addDistribution(root, build)
+	addCompletion(root, &override, build)
 	return root
 }

@@ -21,7 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func newDB(override *string, factory managementFactory) *cobra.Command {
+func newDB(override *string, factory managementFactory, build Build) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, action := range []string{"add", "edit", "remove", "list", "scope"} {
 		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose visible schemas and tables"}[action], Args: cobra.MaximumNArgs(1)}
@@ -44,15 +44,15 @@ func newDB(override *string, factory managementFactory) *cobra.Command {
 			scopeFlags(cmd)
 		}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			return runDB(cmd, args, action, *override, factory)
+			return runDB(cmd, args, action, *override, factory, build)
 		}
 		db.AddCommand(cmd)
 	}
-	db.AddCommand(newDBTest(override, factory))
+	db.AddCommand(newDBTest(override, factory, build))
 	return db
 }
 
-func runDB(cmd *cobra.Command, args []string, action, override string, factory managementFactory) (result error) {
+func runDB(cmd *cobra.Command, args []string, action, override string, factory managementFactory, build Build) (result error) {
 	ctx := cmd.Context()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -61,7 +61,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 	if err != nil {
 		return failure("cannot locate executable")
 	}
-	root, err := config.ResolveRoot(override, exe)
+	root, err := build.resolveRoot(override, exe)
 	if err != nil {
 		return invalid("invalid installation root")
 	}

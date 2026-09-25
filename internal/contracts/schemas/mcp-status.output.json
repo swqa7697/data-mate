@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "version": {
-      "const": 1
+      "const": 2
     },
     "state": {
       "enum": [
@@ -53,6 +53,37 @@
         "ready",
         "unavailable"
       ]
+    },
+    "blocking_owner": {
+      "type": "object",
+      "properties": {
+        "environment": {
+          "enum": [
+            "development",
+            "production"
+          ]
+        },
+        "root": {
+          "type": "string"
+        },
+        "installation": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "stop_command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "root",
+        "installation",
+        "executable",
+        "stop_command"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

@@ -59,7 +59,7 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 	}
 	r, err := readRecord(l.Read, c.Root, l.Identity())
 	if errors.Is(err, os.ErrNotExist) {
-		j, e := c.launcher.Inspect(ctx, c.Root)
+		j, e := c.inspectSelected(ctx)
 		if e != nil {
 			return e
 		}

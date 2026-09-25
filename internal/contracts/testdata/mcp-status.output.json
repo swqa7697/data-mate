@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "state": "stopped",
   "agents": [],
   "mcp_enabled": false,

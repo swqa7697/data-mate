@@ -16,13 +16,13 @@ import (
 
 type diagnosticResult = service.DiagnosticResult
 
-func newDBTest(override *string, factory managementFactory) *cobra.Command {
+func newDBTest(override *string, factory managementFactory, build Build) *cobra.Command {
 	cmd := &cobra.Command{Use: "test [alias]", Short: "Check staged connection and read-only transaction readiness", Args: cobra.MaximumNArgs(1)}
 	cmd.Flags().Bool("json", false, "Versioned JSON results with reached diagnostic stages")
-	cmd.RunE = func(cmd *cobra.Command, args []string) error { return runDBTest(cmd, args, *override, factory) }
+	cmd.RunE = func(cmd *cobra.Command, args []string) error { return runDBTest(cmd, args, *override, factory, build) }
 	return cmd
 }
-func runDBTest(cmd *cobra.Command, args []string, override string, factory managementFactory) error {
+func runDBTest(cmd *cobra.Command, args []string, override string, factory managementFactory, build Build) error {
 	if err := cmd.Context().Err(); err != nil {
 		return err
 	}
@@ -30,7 +30,7 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 	if err != nil {
 		return failure("cannot locate executable")
 	}
-	root, err := config.ResolveRoot(override, exe)
+	root, err := build.resolveRoot(override, exe)
 	if err != nil {
 		return invalid("invalid installation root")
 	}

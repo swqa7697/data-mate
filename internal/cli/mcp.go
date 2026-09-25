@@ -26,7 +26,11 @@ func serviceError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
-	for _, safe := range []error{service.ErrState, agent.ErrInspection, config.ErrOwnership, config.ErrPurging, config.ErrStale} {
+	var owner *service.OwnerConflict
+	if errors.As(err, &owner) {
+		return failure(owner.Error())
+	}
+	for _, safe := range []error{config.ErrPending, service.ErrState, agent.ErrInspection, config.ErrOwnership, config.ErrPurging, config.ErrStale} {
 		if errors.Is(err, safe) {
 			return invalid("invalid or unsafe installation/service state")
 		}
@@ -43,7 +47,7 @@ func serviceController(override string, build Build) (*service.Controller, error
 	if err != nil {
 		return nil, failure("cannot locate executable")
 	}
-	root, err := config.ResolveRoot(override, exe)
+	root, err := build.resolveRoot(override, exe)
 	if err != nil {
 		return nil, invalid("invalid installation root")
 	}
@@ -110,6 +114,9 @@ func newMCP(override *string, build Build) *cobra.Command {
 				outputErr = json.NewEncoder(cmd.OutOrStdout()).Encode(result)
 			} else {
 				_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "Service: %s (MCP enabled: %t, keyset: %s)\nRegistration: %s\nRoot: %s\n", result.State, result.MCPEnabled, result.KeysetState, agent.Name(c.Root), c.Root.Path)
+				if result.BlockingOwner != nil {
+					_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "Blocked by %s at %q; stop explicitly: %s\n", result.BlockingOwner.Environment, result.BlockingOwner.Root, result.BlockingOwner.StopCommand)
+				}
 				for _, a := range result.Agents {
 					if outputErr == nil {
 						_, outputErr = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", a.Name, a.State)
@@ -200,6 +207,9 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		return nil
 	}}
 	uninstall.Flags().Bool("purge", false, "Remove owned profiles and credentials")
+	if build.Environment.Kind() == config.Production {
+		return []*cobra.Command{daemon}
+	}
 	return []*cobra.Command{daemon, install, uninstall}
 }
 

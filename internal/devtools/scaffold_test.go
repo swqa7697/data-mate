@@ -67,6 +67,45 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		if output := run(t, temp, true, bin, "version"); !strings.Contains(output, "data-mate "+strings.TrimSpace(string(version))+" ") {
 			t.Fatal(output)
 		}
+		if i == 0 {
+			shellHome := t.TempDir()
+			for _, shell := range []string{"bash", "zsh"} {
+				generated := run(t, temp, true, bin, "completion", shell)
+				path := filepath.Join(shellHome, "completion."+shell)
+				if err := os.WriteFile(path, []byte(generated), 0600); err != nil {
+					t.Fatal(err)
+				}
+				script := `source "$1"; COMP_WORDS=(data-mate d); COMP_CWORD=1; COMP_LINE="data-mate d"; COMP_POINT=11; __start_data-mate; printf '%s\n' "${COMPREPLY[@]}"`
+				args := []string{"/usr/bin/env", "HOME=" + shellHome, "ZDOTDIR=" + shellHome, "PATH=" + filepath.Dir(bin) + ":/usr/bin:/bin", "/bin/bash", "--noprofile", "--norc", "-c", script, "completion", path}
+				if shell == "zsh" {
+					script = `autoload -Uz compinit; compinit -D; source "$1"; (( $+functions[_data-mate] )); data-mate __complete d`
+					args = []string{"/usr/bin/env", "HOME=" + shellHome, "ZDOTDIR=" + shellHome, "PATH=" + filepath.Dir(bin) + ":/usr/bin:/bin", "/bin/zsh", "-f", "-c", script, "completion", path}
+				}
+				if shell == "bash" {
+					sentinel := filepath.Join(shellHome, "completion-must-not-execute")
+					literalScript := `source "$1"
+sentinel="$2"
+expected="space ; \$(touch $sentinel)"
+data-mate() { printf '%s\n' "$expected" ':4'; }
+COMP_WORDS=(data-mate db edit "\$(touch $sentinel)"); COMP_CWORD=3
+__start_data-mate
+[[ ! -e "$sentinel" ]] || exit 1
+COMP_WORDS=(data-mate db edit space); COMP_CWORD=3
+__start_data-mate
+# Simulate inserting the generated completion into a shell assignment.
+eval "actual=${COMPREPLY[0]}"
+[[ "$actual" == "$expected" && ! -e "$sentinel" ]]`
+					run(t, temp, true, "/bin/bash", "--noprofile", "--norc", "-c", literalScript, "completion", path, sentinel)
+				}
+				output := run(t, temp, true, args...)
+				if !strings.Contains(output, "db") {
+					t.Fatal("installed shell completion", shell, output)
+				}
+				if _, err := os.Stat(filepath.Join(shellHome, ".zcompdump")); !os.IsNotExist(err) {
+					t.Fatal("completion created shared cache")
+				}
+			}
+		}
 		run(t, root, true, "make", "dev", "ARGS=version")
 		// No root is passed: this proves root inference from a different cwd.
 		run(t, temp, true, bin, "db", "list", "--json")

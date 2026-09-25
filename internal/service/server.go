@@ -17,6 +17,9 @@ import (
 // Serve is the private launchd entry point. A matching durable launch intent is
 // required; calling this function never bootstraps a job or creates credentials.
 func Serve(ctx context.Context, root config.Root, build Build, nonce string, keys vault.KeyProvider) error {
+	return serve(ctx, root, build, nonce, keys, launchd{})
+}
+func serve(ctx context.Context, root config.Root, build Build, nonce string, keys vault.KeyProvider, launcher launchManager) error {
 	s, err := config.OpenExisting(ctx, root)
 	if err != nil {
 		return ErrState
@@ -29,6 +32,10 @@ func Serve(ctx context.Context, root config.Root, build Build, nonce string, key
 	r, err := readRecord(l.Read, root, l.Identity())
 	l.Release()
 	if err != nil || r.Nonce != nonce || r.Build != build {
+		return ErrConflict
+	}
+	job, err := launcher.Inspect(ctx, root)
+	if err != nil || !matching(job, r) || job.PID != os.Getpid() {
 		return ErrConflict
 	}
 	d, err := postgres.New()
@@ -88,6 +95,7 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 				return nil
 			}
 			root, err := config.ResolveRoot(r.Identity.Root, "")
+			root.Environment = r.Identity.Environment
 			if err != nil {
 				return ErrState
 			}

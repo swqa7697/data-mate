@@ -48,7 +48,7 @@ func RemainingOwned(root Root) ([]string, error) {
 		var st unix.Stat_t
 		e = unix.Fstatat(int(d.dir.Fd()), "data-mate", &st, unix.AT_SYMLINK_NOFOLLOW)
 		if e == nil {
-			remaining = append(remaining, DevelopmentExecutable(root))
+			remaining = append(remaining, ExecutablePath(root))
 		}
 	}
 	if e != nil && !errors.Is(e, os.ErrNotExist) {

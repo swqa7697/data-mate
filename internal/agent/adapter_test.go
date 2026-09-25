@@ -69,7 +69,11 @@ func agentFixture(t *testing.T) (*Manager, *config.LifecycleLease, *int) {
 	m := &Manager{root: root}
 	calls := new(int)
 	for _, name := range []string{"codex", "claude"} {
-		a := adapter{name: name, executable: "/fixture/" + name, path: filepath.Join(t.TempDir(), "config")}
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := adapter{name: name, executable: "/fixture/" + name, path: filepath.Join(dir, "config")}
 		a.run = func(_ context.Context, exe string, args, env []string) error {
 			*calls++
 			if exe != a.executable {
@@ -210,10 +214,10 @@ func TestRegistrationOwnership(t *testing.T) {
 	if _, err = m.Ensure(t.Context(), l); err == nil {
 		t.Fatal("relocated config accepted")
 	}
-	m.adapters[0] = a
 	if err = m.RemoveOwned(t.Context(), l); err != nil {
-		t.Fatal(err)
+		t.Fatal("recorded-location cleanup after relocation", err)
 	}
+	m.adapters[0] = a
 	inspect("pending")
 	if *calls != 4 {
 		t.Fatal("remove count", *calls)

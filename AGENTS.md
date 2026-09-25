@@ -2,7 +2,7 @@
 
 ## Scope and sources of truth
 
-- Data Mate is one Go executable for macOS on Apple Silicon, exposing read-only PostgreSQL access through MCP. Development installs at `.dev/bin/data-mate` with managed data directly in `.dev/data-mate/`. The planned production installation uses `~/.local/share/data-mate/` with its executable at `bin/data-mate` and a command symlink at `~/.local/bin/data-mate`; follow DESIGN for availability and ownership contracts. PostgreSQL 16 and 18 are the integration test matrix.
+- Data Mate is one Go executable for macOS on Apple Silicon, exposing read-only PostgreSQL access through MCP. Development installs at `.dev/bin/data-mate` with managed data directly in `.dev/data-mate/`. Production installation uses `~/.local/share/data-mate/` with its executable at `bin/data-mate` and a command symlink at `~/.local/bin/data-mate`; follow DESIGN for availability and ownership contracts. PostgreSQL 16 and 18 are the integration test matrix.
 - Read [PRD](specs/PRD.md) for product scope, [DESIGN](specs/DESIGN.md) for target technical contracts, and [README](README.md) for implemented commands and setup. An accepted design may precede implementation; document that distinction and update usage documentation when behavior lands.
 - Keep retained development artifacts, such as test results, diagnostic logs and performance measurements, in ignored `.misc`. `.tmp` is developer-managed; read supplied reference material there without modifying it.
 - [CLAUDE.md](CLAUDE.md) points here. Maintain one shared set of project guidelines.
@@ -20,12 +20,12 @@
 | `internal/service` | Lifecycle, admission, private management requests, profile mutations and shared database operations |
 | `internal/mcp` | Read-only tool dispatch, MCP sessions and the stdio bridge |
 | `internal/agent` | Codex/Claude registration and ownership verification |
-| `internal/distribution` (planned) | Release acquisition and verification, production installation/upgrade, artifact inventory and recovery |
+| `internal/distribution` | Release acquisition and verification, production installation/upgrade, artifact inventory and recovery |
 | `internal/devtools`, `scripts`, `.github/workflows` | Developer command regressions, tooling and CI |
 
 - Keep database and authorization behavior shared across CLI/MCP callers through the service. The service owns normal OS keyset access and credential encryption/decryption; the CLI submits credential patches through the private management protocol. Agent adapters own registration and compatibility; the bridge must not acquire vault or driver responsibilities. MCP and the bridge must not acquire management, keyset-export or saved-password retrieval endpoints.
 - Keep management-only service startup separate from explicit MCP enablement. Passive listing and previews read nonsecret state without starting the service or unlocking the keyset. Ordinary connection edits use the service's loaded keyset without additional OS credential-store access; follow DESIGN for initialization, restart and cleanup exceptions.
-- The planned lifecycle permits one service per macOS user across production and development, including management-only services. First wins: a competing installation must report the owner rather than stop it or use its profiles/credentials. Preserve per-installation ownership and follow DESIGN for launchd arbitration, explicit handoff, and legacy recovery.
+- The lifecycle permits one service per macOS user across production and development, including management-only services. First wins: a competing installation must report the owner rather than stop it or use its profiles/credentials. Preserve per-installation ownership and follow DESIGN for launchd arbitration, explicit handoff, and legacy recovery.
 - Shell completion must remain passive: suggest public commands/flags and bounded nonsecret aliases without starting a service, accessing Keychain, querying a database, or initializing state. Follow the active environment's root and command availability rules.
 - Prefer concrete packages and small functions. Introduce interfaces only at real external seams used by callers/tests; do not add a plugin framework or universal query abstraction in advance.
 - Keep deterministic parsing/validation separate from filesystem, subprocess, network and key-store effects. Follow DESIGN for lock ordering, publication and cleanup contracts.

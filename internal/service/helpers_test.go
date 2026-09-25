@@ -51,7 +51,7 @@ func (d *observedDriver) Invalidate(id string) {
 }
 func (d *observedDriver) Close()       { d.mu.Lock(); defer d.mu.Unlock(); d.closed = true }
 func (d *observedDriver) retired() int { d.mu.Lock(); defer d.mu.Unlock(); return len(d.invalidated) }
-func serviceFixture(t *testing.T) (*config.Store, config.Root) {
+func serviceFixture(t *testing.T, environments ...config.Environment) (*config.Store, config.Root) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "data-mate")
 	if err := os.Chmod(filepath.Dir(path), 0700); err != nil {
@@ -66,6 +66,9 @@ func serviceFixture(t *testing.T) (*config.Store, config.Root) {
 	root, err := config.ResolveRoot(path, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(environments) != 0 {
+		root.Environment = environments[0]
 	}
 	s, err := config.Open(t.Context(), root, nil)
 	if err != nil {
@@ -113,6 +116,9 @@ func (f *fakeLaunch) Inspect(_ context.Context, _ config.Root) (job, error) {
 func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.job.Present {
+		return ErrConflict
+	}
 	s, err := config.OpenExisting(ctx, root)
 	if err != nil {
 		return err
@@ -192,10 +198,11 @@ func (f *fakeLaunch) Bootout(ctx context.Context, _ config.Root) error {
 	f.job = job{}
 	return nil
 }
-func controllerFixture(t *testing.T) (*Controller, *fakeLaunch, *config.Store) {
+func controllerFixture(t *testing.T, environments ...config.Environment) (*Controller, *fakeLaunch, *config.Store) {
 	t.Helper()
-	s, root := serviceFixture(t)
-	if err := os.Mkdir(filepath.Join(filepath.Dir(root.Path), "bin"), 0700); err != nil {
+	s, root := serviceFixture(t, environments...)
+	bin := filepath.Dir(config.ExecutablePath(root))
+	if err := os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
 	exe, _ := os.Executable()
@@ -203,7 +210,7 @@ func controllerFixture(t *testing.T) (*Controller, *fakeLaunch, *config.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(root.Path), "bin/.data-mate.fixture"), binary, 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, ".data-mate.fixture"), binary, 0700); err != nil {
 		t.Fatal(err)
 	}
 	l, e := s.Lifecycle(t.Context())
@@ -215,7 +222,7 @@ func controllerFixture(t *testing.T) (*Controller, *fakeLaunch, *config.Store) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	hash, err := binaryHash(filepath.Join(filepath.Dir(root.Path), "bin/data-mate"))
+	hash, err := binaryHash(filepath.Join(bin, "data-mate"))
 	if err != nil {
 		t.Fatal(err)
 	}

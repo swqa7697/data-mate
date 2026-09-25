@@ -36,6 +36,10 @@ func ExecutableBuild(version, revision string) (Build, error) {
 	if err != nil {
 		return Build{}, ErrState
 	}
+	p, err = filepath.EvalSymlinks(p)
+	if err != nil {
+		return Build{}, ErrState
+	}
 	hash, err := executableHash(p, false)
 	return Build{version, revision, hash}, err
 }
@@ -74,13 +78,14 @@ func executableHash(path string, private bool) (string, error) {
 }
 
 type identity struct {
-	Installation string `json:"installation"`
-	Root         string `json:"root"`
-	Digest       string `json:"digest"`
+	Installation string             `json:"installation"`
+	Root         string             `json:"root"`
+	Digest       string             `json:"digest"`
+	Environment  config.Environment `json:"environment,omitempty"`
 }
 
 func installation(root config.Root, id config.Identity) identity {
-	return identity{id.ID, root.Path, root.Digest}
+	return identity{id.ID, root.Path, root.Digest, root.Environment.Kind()}
 }
 
 type record struct {
@@ -93,9 +98,13 @@ type record struct {
 }
 
 func (r record) args() []string {
-	return []string{r.Executable, "__service", "--root", r.Identity.Root, "--instance", r.Nonce}
+	args := []string{r.Executable, "__service", "--instance", r.Nonce}
+	if r.Identity.Environment.Kind() == config.Development {
+		args = append(args, "--root", r.Identity.Root)
+	}
+	return args
 }
-func label(root config.Root) string { return "com.data-mate.dev." + root.Digest[:16] }
+func label(root config.Root) string { return "com.data-mate.service" }
 func socketDir(root config.Root) string {
 	return "/private/tmp/dm-" + itoa(os.Geteuid()) + "-" + root.Digest[:16]
 }
@@ -105,7 +114,7 @@ func readRecord(read func(string, int) ([]byte, error), root config.Root, id con
 		return record{}, err
 	}
 	var r record
-	if config.DecodeStrict(b, 4096, &r) != nil || r.Protocol != 2 || r.Executable == "" || r.Executable != id.Executable || r.Identity != installation(root, id) || !config.ValidUUID(r.Nonce) || r.PID < 0 || r.Build.Version == "" || r.Build.Revision == "" || len(r.Build.Fingerprint) != 64 {
+	if config.DecodeStrict(b, 4096, &r) != nil || r.Protocol != 3 || r.Executable == "" || r.Executable != id.Executable || r.Identity != installation(root, id) || !config.ValidUUID(r.Nonce) || r.PID < 0 || r.Build.Version == "" || r.Build.Revision == "" || len(r.Build.Fingerprint) != 64 {
 		return record{}, ErrState
 	}
 	return r, nil

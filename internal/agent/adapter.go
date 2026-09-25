@@ -38,7 +38,12 @@ type Status struct {
 }
 
 // Name is stable across rebuilds and independent between checkouts.
-func Name(root config.Root) string { return "data-mate-dev-" + root.Digest[:16] }
+func Name(root config.Root) string {
+	if root.Environment.Kind() == config.Production {
+		return "data-mate"
+	}
+	return "data-mate-dev-" + root.Digest[:16]
+}
 
 type adapter struct {
 	name, executable, path string
@@ -195,7 +200,7 @@ func fingerprint(entry map[string]any) string {
 	return hex.EncodeToString(h[:])
 }
 func (m *Manager) desired(a adapter, executable string) map[string]any {
-	entry := map[string]any{"command": executable, "args": []string{"mcp", "bridge", "--root", m.root.Path}}
+	entry := map[string]any{"command": executable, "args": m.bridgeArgs()}
 	if a.name == "claude" {
 		entry["type"] = "stdio"
 		entry["env"] = map[string]any{}
@@ -339,4 +344,12 @@ func preserved(before, after map[string]any) bool {
 		}
 	}
 	return true
+}
+
+func (m *Manager) bridgeArgs() []string {
+	args := []string{"mcp", "bridge"}
+	if m.root.Environment.Kind() == config.Development {
+		args = append(args, "--root", m.root.Path)
+	}
+	return args
 }

@@ -31,6 +31,9 @@ func (s *Store) binaryDirectory() (*binaryDirectory, error) {
 		return nil, err
 	}
 	path := filepath.Dir(s.root.Path)
+	if s.root.Environment.Kind() == Production {
+		path = s.root.Path
+	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, ErrOwnership

@@ -231,6 +231,54 @@ func TestOwnedStorage(t *testing.T) {
 // A crash between any publication boundaries leaves a whole old/new document.
 // There are no new per-boundary subtests; each failure names its boundary.
 func TestPublicationRecovery(t *testing.T) {
+	t.Run("development environment migration preserves credential namespace", func(t *testing.T) {
+		store, root := storageFixture(t)
+		life, err := store.Lifecycle(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := life.Identity()
+		life.Release()
+		raw, err := os.ReadFile(filepath.Join(root.Path, "installation.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var legacy map[string]any
+		if err = json.Unmarshal(raw, &legacy); err != nil {
+			t.Fatal(err)
+		}
+		legacy["version"] = 2
+		delete(legacy, "environment")
+		delete(legacy, "pending")
+		raw, err = json.Marshal(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(root.Path, "installation.json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := Open(t.Context(), root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reopened.Close()
+		migrated, err := reopened.Lifecycle(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer migrated.Release()
+		id := migrated.Identity()
+		if id.Version != 3 || id.Environment != Development || id.ID != original.ID || id.KeyAccount != original.KeyAccount {
+			t.Fatal("migration changed namespace", id)
+		}
+		production := root
+		production.Environment = Production
+		if foreign, err := OpenExisting(t.Context(), production); err == nil {
+			foreign.Close()
+			t.Fatal("development identity adopted as production")
+		}
+	})
+
 	for _, point := range []string{"before-commit", "after-commit"} {
 		s, root := storageFixture(t)
 		l := profileLease(t, s, true)

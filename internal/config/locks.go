@@ -286,7 +286,7 @@ func (l *Lease) check() error {
 		}
 	}
 	err := l.store.verifyIdentity()
-	if l.purge && errors.Is(err, ErrPurging) {
+	if l.purge && (errors.Is(err, ErrPurging) || errors.Is(err, ErrPending)) {
 		return nil
 	}
 	return err
