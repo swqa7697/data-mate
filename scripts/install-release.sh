@@ -90,6 +90,14 @@ verify_checksums() {
   [[ "$count" == 3 ]] || fail 'missing checksum assets'
 }
 
+# Verify the pinned publisher without imposing an online notarization lookup.
+# Release publication checks notarization; macOS retains its own policy checks.
+verify_signature() {
+  local candidate="$1"
+  local requirement='=anchor apple generic and identifier "io.github.swqa7697.data-mate" and certificate leaf[subject.OU] = "JDNRPL924Q" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+  /usr/bin/codesign --verify --strict -R "$requirement" "$candidate" || fail 'publisher signature verification failed'
+}
+
 main() {
   local no_shell=false uninstall=false purge=false argument stage fetched_url version minimum
   [[ "$EUID" != 0 ]] || fail 'run as your normal macOS account, not root'
@@ -123,7 +131,7 @@ main() {
   fetch "$base/data-mate_darwin_arm64" "$stage/data-mate_darwin_arm64" 268435456
   verify_checksums
   case "$(/usr/bin/file -b "$stage/data-mate_darwin_arm64")" in 'Mach-O 64-bit executable arm64'*) ;; *) fail 'native arm64 executable required' ;; esac
-  /usr/bin/codesign --verify --strict --check-notarization -R '=anchor apple generic and identifier "io.github.swqa7697.data-mate" and certificate leaf[subject.OU] = "JDNRPL924Q" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and notarized' "$stage/data-mate_darwin_arm64" || fail 'publisher signature or notarization verification failed'
+  verify_signature "$stage/data-mate_darwin_arm64"
   /bin/chmod 700 "$stage/data-mate_darwin_arm64"
   "$stage/data-mate_darwin_arm64" __release-metadata --text >"$stage/compiled.txt"
   /usr/bin/cmp -s "$stage/release.txt" "$stage/compiled.txt" || fail 'compiled release metadata mismatch'
@@ -135,4 +143,6 @@ main() {
   trap - EXIT
 }
 
-main "$@"
+# Sourcing exposes these definitions; direct and curl-piped execution
+# both enter main (BASH_SOURCE is unset when Bash reads its program from stdin).
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi

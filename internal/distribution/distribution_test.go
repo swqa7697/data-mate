@@ -415,6 +415,71 @@ func TestDistributionPublication(t *testing.T) {
 }
 
 func TestReleaseContracts(t *testing.T) {
+	// Extend the release trust regression: an unavailable notarization service
+	// must not block a valid publisher, and invalid signatures must still fail.
+	t.Run("publisher-without-online-notarization", func(t *testing.T) {
+		for _, scenario := range []struct {
+			name string
+			want error
+		}{
+			{"accepted", nil},
+			{"rejected", ErrRelease},
+			{"canceled", context.Canceled},
+		} {
+			ctx, cancel := context.WithCancel(t.Context())
+			if scenario.name == "canceled" {
+				cancel()
+			}
+			calls := 0
+			run := func(_ context.Context, exe string, args ...string) ([]byte, error) {
+				calls++
+				if exe != "/usr/bin/codesign" || len(args) != 5 || args[0] != "--verify" || args[1] != "--strict" || args[2] != "-R" || args[4] != "candidate" {
+					t.Fatalf("%s: unexpected verification command: %s %v", scenario.name, exe, args)
+				}
+				// Model a host whose publisher check works but ticket lookup fails.
+				if strings.Contains(args[3], "notarized") {
+					return nil, ErrRelease
+				}
+				return nil, scenario.want
+			}
+			err := verifyCodeSignature(ctx, "candidate", run)
+			cancel()
+			wantCalls := 1
+			if scenario.name == "canceled" {
+				wantCalls = 0
+			}
+			if !errors.Is(err, scenario.want) || calls != wantCalls {
+				t.Fatalf("%s: calls=%d err=%v", scenario.name, calls, err)
+			}
+			if scenario.name == "canceled" {
+				continue
+			}
+			// Run the actual bootstrap verifier with an offline codesign peer.
+			cmd := exec.CommandContext(t.Context(), "/bin/bash", "-c", `
+source "$1"
+scenario="$2"
+/usr/bin/codesign() {
+  [[ "$#" == 5 && "$1" == --verify && "$2" == --strict && "$3" == -R && "$5" == candidate ]] || return 1
+  [[ "$4" != *notarized* && "$scenario" == accepted ]]
+}
+verify_signature candidate
+`, "verification", "../../scripts/install-release.sh", scenario.name)
+			output, shellErr := cmd.CombinedOutput()
+			if (shellErr == nil) != (scenario.want == nil) {
+				t.Fatalf("%s: shell err=%v output=%s", scenario.name, shellErr, output)
+			}
+		}
+		// Sourcing must not install; normal and piped invocations must still
+		// enter argument validation before network or installation effects.
+		for _, invocation := range []string{`/bin/bash "$1" --invalid-option`, `/bin/bash -s -- --invalid-option < "$1"`} {
+			cmd := exec.CommandContext(t.Context(), "/bin/bash", "-c", invocation, "bootstrap", "../../scripts/install-release.sh")
+			output, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+				t.Fatalf("bootstrap entry: %v %s", err, output)
+			}
+		}
+	})
 	valid := Contract("1.2.3").Text()
 	for _, input := range []string{valid + "format=1\n", strings.Replace(valid, "format=1", "format=2", 1), strings.TrimSuffix(valid, "\n"), strings.Replace(valid, "version=1.2.3", "version=1.2.3-rc.1", 1), valid + "unknown=value\n", strings.Replace(valid, "store_schema=1", "store_schema=$(touch /tmp/never)", 1)} {
 		if _, err := ParseMetadata([]byte(input)); err == nil {
