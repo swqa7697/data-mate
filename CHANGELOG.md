@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-25
+
 ### Added
 
 - Add a checkout-local macOS Apple Silicon CLI with help, build-version reporting, a separate `.dev/data-mate/` data root beside `.dev/bin/data-mate`, and executable-relative root discovery.
