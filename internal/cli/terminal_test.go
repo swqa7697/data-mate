@@ -24,7 +24,10 @@ func TestConnectionTerminal(t *testing.T) {
 		keys := &testKeys{}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		fixture := &fixtureDatabase{browseError: mode == "scope-fail"}
+		fixture := &fixtureDatabase{browseError: mode == "scope-fail", bulkError: mode == "scope-bulk-fail", bulkWait: mode == "scope-bulk-cancel"}
+		if mode == "scope-limit" {
+			fixture.schemaCount = 5000
+		}
 		factory := databaseFactory(defaultDatabase)
 		if strings.HasPrefix(mode, "scope") {
 			factory = func() (cliDatabase, error) { return fixture, nil }
@@ -42,24 +45,40 @@ func TestConnectionTerminal(t *testing.T) {
 			return ExitCode(err)
 		}
 		if strings.HasPrefix(mode, "scope") {
-			if code := run(append(basicAdd, "--passwordless")...); code != 0 {
+			args := append(append([]string{}, basicAdd...), "--passwordless")
+			if mode == "scope-mixed" {
+				args = append(args, "--exclude-schema", "missing")
+			}
+			if code := run(args...); code != 0 {
 				os.Exit(code)
 			}
 			before := files(t, root)
 			code := run("scope", "analytics")
 			if mode == "scope-mixed" {
-				p := snapshot(t, root).Connections[0]
-				want := config.Scope{Mode: "selected", Schemas: []string{"schema0050"}, Tables: []config.Table{{Schema: "Dot.Schema", Name: "a.b"}, {Schema: "schema0051", Name: "table0050"}}}
-				if code != 0 || !reflect.DeepEqual(p.Scope, want) || len(fixture.requests) != 7 || !fixture.closed {
-					t.Fatalf("lazy mixed picker: %+v requests=%+v code=%d", p.Scope, fixture.requests, code)
+				want := config.Scope{Mode: "blacklist", Schemas: []string{"Dot.Schema", "missing", "schema0049"}}
+				if got := snapshot(t, root).Connections[0].Scope; code != 0 || !reflect.DeepEqual(got, want) {
+					t.Fatalf("mode switches lost off-page or missing names: %+v", got)
 				}
-				for _, selection := range []string{"all", "none"} {
-					if code = run("scope"); code != 0 {
-						os.Exit(code)
-					}
-					scope := snapshot(t, root).Connections[0].Scope
-					if (selection == "all") != scope.ContainsName("future", "new") {
-						t.Fatal("interactive all/none failed")
+				code = run("scope", "analytics")
+			}
+			if mode == "scope-mixed" || mode == "scope-color" || mode == "scope-limit" {
+				p := snapshot(t, root).Connections[0]
+				want := config.Scope{Mode: "blacklist", Schemas: []string{"Dot.Schema"}}
+				if mode == "scope-mixed" {
+					want.Mode = "whitelist"
+				}
+				if code != 0 || !reflect.DeepEqual(p.Scope, want) || !fixture.closed {
+					t.Fatalf("schema picker: %+v requests=%+v code=%d", p.Scope, fixture.requests, code)
+				}
+				if mode == "scope-mixed" {
+					for _, selection := range []string{"all", "none"} {
+						if code = run("scope"); code != 0 {
+							os.Exit(code)
+						}
+						scope := snapshot(t, root).Connections[0].Scope
+						if (selection == "all") != scope.ContainsSchema("future") || len(scope.Schemas) != 0 {
+							t.Fatal("interactive all/none failed")
+						}
 					}
 				}
 			} else if !reflect.DeepEqual(before, files(t, root)) {

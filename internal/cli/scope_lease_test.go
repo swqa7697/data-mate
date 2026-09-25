@@ -91,7 +91,7 @@ func scopeLeaseAcceptance(t *testing.T) {
 		t.Fatalf("scope completed under old lease: %v", err)
 	default:
 	}
-	if snapshot(t, root).Connections[0].Scope.Mode != "all" {
+	if snapshot(t, root).Connections[0].Scope.Mode != "blacklist" {
 		t.Fatal("scope published before cleanup")
 	}
 	if _, err = stdin.Write([]byte("release\n")); err != nil {
@@ -110,7 +110,7 @@ func scopeLeaseAcceptance(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("scope failed to finish")
 	}
-	if snapshot(t, root).Connections[0].Scope.ContainsName("app", "table") {
+	if snapshot(t, root).Connections[0].Scope.ContainsSchema("app") {
 		t.Fatal("scope publication missing")
 	}
 }

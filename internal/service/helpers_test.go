@@ -94,7 +94,7 @@ func putProfiles(t *testing.T, s *config.Store, p config.Profiles) {
 }
 func fixtureProfile() config.Profile {
 	limits := config.DefaultLimits()
-	return config.Profile{ID: "936e3468-5b48-4ef2-9a89-964449f06d98", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 1, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}, Limits: &limits}
+	return config.Profile{ID: "936e3468-5b48-4ef2-9a89-964449f06d98", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 1, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"}, Limits: &limits}
 }
 
 type fakeLaunch struct {

@@ -231,7 +231,7 @@ func TestPrivateManagement(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	p.Connections[0].Scope = config.Scope{Mode: "selected"}
+	p.Connections[0].Scope = config.Scope{Mode: "whitelist"}
 	if _, e = apply(p, rev, nil); e != nil {
 		t.Fatal("nonsecret locked edit", e)
 	}

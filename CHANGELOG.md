@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replace schema/table scope selection with schema-only whitelist and blacklist modes, defaulting new connections to all accessible schemas. Add `--exclude-schema` and a colored picker with immediate checkbox toggling, one-key toggle-all, and mode switching that preserves selections; old scope formats require profile recreation.
+
 ### Fixed
 
 - Remove recorded installation artifacts during uninstall even after edits, replacement, permission changes, or filesystem device renumbering; preserve unrelated files and symlink targets, and report the path when cleanup fails.

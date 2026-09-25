@@ -17,7 +17,7 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
   - Driver Layer: DB supports are abstracted
 - Read Only: The MCP service provides only read-only tools and permissions to agents
 - Query Capacity: Support 20–40-second analytical queries with a 60-second default budget, configurable up to five minutes; allow eight database connections per profile, 16 concurrent requests per MCP session, and 32 active database operations across sessions.
-- Flexible Scope: Users are able to configure the visible schemas or tables for a on file DB connection
+- Flexible Scope: Users configure allowed schemas for each saved DB connection through whitelist or blacklist mode; individual table selection is not supported
 - Simple Management: Users can conveniently and simply add/remove/modify a DB connection without pain
 - Security: Keep nonsecret connection profiles in files, never leak credentials in plain text, and never expose credentials to agents.
 - Full CLI integration: standard + interactive CLI user experience
@@ -68,7 +68,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
 - DB - Interactive | preivew & confirm (Y/N)
   - `db add`: Config "driver (PG only this version), connection alias ("c-alias" below), host, port, DB name, username, password" only -- all advanced options are disabled by default
   - `db add [add-on-options]`: Add optional flags to add connection with advanced options like SSL/TLS, SSH tunnel and proxy
-  - `db scope [c-alias]`: Select visible schemas and tables from available list; Use "space" to select and "enter" to confirm -- similar experience with the `pnpm dlx taze -I` provides; A newly added connection has all schemas and tables exposed by default
+  - `db scope [c-alias]`: Choose allowed schemas in a colored, searchable checkbox list; Space toggles one schema, `a` toggles all, and `m` switches whitelist/blacklist modes while preserving checkboxes. Enter previews before confirmation. New connections default to an empty blacklist, allowing all current and future accessible application schemas. Whitelists block future schemas; blacklists allow them
   - `db edit [c-alias(optional)]`: Modify a DB connection
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
 - DB - One shot

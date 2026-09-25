@@ -5,7 +5,7 @@
       "driver": "postgres",
       "database": "analytics",
       "scope": {
-        "mode": "all"
+        "mode": "blacklist"
       }
     }
   ]

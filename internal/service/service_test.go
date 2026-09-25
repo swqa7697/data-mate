@@ -500,7 +500,7 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 		done <- m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
 			close(started)
 			<-finish
-			if a.Profile.Scope.Mode != "all" {
+			if a.Profile.Scope.Mode != "blacklist" {
 				return ErrState
 			}
 			return nil
@@ -519,10 +519,10 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	profiles.Connections[0].Scope = config.Scope{Mode: "selected", Schemas: []string{}, Tables: []config.Table{}}
+	profiles.Connections[0].Scope = config.Scope{Mode: "whitelist", Schemas: []string{}}
 	putProfiles(t, s, profiles)
 	if err := m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
-		if a.Profile.Scope.Mode != "selected" {
+		if a.Profile.Scope.Mode != "whitelist" {
 			return ErrState
 		}
 		return nil
@@ -557,14 +557,14 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	queued := make(chan error, 1)
 	go func() {
 		queued <- m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
-			if a.Profile.Scope.Mode != "all" {
+			if a.Profile.Scope.Mode != "blacklist" {
 				return ErrState
 			}
 			return nil
 		})
 	}()
 	waitFor(t, func() bool { return len(m.waiting) == 1 })
-	profiles.Connections[0].Scope = config.Scope{Mode: "all"}
+	profiles.Connections[0].Scope = config.Scope{Mode: "blacklist"}
 	putProfiles(t, s, profiles)
 	for range cap(m.waiting) - 1 {
 		m.waiting <- struct{}{}

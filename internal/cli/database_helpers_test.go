@@ -6,7 +6,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/vault"
-	"strconv"
 	"strings"
 
 	"github.com/swqa7697/data-mate/internal/config"
@@ -21,6 +20,9 @@ type fixtureDatabase struct {
 	tested      []string
 	closed      bool
 	browseError bool
+	schemaCount int
+	bulkError   bool
+	bulkWait    bool
 }
 
 func (d *fixtureDatabase) ValidateProfile(p config.Profile) error {
@@ -42,44 +44,36 @@ func (d *fixtureDatabase) Test(_ context.Context, a database.Access) (database.R
 	}
 	return out, nil
 }
-func (d *fixtureDatabase) BrowseScope(_ context.Context, _ database.Access, r database.ScopeRequest) (database.ScopePage, error) {
+func (d *fixtureDatabase) BrowseScope(ctx context.Context, _ database.Access, r database.ScopeRequest) (database.ScopePage, error) {
 	d.requests = append(d.requests, r)
 	if d.browseError {
 		return database.ScopePage{}, database.Fail(contracts.ConnectFailed, "catalog fetch failed", true)
 	}
+	if d.bulkWait && len(d.requests) > 1 {
+		<-ctx.Done()
+		return database.ScopePage{}, ctx.Err()
+	}
+	if d.bulkError && len(d.requests) > 1 {
+		return database.ScopePage{}, config.ErrRevision
+	}
+	count := d.schemaCount
+	if count == 0 {
+		count = 103
+	}
+	names := []string{"Dot.Schema"}
+	for i := 0; i < count; i++ {
+		names = append(names, fmt.Sprintf("schema%04d", i))
+	}
 	p := database.ScopePage{}
-	if r.Schema == "" {
-		if r.Search == "Dot" {
-			p.Schemas = []string{"Dot.Schema"}
-			return p, nil
+	for _, name := range names {
+		if name > r.After && strings.Contains(strings.ToLower(name), strings.ToLower(r.Search)) {
+			p.Schemas = append(p.Schemas, name)
 		}
-		start := 0
-		if r.After != "" {
-			start, _ = strconv.Atoi(strings.TrimPrefix(r.After, "schema"))
-			start++
+		if len(p.Schemas) == 51 {
+			p.Schemas = p.Schemas[:50]
+			p.Next = p.Schemas[49]
+			break
 		}
-		for i := start; i < min(5000, start+50); i++ {
-			p.Schemas = append(p.Schemas, fmt.Sprintf("schema%04d", i))
-		}
-		if start+50 < 5000 {
-			p.Next = p.Schemas[len(p.Schemas)-1]
-		}
-		return p, nil
-	}
-	if r.Schema == "Dot.Schema" {
-		p.Tables = []database.Table{{Schema: r.Schema, Name: "a.b", Kind: "table"}, {Schema: r.Schema, Name: "parts", Kind: "partitioned_table"}}
-		return p, nil
-	}
-	start := 0
-	if r.After != "" {
-		start, _ = strconv.Atoi(strings.TrimPrefix(r.After, "table"))
-		start++
-	}
-	for i := start; i < min(5000, start+50); i++ {
-		p.Tables = append(p.Tables, database.Table{Schema: r.Schema, Name: fmt.Sprintf("table%04d", i), Kind: "table"})
-	}
-	if start+50 < 5000 {
-		p.Next = p.Tables[len(p.Tables)-1].Name
 	}
 	return p, nil
 }

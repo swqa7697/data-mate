@@ -182,7 +182,7 @@ func TestDistributionPublication(t *testing.T) {
 			ID: "936e3468-5b48-4ef2-9a89-964449f06d98", Alias: "retained", Driver: "postgres",
 			CredentialRef: "606f9022-9128-4ab6-bb3f-410d701ef85b",
 			Connection:    config.Connection{Host: "127.0.0.1", Port: 5432, Database: "fixture", Username: "reader"},
-			Transport:     config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"},
+			Transport:     config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"},
 		}
 		bundle := config.Ciphertext{Reference: profile.CredentialRef, ConnectionID: profile.ID, Version: 1, Data: []byte{0x01, 0x8f, 0x00, 0xfe, 0x03}}
 		key := config.KeysetMetadata{Account: initial.KeyAccount, Phase: "ready", Fingerprint: strings.Repeat("a", 64), Reserved: 1}

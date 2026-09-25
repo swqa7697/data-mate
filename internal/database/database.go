@@ -75,13 +75,12 @@ type Stage struct {
 }
 
 // ScopeRequest pages the user's full role-accessible catalog, independently of saved scope.
-// An empty Schema requests schemas; otherwise it requests that schema's tables.
-type ScopeRequest struct{ Schema, After, Search string }
+// Browsing returns schemas only; agent table metadata uses PageRequest.
+type ScopeRequest struct{ After, Search string }
 
 // ScopePage retains at most 50 catalog entries. Next is an exact name, not an agent cursor.
 type ScopePage struct {
 	Schemas []string
-	Tables  []Table
 	Next    string
 }
 

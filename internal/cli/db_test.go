@@ -206,7 +206,7 @@ func TestConnectionCRUD(t *testing.T) {
 	}
 	id := p.Connections[0].ID
 	ref := p.Connections[0].CredentialRef
-	if p.Connections[0].Scope.Mode != "all" || p.Connections[0].Transport.TLS.Mode != "disabled" || credential(t, root, keys, id).Password != password {
+	if p.Connections[0].Scope.Mode != "blacklist" || p.Connections[0].Transport.TLS.Mode != "disabled" || credential(t, root, keys, id).Password != password {
 		t.Fatal("add defaults or exact secret lost")
 	}
 	before := files(t, root)
@@ -216,7 +216,7 @@ func TestConnectionCRUD(t *testing.T) {
 	}
 	command(t, root, keys, "", 0, "edit", "analytics", "--alias", "renamed", "--none", "--yes")
 	p = snapshot(t, root)
-	if p.Connections[0].ID != id || p.Connections[0].CredentialRef != ref || p.Connections[0].Scope.ContainsName("public", "t") {
+	if p.Connections[0].ID != id || p.Connections[0].CredentialRef != ref || p.Connections[0].Scope.ContainsSchema("public") {
 		t.Fatal("rename/empty scope/credential preservation")
 	}
 
@@ -246,15 +246,15 @@ func TestConnectionCRUD(t *testing.T) {
 			t.Fatalf("plaintext persisted in %s", path)
 		}
 	}
-	command(t, root, keys, `{"ssh_password":"synthetic-ssh-secret","password":"replacement-secret"}`, 0, "edit", "renamed", "--ssh-host", "jump.local", "--ssh-user", "jump", "--tls", "--tls-ca", "/tmp/synthetic-ca.pem", "--query-timeout", "750ms", "--max-rows", "12", "--max-result-bytes", "4096", "--schema", "public", "--table", "other.Exact", "--credentials-stdin", "--yes")
+	command(t, root, keys, `{"ssh_password":"synthetic-ssh-secret","password":"replacement-secret"}`, 0, "edit", "renamed", "--ssh-host", "jump.local", "--ssh-user", "jump", "--tls", "--tls-ca", "/tmp/synthetic-ca.pem", "--query-timeout", "750ms", "--max-rows", "12", "--max-result-bytes", "4096", "--schema", "public", "--schema", "other", "--credentials-stdin", "--yes")
 	p = snapshot(t, root)
 	s := credential(t, root, keys, id)
-	if s.SSHPassword != "synthetic-ssh-secret" || s.Password != "replacement-secret" || p.Connections[0].Limits.QueryTimeoutMS != 750 || !p.Connections[0].Scope.ContainsName("other", "Exact") {
+	if s.SSHPassword != "synthetic-ssh-secret" || s.Password != "replacement-secret" || p.Connections[0].Limits.QueryTimeoutMS != 750 || !p.Connections[0].Scope.ContainsSchema("other") {
 		t.Fatal("advanced settings or secrets lost")
 	}
-	command(t, root, keys, "", 0, "edit", "renamed", "--clear-password", "--tls", "--scope-json", `{"mode":"selected","tables":[{"schema":"a.b","name":"c.d"}]}`, "--yes")
+	command(t, root, keys, "", 0, "edit", "renamed", "--clear-password", "--tls", "--scope-json", `{"mode":"whitelist","schemas":["a.b"]}`, "--yes")
 	p = snapshot(t, root)
-	if p.Connections[0].Transport.TLS.CAFile != "/tmp/synthetic-ca.pem" || !p.Connections[0].Scope.ContainsName("a.b", "c.d") {
+	if p.Connections[0].Transport.TLS.CAFile != "/tmp/synthetic-ca.pem" || !p.Connections[0].Scope.ContainsSchema("a.b") {
 		t.Fatal("TLS edit lost omitted CA or structured scope lost exact identifiers")
 	}
 	s = credential(t, root, keys, id)
@@ -272,17 +272,22 @@ func TestConnectionCRUD(t *testing.T) {
 		t.Fatal("five-minute timeout was not saved")
 	}
 	// P7 scope replacement is nonsecret and requires neither network nor vault.
+	command(t, root, keys, "", 0, "scope", "renamed", "--exclude-schema", "public", "--exclude-schema", "Mixed.Case", "--yes")
+	excluded := snapshot(t, root).Connections[0].Scope
+	if excluded.Mode != "blacklist" || excluded.ContainsSchema("public") || excluded.ContainsSchema("Mixed.Case") || !excluded.ContainsSchema("future") || !excluded.ContainsSchema("mixed.case") {
+		t.Fatal("blacklist replacement lost exact exclusions or future access")
+	}
 	beforeScope := snapshot(t, root).Connections[0]
 	calls = keys.calls
 	keys.denied = true
 	for _, args := range [][]string{
-		{"--all"}, {"--none"}, {"--schema", "public", "--table", "other.Exact"},
-		{"--scope-json", `{"mode":"selected","tables":[{"schema":"a.b","name":"c.d"}]}`},
+		{"--all"}, {"--none"}, {"--schema", "public", "--schema", "other"},
+		{"--scope-json", `{"mode":"whitelist","schemas":["a.b"]}`},
 	} {
 		command(t, root, keys, "", 0, append([]string{"scope", "renamed", "--yes"}, args...)...)
 	}
 	afterScope := snapshot(t, root).Connections[0]
-	if !afterScope.Scope.ContainsName("a.b", "c.d") || afterScope.Scope.ContainsName("public", "future") || keys.calls != calls {
+	if !afterScope.Scope.ContainsSchema("a.b") || afterScope.Scope.ContainsSchema("public") || keys.calls != calls {
 		t.Fatal("scope replacement used credentials or lost exact names")
 	}
 	afterScope.Scope = beforeScope.Scope
@@ -293,7 +298,12 @@ func TestConnectionCRUD(t *testing.T) {
 	for _, args := range [][]string{
 		{"scope", "renamed", "--yes"}, {"scope", "renamed", "--none"},
 		{"scope", "renamed", "--all", "--none", "--yes"},
-		{"scope", "renamed", "--table", "a.b.c", "--yes"},
+		{"scope", "renamed", "--table", "public.orders", "--yes"},
+		{"scope", "renamed", "--schema", "public", "--exclude-schema", "hidden", "--yes"},
+		{"scope", "renamed", "--all", "--exclude-schema", "hidden", "--yes"},
+		{"scope", "renamed", "--scope-json", `{"mode":"whitelist","tables":[{"schema":"public","name":"orders"}]}`, "--yes"},
+		{"scope", "renamed", "--scope-json", `{"mode":"all"}`, "--yes"},
+		{"scope", "renamed", "--scope-json", `{"mode":"selected","schemas":["public"]}`, "--yes"},
 		{"scope", "--all", "--yes"},
 	} {
 		command(t, root, keys, "", 2, args...)

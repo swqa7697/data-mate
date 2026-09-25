@@ -102,7 +102,7 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			p.Connections = append(p.Connections, config.Profile{ID: id, Alias: fmt.Sprintf("native-%d", i), Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}})
+			p.Connections = append(p.Connections, config.Profile{ID: id, Alias: fmt.Sprintf("native-%d", i), Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"}})
 			replacements[id] = vault.Secrets{Password: secret}
 		}
 		if _, err := repo.Apply(ctx, vault.Mutation{Expected: rev, Profiles: p, Replacements: replacements}); err != nil {

@@ -22,19 +22,14 @@ const maxCatalogObjects = 4096
 const visibleSQL = `n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema'
  AND c.relkind IN ('r','p','v','m','f') AND c.relpersistence<>'t'
  AND pg_catalog.has_schema_privilege(n.oid,'USAGE') AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.has_any_column_privilege(c.oid,'SELECT'))
- AND ($1::boolean OR n.nspname::text=ANY($2::text[]) OR EXISTS (SELECT FROM pg_catalog.jsonb_to_recordset($3::jsonb) AS s(schema text,name text) WHERE s.schema=n.nspname AND s.name=c.relname))`
+ AND (($1::text='blacklist' AND NOT (n.nspname::text=ANY($2::text[]))) OR ($1::text='whitelist' AND n.nspname::text=ANY($2::text[])))`
 
 func scopeArgs(s config.Scope) []any {
-	tables := s.Tables
-	if tables == nil {
-		tables = []config.Table{}
-	}
-	b, _ := json.Marshal(tables)
 	schemas := s.Schemas
 	if schemas == nil {
 		schemas = []string{}
 	}
-	return []any{s.Mode == "all", schemas, string(b)}
+	return []any{s.Mode, schemas}
 }
 func validName(s string) bool {
 	return s != "" && len(s) <= 63 && utf8.ValidString(s) && !strings.ContainsRune(s, 0)
@@ -121,8 +116,8 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	err = d.run(ctx, a, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		args := append(scopeArgs(a.Profile.Scope), req.Schema, pos.Schema, pos.Name, req.PageSize+1)
 		rows, err := tx.Query(ctx, `SELECT n.nspname,c.relname,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+`
- AND ($4::text='' OR n.nspname=$4) AND (n.nspname::text COLLATE "C",c.relname::text COLLATE "C") > ($5::text COLLATE "C",$6::text COLLATE "C")
- ORDER BY n.nspname::text COLLATE "C",c.relname::text COLLATE "C" LIMIT $7`, args...)
+ AND ($3::text='' OR n.nspname=$3) AND (n.nspname::text COLLATE "C",c.relname::text COLLATE "C") > ($4::text COLLATE "C",$5::text COLLATE "C")
+ ORDER BY n.nspname::text COLLATE "C",c.relname::text COLLATE "C" LIMIT $6`, args...)
 		if err != nil {
 			return err
 		}
@@ -191,7 +186,7 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 		args := append(scopeArgs(a.Profile.Scope), name.Schema, name.Name)
 		var oid uint32
 		var k string
-		err := tx.QueryRow(ctx, `SELECT c.oid,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+` AND n.nspname=$4 AND c.relname=$5`, args...).Scan(&oid, &k)
+		err := tx.QueryRow(ctx, `SELECT c.oid,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+` AND n.nspname=$3 AND c.relname=$4`, args...).Scan(&oid, &k)
 		if err == pgx.ErrNoRows {
 			return database.Fail(contracts.ScopeDenied, "relation is outside the accessible scope", false)
 		}
@@ -221,7 +216,7 @@ func constraints(ctx context.Context, tx pgx.Tx, oid uint32, scope config.Scope,
  COALESCE(n.nspname::text,''),COALESCE(c.relname::text,''),
  ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(k.confkey) WITH ORDINALITY x(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=k.confrelid AND a.attnum=x.num ORDER BY x.ord)
  FROM pg_catalog.pg_constraint k LEFT JOIN pg_catalog.pg_class c ON c.oid=k.confrelid LEFT JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
- WHERE k.conrelid=$4 AND k.contype IN ('p','u','f') AND (k.contype<>'f' OR (`+visibleSQL+`)) ORDER BY k.oid LIMIT 4097`, args...)
+ WHERE k.conrelid=$3 AND k.contype IN ('p','u','f') AND (k.contype<>'f' OR (`+visibleSQL+`)) ORDER BY k.oid LIMIT 4097`, args...)
 	if err != nil {
 		return err
 	}

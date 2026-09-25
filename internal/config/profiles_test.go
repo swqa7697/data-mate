@@ -18,16 +18,20 @@ func TestProfiles(t *testing.T) {
 		t.Fatal("revision/default limits")
 	}
 	c := p.Connections[0]
-	if !c.Scope.ContainsName("Any", "Table") {
+	if !c.Scope.ContainsSchema("Any") {
 		t.Fatal("all")
 	}
-	c.Scope = Scope{Mode: "selected"}
-	if c.Scope.ContainsName("public", "orders") {
+	c.Scope = Scope{Mode: "whitelist"}
+	if c.Scope.ContainsSchema("public") {
 		t.Fatal("empty scope broadened")
 	}
-	c.Scope = Scope{Mode: "selected", Schemas: []string{"Mixed.Case"}, Tables: []Table{{"public", "orders"}}}
-	if !c.Scope.ContainsName("Mixed.Case", "anything") || c.Scope.ContainsName("mixed.case", "anything") || !c.Scope.ContainsName("public", "orders") {
+	c.Scope = Scope{Mode: "whitelist", Schemas: []string{"Mixed.Case", "public"}}
+	if !c.Scope.ContainsSchema("Mixed.Case") || c.Scope.ContainsSchema("mixed.case") || !c.Scope.ContainsSchema("public") {
 		t.Fatal("exact scope")
+	}
+	c.Scope = Scope{Mode: "blacklist", Schemas: []string{"Mixed.Case", "public"}}
+	if c.Scope.ContainsSchema("Mixed.Case") || c.Scope.ContainsSchema("public") || !c.Scope.ContainsSchema("mixed.case") || !c.Scope.ContainsSchema("future") {
+		t.Fatal("blacklist did not exclude exact schemas")
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, original); err != nil {
@@ -80,10 +84,12 @@ func TestProfiles(t *testing.T) {
 		"embedded secret":     func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
 		"null scope":          func(c map[string]any) { c["scope"] = nil },
 		"absent scope":        func(c map[string]any) { delete(c, "scope") },
-		"mixed all":           func(c map[string]any) { c["scope"] = map[string]any{"mode": "all", "schemas": []string{"public"}} },
-		"duplicate schema":    func(c map[string]any) { c["scope"] = map[string]any{"mode": "selected", "schemas": []string{"x", "x"}} },
-		"duplicate table": func(c map[string]any) {
-			c["scope"] = map[string]any{"mode": "selected", "tables": []any{map[string]any{"schema": "x", "name": "y"}, map[string]any{"schema": "x", "name": "y"}}}
+		"legacy mode":         func(c map[string]any) { c["scope"] = map[string]any{"mode": "all", "schemas": []string{"public"}} },
+		"duplicate schema": func(c map[string]any) {
+			c["scope"] = map[string]any{"mode": "whitelist", "schemas": []string{"x", "x"}}
+		},
+		"obsolete table scope": func(c map[string]any) {
+			c["scope"] = map[string]any{"mode": "whitelist", "tables": []any{map[string]any{"schema": "x", "name": "y"}, map[string]any{"schema": "x", "name": "y"}}}
 		},
 		"tls ca disabled": func(c map[string]any) {
 			c["transport"].(map[string]any)["tls"] = map[string]any{"mode": "disabled", "ca_file": "/tmp/test.pem"}
@@ -132,7 +138,7 @@ func TestRevisionNormalizationAndUniqueReferences(t *testing.T) {
 	if err := json.Unmarshal(profileFixture(t), &p); err != nil {
 		t.Fatal(err)
 	}
-	p.Connections[0].Scope = Scope{Mode: "selected", Schemas: []string{"z", "a"}}
+	p.Connections[0].Scope = Scope{Mode: "whitelist", Schemas: []string{"z", "a"}}
 	encode := func() (Revision, error) {
 		b, _ := json.Marshal(p)
 		_, r, e := DecodeProfiles(bytes.NewReader(b))
@@ -149,7 +155,7 @@ func TestRevisionNormalizationAndUniqueReferences(t *testing.T) {
 	if err != nil || first != second {
 		t.Fatal("normalization changed revision")
 	}
-	p.Connections[0].Scope = Scope{Mode: "selected"}
+	p.Connections[0].Scope = Scope{Mode: "whitelist"}
 	third, err := encode()
 	if err != nil {
 		t.Fatal(err)

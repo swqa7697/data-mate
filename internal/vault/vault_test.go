@@ -119,7 +119,7 @@ func testProfile(t *testing.T, n int) config.Profile {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return config.Profile{ID: id, Alias: fmt.Sprintf("connection-%d", n), Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}}
+	return config.Profile{ID: id, Alias: fmt.Sprintf("connection-%d", n), Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"}}
 }
 func snapshot(t *testing.T, r *Repository) (config.Profiles, config.Revision) {
 	t.Helper()

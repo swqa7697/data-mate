@@ -78,19 +78,19 @@ During development, `make dev ARGS="..."` invokes the installed binary with the 
 
 The table below describes implemented commands. Section 13.1 defines production command availability and completion.
 
-| Command                              | Behavior                                                                            |
-| ------------------------------------ | ----------------------------------------------------------------------------------- |
-| `db add [options]`                   | Collect a connection, preview nonsecret settings, confirm, and save                 |
-| `db edit [alias]`                    | Select a connection when omitted; edit, preview, confirm, and save                  |
-| `db scope [alias]`                   | Select a connection when omitted; replace visible schemas/tables after confirmation |
-| `db remove [alias]`, `db rm [alias]` | Confirm removal of a profile and its credentials                                    |
-| `db list`, `db ls`                   | Show aliases, driver, endpoint, database, and scope                                 |
-| `db test [alias]`                    | Diagnose one connection, or all in alias order when omitted                         |
-| `mcp start`                          | Start or reuse the service, then ensure supported-agent registrations               |
-| `mcp stop`                           | Stop the service and sessions; preserve profiles and registrations                  |
-| `mcp status`                         | Passively report service and supported-agent registration states                    |
-| `upgrade`, `update`                  | Install the latest verified stable release in production; development uses Make     |
-| `help`, `version`                    | Show usage or build version                                                         |
+| Command                              | Behavior                                                                        |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| `db add [options]`                   | Collect a connection, preview nonsecret settings, confirm, and save             |
+| `db edit [alias]`                    | Select a connection when omitted; edit, preview, confirm, and save              |
+| `db scope [alias]`                   | Select a connection when omitted; replace allowed schemas after confirmation    |
+| `db remove [alias]`, `db rm [alias]` | Confirm removal of a profile and its credentials                                |
+| `db list`, `db ls`                   | Show aliases, driver, endpoint, database, and scope                             |
+| `db test [alias]`                    | Diagnose one connection, or all in alias order when omitted                     |
+| `mcp start`                          | Start or reuse the service, then ensure supported-agent registrations           |
+| `mcp stop`                           | Stop the service and sessions; preserve profiles and registrations              |
+| `mcp status`                         | Passively report service and supported-agent registration states                |
+| `upgrade`, `update`                  | Install the latest verified stable release in production; development uses Make |
+| `help`, `version`                    | Show usage or build version                                                     |
 
 Confirmed profile changes start or reuse the management-only service without exposing MCP or registering agents. `db test` and interactive catalog browsing also use that service. Listing and previews remain passive nonsecret reads. `mcp start` explicitly enables agent access. There is no activation command, login, or per-agent grant workflow.
 
@@ -119,11 +119,13 @@ A profile and its encrypted bundle are removed in the same SQLite transaction. T
 
 ### 3.2 Scope selection
 
-Add, edit, and scope commands accept `--all`, `--none`, repeated `--schema`, repeated `--table schema.table`, or `--scope-json`. Schema and table selections can be combined; all/none/JSON are mutually exclusive with those selections. Structured JSON preserves identifiers containing dots or other ambiguous characters. Scripted replacement performs no catalog fetch or credential access for the scope operation.
+Add, edit, and scope commands accept mutually exclusive `--all`, `--none`, repeated `--schema`, repeated `--exclude-schema`, or `--scope-json`. `--schema` replaces the whitelist; `--exclude-schema` replaces the blacklist. `--all` saves an empty blacklist and `--none` saves an empty whitelist. Structured JSON contains `mode` (`whitelist` or `blacklist`) and an optional `schemas` list. Scripted replacement performs no catalog fetch or credential access for the scope operation. Table scope and `--table` are unsupported.
 
-Interactive `db scope` browses the role's accessible application catalog independently of saved scope. Up/Down navigates, Right expands a schema, Left returns to schemas, Space toggles, `/` searches, `n` advances, and `b` restarts pagination. `a` selects all and `0` clears the selection. Enter previews the result before a final default-No confirmation. Whole-schema selection includes current and future tables. To narrow an all/schema selection, clear that broad selection before choosing individual tables.
+Interactive `db scope` browses accessible application schemas independently of saved scope. Up/Down navigates, Space immediately toggles a checkbox, `/` searches, `n` advances, and `b` restarts pagination. `a` checks all schemas unless all are checked, in which case it clears all. Bulk actions ignore search and retain the current mode. `m` switches modes while preserving checkboxes by complementing the list over accessible schemas plus saved names, retaining known explicit names during the picker session. A missing saved name keeps its allowed/blocked state during conversion. Names not in that universe follow the new mode's future-schema policy. Enter previews before a final default-No confirmation; `q`/Ctrl-C cancels.
 
-Each fetch retains at most 50 schemas or tables and performs literal case-insensitive search at the current level. Selections absent from the current page remain intact. Search is bounded to 256 bytes; interactive selections are bounded to 4096 schemas/tables and half the profile byte budget. Catalog browsing never authorizes a query.
+The picker highlights the cursor and selected markers, uses muted concise help, and honors `NO_COLOR`. Text markers remain readable without color; schema/search names are quoted to prevent terminal control injection. The mode label states whether new schemas are allowed or blocked.
+
+Ordinary fetches retain at most 50 schemas with literal case-insensitive search bounded to 256 bytes. Selection survives pagination and filtering. Bulk actions and mode conversion scan unfiltered pages under a cancellable 30-second deadline, bounded to a 4,096-name universe and half the profile byte budget. Failure or overflow leaves the selection unchanged and displays a safe error. The same count bound applies to saved scope lists. Catalog browsing never authorizes a query.
 
 Each service-side fetch opens a fresh shared state lease, verifies the preview revision, and reads credentials and host pins under that lease. Database cleanup finishes before lease release; human input holds no lease. Final scope publication uses an exclusive lease and SQLite transaction with revision comparison, without decrypting credentials. Browsing starts/reuses the management service but never creates or repairs credentials; scripted scope replacement needs no catalog access or keyset unlock.
 
@@ -242,7 +244,7 @@ The logical profile representation retains the nonsecret fields described in [pr
       },
       "credential_ref": "4a43b349-904a-49b7-8395-7af73d613165",
       "transport": { "tls": { "mode": "disabled" } },
-      "scope": { "mode": "all" }
+      "scope": { "mode": "blacklist" }
     }
   ]
 }
@@ -252,7 +254,7 @@ The logical profile representation retains the nonsecret fields described in [pr
 
 Strict decoding rejects unknown fields/versions, recursive duplicate keys, trailing values, invalid UTF-8, duplicate IDs/aliases/credential references, invalid ports, and embedded secret fields. Profiles are bounded to 1 MiB and 128 connections. Aliases match `^[a-z][a-z0-9_-]{0,62}$`. UUID comparisons normalize case; scope names preserve it. The PostgreSQL connection object accepts explicit fields, with no DSN or unrestricted option-string passthrough.
 
-Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-path}`, optional SSH `{host,port,user,auth:"password"|"key"}`, or optional SOCKS5 `{kind:"socks5",host,port,username?}`. Authentication material stays in the vault. CA files require verified TLS; SSH and SOCKS5 are mutually exclusive. Missing scope is invalid; profile creation explicitly chooses all.
+Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-path}`, optional SSH `{host,port,user,auth:"password"|"key"}`, or optional SOCKS5 `{kind:"socks5",host,port,username?}`. Authentication material stays in the vault. CA files require verified TLS; SSH and SOCKS5 are mutually exclusive. Missing scope is invalid; profile creation explicitly chooses an empty blacklist.
 
 | Optional limit     | Default | Accepted range |
 | ------------------ | ------- | -------------- |
@@ -333,17 +335,20 @@ Pin Tink, the SQLite driver, and any OS binding when implementing; do not assume
 
 Each profile addresses one database. Direct relation visibility intersects configured application scope and the database role's privileges. All scope does not grant missing privileges or bypass query validation.
 
-| Scope                                                                                        | Meaning                                                                                |
-| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `{"mode":"all"}`                                                                             | All accessible application schemas/tables, including future ones; the creation default |
-| `{"mode":"selected","schemas":["reporting"],"tables":[{"schema":"public","name":"orders"}]}` | All tables in `reporting` plus `public.orders`                                         |
-| `{"mode":"selected","schemas":[],"tables":[]}`                                               | No visible objects                                                                     |
+| Scope                                          | Meaning                                                                         |
+| ---------------------------------------------- | ------------------------------------------------------------------------------- |
+| `{"mode":"blacklist"}`                         | All accessible application schemas, including future ones; the creation default |
+| `{"mode":"blacklist","schemas":["private"]}`   | All accessible application schemas except `private`, including future schemas   |
+| `{"mode":"whitelist","schemas":["reporting"]}` | Only `reporting`, including its current and future tables                       |
+| `{"mode":"whitelist"}`                         | No directly visible relations, including in future schemas                      |
 
-Selected schemas and tables form a union of exact, case-preserving names. There are no patterns or exclusions. Future tables enter through all or whole-schema selection. Renamed/missing explicit names remain unavailable; recreating a selected name selects the replacement object. Scope is name-based.
+Scope lists contain unique exact, case-preserving schema names with no patterns. An omitted list is empty. A schema rename follows its new name's policy; recreating a listed name applies that name's saved policy. Tables are never independently selected. Queries, catalog lists, descriptions and foreign-key endpoints apply the same schema policy alongside PostgreSQL privileges.
+
+Old `all`/`selected` modes and `tables` fields fail strict decoding. There is no migration, legacy alias or automatic reset; invalid saved profiles remain untouched and block operations. Existing profiles must be recreated through the new format. SQLite layout and the outer profile version remain unchanged.
 
 Agent catalog tools apply saved scope and role privileges in parameterized SQL before C-collated keyset pagination. The user's scope picker can inspect the role's full accessible application catalog. Relations readable through table-level or column-level SELECT grants are discoverable. Each page uses one relation query, with no per-relation inspection. Descriptions expose actual type names, columns, keys and visible foreign-key endpoints; they omit expressions and defaults. There are no `supported` or `reason` fields.
 
-Scope applies to direct schema-qualified relation references, including views, materialized views and foreign tables. PostgreSQL owns indirect dependencies, partitions, ordinary inheritance, RLS and functions; these are not recursively restricted by saved scope. This is a convenience boundary on direct references, not database-enforced isolation against routines or views. `pg_*` schemas and `information_schema` remain excluded even in `all` scope. An empty selection permits no direct relations but still permits relation-free queries and trusted functions.
+Scope applies to direct schema-qualified relation references, including views, materialized views and foreign tables. PostgreSQL owns indirect dependencies, partitions, ordinary inheritance, RLS and functions; these are not recursively restricted by saved scope. This is a convenience boundary on direct references, not database-enforced isolation against routines or views. `pg_*` schemas and `information_schema` remain excluded even with an empty blacklist. An empty whitelist permits no direct relations but still permits relation-free queries and trusted functions.
 
 Authenticated cursors bind version, profile ID/revision, schema filter, position, and process invalidation epoch. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600 and constraints at 4096 entries, with deadlines and encoded-size accounting. Metadata shares the profile result-byte cap.
 
@@ -627,7 +632,7 @@ Use the pinned [Cobra completion support](https://cobra.dev/docs/how-to-guides/s
 | `data-mate db scope analytics --`                     | Valid flags for that command                         |
 | A flag with a finite value set or explicit local path | Allowed values or appropriately filtered local paths |
 
-Alias completion also applies to scope, remove/rm, and test. It uses the existing passive nonsecret store reader against the fixed production root or the development root selected by its default/explicit `--root`, and never starts a service, creates files, accesses Keychain, or queries PostgreSQL. Bound the lookup to 100 ms, 256 candidates, and 64 KiB of output; unavailable, locked, missing, or invalid state yields no dynamic candidates without terminal diagnostics. Static command/flag completion remains available. Disable arbitrary filename fallback for alias and secret-valued arguments. Omit hidden service/bridge/install commands and suppress schema/table catalog completion because that would require live database access. Escape shell metacharacters and omit candidates containing control characters; a stored alias is data, never shell code.
+Alias completion also applies to scope, remove/rm, and test. It uses the existing passive nonsecret store reader against the fixed production root or the development root selected by its default/explicit `--root`, and never starts a service, creates files, accesses Keychain, or queries PostgreSQL. Bound the lookup to 100 ms, 256 candidates, and 64 KiB of output; unavailable, locked, missing, or invalid state yields no dynamic candidates without terminal diagnostics. Static command/flag completion remains available. Disable arbitrary filename fallback for alias and secret-valued arguments. Omit hidden service/bridge/install commands and suppress schema catalog completion because that would require live database access. Escape shell metacharacters and omit candidates containing control characters; a stored alias is data, never shell code.
 
 Install generated scripts and small shell loaders under the owned `shell/` directory. By default, the installer configures the user's supported login shell with one uniquely marked block sourcing its absolute loader path, and records the exact startup file and block fingerprint. A bootstrap `--no-shell` option installs the executable/completion assets and prints manual activation instructions without modifying shell startup files. Unsupported shells receive manual PATH guidance. Installer output distinguishes successful binary installation from incomplete shell setup.
 

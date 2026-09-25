@@ -17,7 +17,7 @@
         }
       },
       "scope": {
-        "mode": "all"
+        "mode": "blacklist"
       }
     }
   ]

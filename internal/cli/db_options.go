@@ -45,13 +45,12 @@ func profileFlags(cmd *cobra.Command) {
 }
 func scopeFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.Bool("all", false, "Expose all accessible tables")
-	f.Bool("none", false, "Expose no tables")
-	f.String("scope-json", "", "Exact nonsecret scope JSON")
-	f.StringArray("schema", nil, "All current and future tables in an exact schema (repeatable)")
-	f.StringArray("table", nil, "Exact schema.table selection (repeatable)")
-	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "schema")
-	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "table")
+	f.Bool("all", false, "Allow all accessible schemas, including future schemas")
+	f.Bool("none", false, "Allow no schemas, including future schemas")
+	f.String("scope-json", "", "Exact nonsecret schema scope JSON")
+	f.StringArray("schema", nil, "Allow only these exact schemas (repeatable whitelist)")
+	f.StringArray("exclude-schema", nil, "Allow all except these exact schemas (repeatable blacklist)")
+	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "schema", "exclude-schema")
 }
 func str(cmd *cobra.Command, name string) string  { v, _ := cmd.Flags().GetString(name); return v }
 func flag(cmd *cobra.Command, name string) bool   { v, _ := cmd.Flags().GetBool(name); return v }
@@ -158,32 +157,24 @@ func applyOptions(cmd *cobra.Command, p *config.Profile) error {
 	return applyScope(cmd, p)
 }
 func applyScope(cmd *cobra.Command, p *config.Profile) error {
-	if flag(cmd, "all") || flag(cmd, "none") || changed(cmd, "scope-json", "schema", "table") {
-		p.Scope = config.Scope{Mode: "selected"}
-		if flag(cmd, "all") {
-			p.Scope.Mode = "all"
-		}
-		if changed(cmd, "scope-json") {
-			b, err := contracts.JSON(strings.NewReader(str(cmd, "scope-json")), config.MaxProfileBytes)
-			if err != nil || contracts.Validate("scope", b) != nil {
-				return invalid("invalid scope JSON")
-			}
-			if json.Unmarshal(b, &p.Scope) != nil {
-				return invalid("invalid scope JSON")
-			}
-		} else {
-			p.Scope.Schemas, _ = cmd.Flags().GetStringArray("schema")
-			tables, _ := cmd.Flags().GetStringArray("table")
-			for _, t := range tables {
-				parts := strings.Split(t, ".")
-				if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-					return invalid("table requires schema.table; use --scope-json for names containing dots")
-				}
-				p.Scope.Tables = append(p.Scope.Tables, config.Table{Schema: parts[0], Name: parts[1]})
-			}
-		}
+	if !scopeSelected(cmd) {
+		return nil
 	}
-
+	scope := config.Scope{Mode: "whitelist"}
+	if flag(cmd, "all") || changed(cmd, "exclude-schema") {
+		scope.Mode = "blacklist"
+	}
+	if changed(cmd, "scope-json") {
+		b, err := contracts.JSON(strings.NewReader(str(cmd, "scope-json")), config.MaxProfileBytes)
+		if err != nil || contracts.Validate("scope", b) != nil || json.Unmarshal(b, &scope) != nil {
+			return invalid("invalid scope JSON")
+		}
+	} else if changed(cmd, "exclude-schema") {
+		scope.Schemas, _ = cmd.Flags().GetStringArray("exclude-schema")
+	} else {
+		scope.Schemas, _ = cmd.Flags().GetStringArray("schema")
+	}
+	p.Scope = scope
 	return nil
 }
 func sshHost(p *config.Profile) string {

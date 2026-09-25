@@ -47,7 +47,7 @@ func TestSchemasAndFixtures(t *testing.T) {
 func TestToolInputsFailClosed(t *testing.T) {
 	cases := map[string][]string{
 		"list_connections.input": {`{"host":"secret"}`, `null`},
-		"list_tables.input":      {`{}`, `{"connection":"analytics","page_size":501}`, `{"connection":"analytics","scope":{"mode":"all"}}`},
+		"list_tables.input":      {`{}`, `{"connection":"analytics","page_size":501}`, `{"connection":"analytics","scope":{"mode":"blacklist"}}`},
 		"describe_table.input":   {`{"connection":"analytics","schema":"public"}`},
 		"query.input":            {`{"connection":"analytics","sql":"select 1","timeout":99}`, `{"connection":"analytics","sql":"select 1","row_limit":0}`, `{"connection":"analytics","sql":"select $1","parameters":{}}`},
 	}

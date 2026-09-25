@@ -118,7 +118,7 @@ func Check(sql string, scope config.Scope) error {
 				}
 				return database.Fail(contracts.ScopeDenied, "physical relations must use schema-qualified names", false)
 			}
-			if strings.HasPrefix(r.Schemaname, "pg_") || r.Schemaname == "information_schema" || !scope.ContainsName(r.Schemaname, r.Relname) {
+			if strings.HasPrefix(r.Schemaname, "pg_") || r.Schemaname == "information_schema" || !scope.ContainsSchema(r.Schemaname) {
 				return scopeDenied()
 			}
 			return nil

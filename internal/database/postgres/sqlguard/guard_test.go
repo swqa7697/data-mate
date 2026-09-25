@@ -14,7 +14,7 @@ import (
 // Replaces the compiler boundary corpus: scope and writes remain guarded while
 // expression, type and execution semantics are delegated to PostgreSQL.
 func TestQueryGuard(t *testing.T) {
-	scope := config.Scope{Mode: "selected", Schemas: []string{"app", "Dot.Schema"}}
+	scope := config.Scope{Mode: "whitelist", Schemas: []string{"app", "Dot.Schema"}}
 	positive := []string{
 		"SELECT 1", "VALUES (1),(2)", "TABLE app.items", "SELECT * FROM ONLY app.items",
 		"SELECT count(*) FROM app.items", "SELECT ARRAY[1,NULL], E'escaped\\ntext', $$dollar; quoted$$",
@@ -51,7 +51,17 @@ func TestQueryGuard(t *testing.T) {
 			t.Errorf("rejected query accepted: %.200s", q)
 		}
 	}
-	if Check("SELECT * FROM pg_catalog.pg_class", config.Scope{Mode: "all"}) == nil {
+	// The same direct references must be checked in nested queries for blacklists.
+	blocked := config.Scope{Mode: "blacklist", Schemas: []string{"hidden"}}
+	for _, q := range []string{"SELECT * FROM hidden.items", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.items)", "SELECT * FROM pg_catalog.pg_class"} {
+		if Check(q, blocked) == nil {
+			t.Fatalf("blacklist accepted %s", q)
+		}
+	}
+	if err := Check("SELECT * FROM future.items", blocked); err != nil {
+		t.Fatal("blacklist blocked future schema", err)
+	}
+	if Check("SELECT * FROM pg_catalog.pg_class", config.Scope{Mode: "blacklist"}) == nil {
 		t.Fatal("all exposes catalog")
 	}
 }
@@ -64,7 +74,7 @@ func FuzzQueryGuard(f *testing.F) {
 		if len(q) > 4096 {
 			return
 		}
-		_ = Check(q, config.Scope{Mode: "all"})
+		_ = Check(q, config.Scope{Mode: "blacklist"})
 	})
 }
 
@@ -74,7 +84,7 @@ func TestNativeParserBudget(t *testing.T) {
 	if os.Getenv("DM_PARSER_CHILD") == "1" {
 		corpus := []string{"SELECT " + strings.Repeat("- ", 8000) + "1", "SELECT " + strings.Repeat("NOT ", 8000) + "true", "SELECT " + strings.Repeat("1 + ", 2000) + "1", "SELECT " + strings.Repeat("(", 64) + "1" + strings.Repeat(")", 64), "SELECT $$" + strings.Repeat("(", 60000) + "$$::text", "/*" + strings.Repeat("/*", 64) + strings.Repeat("*/", 65) + "SELECT 1"}
 		for _, s := range corpus {
-			_ = Check(s, config.Scope{Mode: "all"})
+			_ = Check(s, config.Scope{Mode: "blacklist"})
 		}
 		return
 	}

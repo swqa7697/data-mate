@@ -24,7 +24,7 @@ import (
 func newDB(override *string, factory managementFactory, build Build) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, action := range []string{"add", "edit", "remove", "list", "scope"} {
-		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose visible schemas and tables"}[action], Args: cobra.MaximumNArgs(1)}
+		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose allowed schemas"}[action], Args: cobra.MaximumNArgs(1)}
 		if action == "add" || action == "list" {
 			cmd.Args = cobra.NoArgs
 		}
@@ -146,7 +146,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		if err != nil {
 			return failure("cannot generate connection identity")
 		}
-		profile = config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}}
+		profile = config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"}}
 	} else {
 		profile = profiles.Connections[index]
 		original = profile
@@ -305,14 +305,17 @@ func storageError(err error, input bool) error {
 	return failure("cannot save connection state; existing credentials were preserved")
 }
 func scopeSummary(s config.Scope) string {
-	if s.Mode == "all" {
-		return "all accessible tables"
+	if len(s.Schemas) == 0 {
+		if s.Mode == "blacklist" {
+			return "all accessible schemas (new schemas allowed)"
+		}
+		return "none (new schemas blocked)"
 	}
-	if len(s.Schemas) == 0 && len(s.Tables) == 0 {
-		return "none"
+	b, _ := json.Marshal(s.Schemas)
+	if s.Mode == "blacklist" {
+		return "all schemas except " + string(b) + " (new schemas allowed)"
 	}
-	b, _ := json.Marshal(s)
-	return string(b)
+	return "only schemas " + string(b) + " (new schemas blocked)"
 }
 func previewProfile(w io.Writer, action string, p config.Profile, secretsChanged, color bool) error {
 	title := "Review " + action

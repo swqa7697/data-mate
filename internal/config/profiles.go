@@ -107,17 +107,18 @@ type Table struct {
 	Name   string `json:"name"`
 }
 
-// Scope selects all accessible application relations or a union of exact names.
+// Scope controls application schemas by exact, case-sensitive names.
+// An empty blacklist allows all schemas; an empty whitelist allows none.
 type Scope struct {
 	Mode    string   `json:"mode"`
 	Schemas []string `json:"schemas,omitempty"`
-	Tables  []Table  `json:"tables,omitempty"`
 }
 
-// ContainsName checks direct relation selection. Drivers exclude system schemas;
+// ContainsSchema checks direct schema selection. Drivers exclude system schemas;
 // PostgreSQL enforces privileges and indirect view/function dependencies.
-func (s Scope) ContainsName(schema, table string) bool {
-	return s.Mode == "all" || (s.Mode == "selected" && (slices.Contains(s.Schemas, schema) || slices.Contains(s.Tables, Table{schema, table})))
+func (s Scope) ContainsSchema(schema string) bool {
+	listed := slices.Contains(s.Schemas, schema)
+	return (s.Mode == "blacklist" && !listed) || (s.Mode == "whitelist" && listed)
 }
 
 // Revision is the SHA-256 of validated normalized profile data.
@@ -157,12 +158,6 @@ func DecodeProfiles(r io.Reader) (Profiles, Revision, error) {
 			c.Limits = &v
 		}
 		slices.Sort(c.Scope.Schemas)
-		slices.SortFunc(c.Scope.Tables, func(a, b Table) int {
-			if n := strings.Compare(a.Schema, b.Schema); n != 0 {
-				return n
-			}
-			return strings.Compare(a.Name, b.Name)
-		})
 	}
 	slices.SortFunc(p.Connections, func(a, b Profile) int { return strings.Compare(a.ID, b.ID) })
 	canonical, err := json.Marshal(p)

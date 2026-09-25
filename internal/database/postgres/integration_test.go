@@ -22,7 +22,7 @@ import (
 )
 
 func profile() config.Profile {
-	return config.Profile{ID: "12345678-1234-1234-1234-123456789abc", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "localhost", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}}
+	return config.Profile{ID: "12345678-1234-1234-1234-123456789abc", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "localhost", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"}}
 }
 func driver(t *testing.T) *Driver {
 	t.Helper()
@@ -185,7 +185,7 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Fatal("readiness audited grants", err)
 	}
 	sql("REVOKE UPDATE ON app.items FROM reader")
-	p.Scope = config.Scope{Mode: "selected", Schemas: []string{"app"}, Tables: []config.Table{{Schema: "Dot.Schema", Name: "a.b"}}}
+	p.Scope = config.Scope{Mode: "whitelist", Schemas: []string{"app", "Dot.Schema"}}
 	access = database.NewAccess(p, password)
 	seen := map[string]database.Table{}
 	req := database.PageRequest{PageSize: 2}
@@ -233,15 +233,20 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Fatalf("scoped description: %#v", desc)
 	}
 	all := p
-	all.Scope = config.Scope{Mode: "all"}
+	all.Scope = config.Scope{Mode: "blacklist"}
 	desc, err = d.DescribeTable(t.Context(), database.NewAccess(all, password), config.Table{Schema: "app", Name: "items"})
 	if err != nil || len(desc.Relationships) != 1 {
 		t.Fatalf("visible relationship: %v", err)
 	}
+	all.Scope.Schemas = []string{"hidden"}
+	desc, err = d.DescribeTable(t.Context(), database.NewAccess(all, password), config.Table{Schema: "app", Name: "items"})
+	if err != nil || len(desc.Relationships) != 0 {
+		t.Fatal("blacklist leaked excluded foreign-key endpoint", err)
+	}
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "hidden", Name: "target"})
 	requireCode(t, err, contracts.ScopeDenied)
 	none := p
-	none.Scope = config.Scope{Mode: "selected"}
+	none.Scope = config.Scope{Mode: "whitelist"}
 	page, err := d.ListTables(t.Context(), database.NewAccess(none, password), database.PageRequest{})
 	if err != nil || len(page.Tables) != 0 {
 		t.Fatal("empty scope", err)
@@ -252,12 +257,12 @@ func TestPostgresIntegration(t *testing.T) {
 	if err != nil || !slices.Contains(browse.Schemas, "Dot.Schema") || !slices.Contains(browse.Schemas, "hidden") {
 		t.Fatalf("full user catalog: %+v %v", browse, err)
 	}
-	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Schema: "Dot.Schema", Search: "a.b"})
-	if err != nil || len(browse.Tables) != 1 || browse.Tables[0].Name != "a.b" {
+	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Search: "Dot.Schema"})
+	if err != nil || len(browse.Schemas) != 1 || browse.Schemas[0] != "Dot.Schema" {
 		t.Fatalf("exact catalog identifiers: %+v %v", browse, err)
 	}
-	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Schema: "app", Search: "%"})
-	if err != nil || len(browse.Tables) != 0 {
+	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Search: "%"})
+	if err != nil || len(browse.Schemas) != 0 {
 		t.Fatal("search interpreted wildcard", err)
 	}
 	for _, r := range []database.PageRequest{{Cursor: firstCursor + "x"}, {Cursor: firstCursor, Schema: "app"}} {
