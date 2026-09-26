@@ -28,7 +28,6 @@ Data Mate lets coding agents discover tables, inspect columns, and answer questi
 | Feature               | What it gives you                                                      |
 | --------------------- | ---------------------------------------------------------------------- |
 | Read-only tools       | List connections and tables, describe tables, and run bounded queries. |
-| Connection scope      | Allow schemas through a whitelist or blacklist.                        |
 | Protected credentials | Encrypt saved credentials with a keyset held in macOS Keychain.        |
 | Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.     |
 | Agent setup           | Register the service with installed Codex and Claude Code clients.     |
@@ -59,40 +58,27 @@ data-mate mcp start
 | Command                         | Purpose                                             |
 | ------------------------------- | --------------------------------------------------- |
 | `data-mate db add`              | Save a PostgreSQL connection.                       |
-| `data-mate db list`             | View aliases, nonsecret settings, and scopes.       |
-| `data-mate db describe [alias]` | List accessible schemas/tables and allowed scope.   |
+| `data-mate db list`             | View aliases and nonsecret settings.                |
+| `data-mate db describe [alias]` | List accessible schemas and readable tables.        |
 | `data-mate db test [alias]`     | Test one connection, or all connections if omitted. |
 | `data-mate db edit [alias]`     | Update settings or credentials.                     |
-| `data-mate db scope [alias]`    | Choose allowed schemas.                             |
 | `data-mate db remove [alias]`   | Remove a connection and its saved credentials.      |
 | `data-mate mcp status`          | Check service and agent registration status.        |
 | `data-mate mcp stop`            | Stop agent access.                                  |
 
-Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively. Use `--json` for versioned machine-readable output; scripts must supply an alias. The description groups readable tables, views, materialized views, partitioned tables, and foreign tables by schema, including empty accessible schemas. Each schema is labeled allowed or excluded by the saved scope, whose summary also states the future-schema policy. PostgreSQL privileges still determine which objects appear; “allowed” does not grant permissions.
+Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively. Use `--json` for versioned machine-readable output; scripts must supply an alias. The description groups readable tables, views, materialized views, partitioned tables, and foreign tables by schema, including empty accessible schemas. PostgreSQL privileges determine which objects appear.
 
-Description connects through the management service without enabling MCP and can require a credential unlock. It reads catalog names only, with no columns or application rows. Results are complete within 4,096 combined schema/relation entries and the profile's result-byte and timeout limits; exceeding a limit fails without printing a partial description. MCP agents continue to see only the allowed catalog.
+Description connects through the management service without enabling MCP and can require a credential unlock. It reads catalog names only, with no columns or application rows. Results are complete within 4,096 combined schema/relation entries and the profile's result-byte and timeout limits; exceeding a limit fails without printing a partial description.
 
-A new connection uses an empty blacklist, sharing all accessible application schemas, including future schemas, by default. Narrow its scope before starting MCP if needed:
+Connections expose all accessible application schemas, including new schemas as PostgreSQL grants allow. Limit access through the database account's privileges. Queries still require schema-qualified relation names, exclude system schemas, and run in read-only transactions.
 
-```bash
-data-mate db scope analytics
-# Or select exact names without the interactive picker:
-data-mate db scope analytics --schema reporting --schema public --yes
-# Or allow everything except these schemas, including newly created schemas:
-data-mate db scope analytics --exclude-schema private --exclude-schema staging --yes
-```
-
-`--schema` replaces the scope with a whitelist; `--exclude-schema` replaces it with a blacklist. Both accept repeated exact, case-sensitive schema names and include all current and future tables within allowed schemas. `--all` saves an empty blacklist; `--none` saves an empty whitelist. These options and `--scope-json` are mutually exclusive. JSON uses `{"mode":"blacklist","schemas":["private"]}` or `{"mode":"whitelist","schemas":["reporting"]}`.
-
-In the colored picker, use arrows to move, Space to toggle a schema, `a` to toggle all schemas, and `m` to switch modes while preserving checkboxes. `/` searches, `n` advances pages, and `b` returns to the first page. Enter reviews changes before confirmation; `q` or Ctrl-C cancels. `NO_COLOR` disables color. Bulk actions cover all schemas regardless of search and preserve the mode: clearing all in blacklist mode still permits future schemas, whereas whitelist mode blocks them. The displayed mode always states the future-schema policy. Bulk actions and mode switching are limited to 4,096 names and a 30-second catalog scan; failure preserves the current selection.
-
-Scope limits direct table references and catalog results; PostgreSQL privileges still apply. Run `data-mate db add --help` for TLS, SSH, proxy, query limits, and script input options. Passwords go through the form or standard input, never command-line values.
+Run `data-mate db add --help` for TLS, SSH, proxy, query limits, and script input options. Passwords go through the form or standard input, never command-line values.
 
 ## What agents can do
 
 | MCP tool           | Capability                                                                            |
 | ------------------ | ------------------------------------------------------------------------------------- |
-| `list_connections` | Find available aliases and scopes.                                                    |
+| `list_connections` | Find available aliases and database labels.                                           |
 | `list_tables`      | Browse visible tables.                                                                |
 | `describe_table`   | Inspect columns, defaults, keys, indexes, triggers, views, and row-security policies. |
 | `list_objects`     | Browse routines, explicit types, and sequences.                                       |
@@ -102,6 +88,8 @@ Scope limits direct table references and catalog results; PostgreSQL privileges 
 Queries run in read-only transactions. The default budget per query is **60 seconds, 500 rows, and 1 MiB of results**; connection settings can adjust these limits. MCP tools cannot edit connections or retrieve saved passwords.
 
 ## Update or remove
+
+**Breaking change in Unreleased:** saved profiles containing `scope` are rejected without modification. Before upgrading from a release or development build with scope settings, use its executable to run `data-mate db list --json`, record the nonsecret connection settings, and remove each connection with `data-mate db remove <alias>`. After upgrading, recreate connections with `db add` and re-enter their credentials. There is no automatic migration; the SQLite layout and JSON version numbers remain unchanged. Restrict PostgreSQL grants before enabling MCP.
 
 ```bash
 data-mate upgrade             # Install the latest stable release

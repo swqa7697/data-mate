@@ -10,5 +10,5 @@ values as separately bound parameters with SQL casts and as stored columns.
 
 The owned query scenario also covers mixed enum/array tables, nested arrays,
 domains, text fallbacks, view/function dependencies and column-level grants.
-The query guard has its own bounded syntax/scope corpus; no semantic manifests
+The query guard has its own bounded syntax/relation-reference corpus; no semantic manifests
 or signature allowlists are maintained.

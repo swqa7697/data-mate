@@ -9,14 +9,14 @@ import (
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
-// DescribeDatabase lists the role-accessible catalog for the user, independently
-// of saved scope. One statement preserves empty schemas and a consistent catalog.
+// DescribeDatabase lists the role-accessible catalog for the user,
+// with one statement that preserves empty schemas and a consistent catalog.
 func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
 	a, rev, err := normalized(a)
 	if err != nil {
 		return database.DatabaseDescription{}, err
 	}
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Scope: a.Profile.Scope, Schemas: []database.SchemaDescription{}}
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		// At least one row per schema; the extra row detects overflow without
 		// materializing an unbounded catalog. Relations are filtered in the join
@@ -39,7 +39,7 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 			}
 			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
 				count++
-				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Allowed: out.Scope.ContainsSchema(schema), Tables: []database.RelationName{}})
+				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}})
 			}
 			if name != nil {
 				count++

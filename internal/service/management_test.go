@@ -68,7 +68,7 @@ func (d *blockedDiagnostics) Invalidate(string) {}
 func (d *blockedDiagnostics) Close()            {}
 func (d *blockedDiagnostics) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
 	_, err := d.Test(ctx, a)
-	return database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Scope: a.Profile.Scope, Schemas: []database.SchemaDescription{}}, err
+	return database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}, err
 }
 func (d *blockedDiagnostics) Test(ctx context.Context, _ database.Access) (database.Readiness, error) {
 	d.entered <- struct{}{}
@@ -144,7 +144,7 @@ func TestPrivateManagement(t *testing.T) {
 	describe.Expected = rev
 	for _, bad := range []ManagementRequest{
 		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias},
-		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev, Scope: &database.ScopeRequest{}},
+		{Operation: "browse", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev},
 	} {
 		if _, e = c.Request(t.Context(), bad); !errors.Is(e, ErrState) {
 			t.Fatal("invalid description request", e)
@@ -160,7 +160,7 @@ func TestPrivateManagement(t *testing.T) {
 				q = describe
 			}
 			r, e := c.Request(t.Context(), q)
-			if e == nil && q.Operation == "describe" && (r.Description == nil || r.Description.Alias != profile.Alias || r.Description.Scope.Mode != profile.Scope.Mode || r.MCPEnabled) {
+			if e == nil && q.Operation == "describe" && (r.Description == nil || r.Description.Alias != profile.Alias || r.MCPEnabled) {
 				e = errors.New("management description lost snapshot or enabled MCP")
 			}
 			pending <- e
@@ -259,12 +259,12 @@ func TestPrivateManagement(t *testing.T) {
 	if state, e = c.Inspect(t.Context()); e != nil || state.State != "running" || state.MCPEnabled {
 		t.Fatal("denial killed management", state, e)
 	}
-	// Scope-only edits and deletion still work with a locked keyset.
+	// Nonsecret edits and deletion still work with a locked keyset.
 	p, rev, e = config.Preview(t.Context(), c.Root)
 	if e != nil {
 		t.Fatal(e)
 	}
-	p.Connections[0].Scope = config.Scope{Mode: "whitelist"}
+	p.Connections[0].Alias = "renamed"
 	if _, e = apply(p, rev, nil); e != nil {
 		t.Fatal("nonsecret locked edit", e)
 	}

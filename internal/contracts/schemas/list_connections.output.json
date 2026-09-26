@@ -18,39 +18,12 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^[^\\x00]+$"
-          },
-          "scope": {
-            "type": "object",
-            "properties": {
-              "mode": {
-                "enum": [
-                  "blacklist",
-                  "whitelist"
-                ]
-              },
-              "schemas": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "pattern": "^[^\\x00]+$",
-                  "maxLength": 63
-                },
-                "uniqueItems": true,
-                "maxItems": 4096
-              }
-            },
-            "required": [
-              "mode"
-            ],
-            "additionalProperties": false
           }
         },
         "required": [
           "alias",
           "driver",
-          "database",
-          "scope"
+          "database"
         ],
         "additionalProperties": false
       },

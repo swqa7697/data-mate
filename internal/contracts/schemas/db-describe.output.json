@@ -13,32 +13,6 @@
       "type": "string",
       "minLength": 1
     },
-    "scope": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "enum": [
-            "blacklist",
-            "whitelist"
-          ]
-        },
-        "schemas": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
-          },
-          "uniqueItems": true,
-          "maxItems": 4096
-        }
-      },
-      "required": [
-        "mode"
-      ],
-      "additionalProperties": false
-    },
     "schemas": {
       "type": "array",
       "maxItems": 4096,
@@ -50,9 +24,6 @@
             "minLength": 1,
             "maxLength": 63,
             "pattern": "^[^\\x00]+$"
-          },
-          "allowed": {
-            "type": "boolean"
           },
           "tables": {
             "type": "array",
@@ -86,7 +57,6 @@
         },
         "required": [
           "name",
-          "allowed",
           "tables"
         ],
         "additionalProperties": false
@@ -97,7 +67,6 @@
     "version",
     "alias",
     "database",
-    "scope",
     "schemas"
   ],
   "additionalProperties": false

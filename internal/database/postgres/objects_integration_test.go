@@ -48,9 +48,6 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
  GRANT SELECT ON ALL TABLES IN SCHEMA catalog TO reader;
  GRANT USAGE ON ALL SEQUENCES IN SCHEMA catalog TO reader;`)
 	defer sql(`DROP FUNCTION pg_catalog.fixture_call(); DROP FUNCTION pg_catalog.abs(text)`)
-	p := access.Profile
-	p.Scope = config.Scope{Mode: "whitelist", Schemas: []string{"app", "catalog"}}
-	access.Profile = p
 	describe := func(kind, name string, signature *string) database.ObjectDescription {
 		t.Helper()
 		out, err := d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: kind, Schema: "catalog", Name: name, IdentityArguments: signature})
@@ -132,7 +129,7 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	}
 	_, err = d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Cursor: *tables.NextCursor}})
 	requireCode(t, err, contracts.StaleCursor)
-	d.Invalidate(p.ID)
+	d.Invalidate(access.Profile.ID)
 	req.Kind = "routine"
 	_, err = d.ListObjects(t.Context(), access, req)
 	requireCode(t, err, contracts.StaleCursor)
@@ -164,7 +161,7 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	}
 	view, err := d.DescribeTable(t.Context(), access, config.Table{Schema: "catalog", Name: "indirect"})
 	if err != nil || view.ViewDefinition == nil || !strings.Contains(*view.ViewDefinition, "hidden.target") {
-		t.Fatal("complete scoped source", view, err)
+		t.Fatal("complete stored source", view, err)
 	}
 	if _, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "catalog", Name: "no_execute"}); err != nil {
 		t.Fatal("metadata evaluated immutable expression", err)
@@ -191,18 +188,10 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 			t.Fatalf("core or indirect query %s: %v", q, err)
 		}
 	}
-	// Scope and current grants apply on every lookup, without caching visibility.
-	denied := access
-	denied.Profile.Scope = config.Scope{Mode: "whitelist"}
-	hidden, err := d.ListObjects(t.Context(), denied, database.ObjectPageRequest{})
-	if err != nil || len(hidden.Objects) != 0 {
-		t.Fatal("empty scope objects", err)
-	}
-	_, err = d.DescribeObject(t.Context(), denied, database.ObjectRequest{Kind: "type", Schema: "catalog", Name: "mood"})
-	requireCode(t, err, contracts.ScopeDenied)
+	// Current grants apply on every lookup, without caching visibility.
 	sql("REVOKE USAGE ON TYPE catalog.mood FROM PUBLIC,reader")
 	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "type", Schema: "catalog", Name: "mood"})
-	requireCode(t, err, contracts.ScopeDenied)
+	requireCode(t, err, contracts.PermissionDenied)
 	hiddenTypes, listErr := d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Schema: "catalog"}, Kind: "type"})
 	if listErr != nil {
 		t.Fatal(listErr)
@@ -215,19 +204,17 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	sql("GRANT USAGE ON TYPE catalog.mood TO reader")
 	sql("REVOKE SELECT,USAGE ON SEQUENCE catalog.counter FROM reader")
 	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "sequence", Schema: "catalog", Name: "counter"})
-	requireCode(t, err, contracts.ScopeDenied)
+	requireCode(t, err, contracts.PermissionDenied)
 	sql("GRANT USAGE ON SEQUENCE catalog.counter TO reader")
 	sql("REVOKE USAGE ON SCHEMA catalog FROM reader")
 	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "routine", Schema: "catalog", Name: "a_probe", IdentityArguments: &empty})
-	requireCode(t, err, contracts.ScopeDenied)
-	sql("GRANT USAGE ON SCHEMA catalog TO reader")
-	// Blacklist and schema filters must be applied before a one-entry page limit.
-	excluded := access
-	excluded.Profile.Scope = config.Scope{Mode: "blacklist", Schemas: []string{"catalog"}}
-	excludedPage, e := d.ListObjects(t.Context(), excluded, database.ObjectPageRequest{PageRequest: database.PageRequest{Schema: "catalog", PageSize: 1}})
-	if e != nil || len(excludedPage.Objects) != 0 || excludedPage.NextCursor != nil {
-		t.Fatal("excluded object page", excludedPage, e)
+	requireCode(t, err, contracts.PermissionDenied)
+	// Privilege and schema filters must apply before a one-entry page limit.
+	inaccessiblePage, e := d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Schema: "catalog", PageSize: 1}})
+	if e != nil || len(inaccessiblePage.Objects) != 0 || inaccessiblePage.NextCursor != nil {
+		t.Fatal("inaccessible object page", inaccessiblePage, e)
 	}
+	sql("GRANT USAGE ON SCHEMA catalog TO reader")
 	// Enum collections have their own count bound independent of encoded size.
 	labels := make([]string, 4097)
 	for i := range labels {

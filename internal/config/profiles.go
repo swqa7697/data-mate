@@ -38,7 +38,6 @@ type Profile struct {
 	Connection    Connection `json:"connection"`
 	CredentialRef string     `json:"credential_ref,omitempty"`
 	Transport     Transport  `json:"transport"`
-	Scope         Scope      `json:"scope"`
 	Limits        *Limits    `json:"limits,omitempty"`
 }
 
@@ -107,25 +106,10 @@ type Table struct {
 	Name   string `json:"name"`
 }
 
-// Scope controls application schemas by exact, case-sensitive names.
-// An empty blacklist allows all schemas; an empty whitelist allows none.
-type Scope struct {
-	Mode    string   `json:"mode"`
-	Schemas []string `json:"schemas,omitempty"`
-}
-
-// ContainsSchema checks direct schema selection. Drivers exclude system schemas;
-// PostgreSQL enforces privileges and indirect view/function dependencies.
-func (s Scope) ContainsSchema(schema string) bool {
-	listed := slices.Contains(s.Schemas, schema)
-	return (s.Mode == "blacklist" && !listed) || (s.Mode == "whitelist" && listed)
-}
-
 // Revision is the SHA-256 of validated normalized profile data.
 type Revision string
 
 // DecodeProfiles enforces the strict version-1 schema and cross-profile uniqueness.
-// Missing scope is invalid; creators explicitly supply all, never a decoder fallback.
 func DecodeProfiles(r io.Reader) (Profiles, Revision, error) {
 	var p Profiles
 	b, err := contracts.JSON(r, MaxProfileBytes)
@@ -157,7 +141,6 @@ func DecodeProfiles(r io.Reader) (Profiles, Revision, error) {
 			v := DefaultLimits()
 			c.Limits = &v
 		}
-		slices.Sort(c.Scope.Schemas)
 	}
 	slices.SortFunc(p.Connections, func(a, b Profile) int { return strings.Compare(a.ID, b.ID) })
 	canonical, err := json.Marshal(p)

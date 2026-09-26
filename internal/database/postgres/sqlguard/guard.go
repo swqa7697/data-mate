@@ -1,4 +1,4 @@
-// Package sqlguard checks statement kind, direct relation scope and explicit calls.
+// Package sqlguard checks statement kind, direct relation restrictions and explicit calls.
 package sqlguard
 
 import (
@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	pg "github.com/pganalyze/pg_query_go/v6"
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -20,22 +19,22 @@ func resource() error {
 func readOnly() error {
 	return database.Fail(contracts.ReadOnlyViolation, "only one read query is allowed", false)
 }
-func scopeDenied() error {
-	return database.Fail(contracts.ScopeDenied, "direct relation is outside the configured application scope", false)
+func unsupportedRelation() error {
+	return database.Fail(contracts.QueryUnsupported, "cross-database and system-schema relation references are unsupported", false)
 }
 
-// Check checks syntax and scope. Callers executing SQL must also authorize the
+// Check checks syntax and relation references. Callers executing SQL must also authorize the
 // routine names returned by Inspect against the live server catalog.
-func Check(sql string, scope config.Scope) error {
-	_, err := Inspect(sql, scope)
+func Check(sql string) error {
+	_, err := Inspect(sql)
 	return err
 }
 
 // Inspect returns distinct pg_catalog routine names requiring live authorization.
 // Indirect execution through database objects remains PostgreSQL's responsibility.
-func Inspect(sql string, scope config.Scope) ([]string, error) {
+func Inspect(sql string) ([]string, error) {
 	names := map[string]bool{}
-	err := inspect(sql, scope, names)
+	err := inspect(sql, names)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +46,7 @@ func Inspect(sql string, scope config.Scope) ([]string, error) {
 	return out, nil
 }
 
-func inspect(sql string, scope config.Scope, names map[string]bool) error {
+func inspect(sql string, names map[string]bool) error {
 	if len(sql) > 64<<10 {
 		return resource()
 	}
@@ -132,16 +131,16 @@ func inspect(sql string, scope config.Scope, names map[string]bool) error {
 		}
 		if r, ok := m.Interface().(*pg.RangeVar); ok {
 			if r.Catalogname != "" {
-				return scopeDenied()
+				return unsupportedRelation()
 			}
 			if r.Schemaname == "" {
 				if ctes[r.Relname] {
 					return nil
 				}
-				return database.Fail(contracts.ScopeDenied, "physical relations must use schema-qualified names", false)
+				return database.Fail(contracts.QueryUnsupported, "physical relations must use schema-qualified names", false)
 			}
-			if strings.HasPrefix(r.Schemaname, "pg_") || r.Schemaname == "information_schema" || !scope.ContainsSchema(r.Schemaname) {
-				return scopeDenied()
+			if strings.HasPrefix(r.Schemaname, "pg_") || r.Schemaname == "information_schema" {
+				return unsupportedRelation()
 			}
 			return nil
 		}

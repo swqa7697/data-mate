@@ -188,11 +188,11 @@ var basicAdd = []string{"add", "--alias", "analytics", "--host", "localhost", "-
 // No pre-P2 scenario exercised command-to-vault transactions. This scenario owns
 // scripted CRUD, preservation, repair and durable partial outcomes end to end.
 func TestConnectionCRUD(t *testing.T) {
-	if root := os.Getenv("DATA_MATE_SCOPE_LEASE"); root != "" {
-		scopeLeaseChild(t, root)
+	if root := os.Getenv("DATA_MATE_EDIT_LEASE"); root != "" {
+		editLeaseChild(t, root)
 		return
 	}
-	scopeLeaseAcceptance(t)
+	editLeaseAcceptance(t)
 	root := privateRoot(t)
 	keys := &testKeys{}
 	password := " synthetic-db-secret "
@@ -206,7 +206,7 @@ func TestConnectionCRUD(t *testing.T) {
 	}
 	id := p.Connections[0].ID
 	ref := p.Connections[0].CredentialRef
-	if p.Connections[0].Scope.Mode != "blacklist" || p.Connections[0].Transport.TLS.Mode != "disabled" || credential(t, root, keys, id).Password != password {
+	if p.Connections[0].Transport.TLS.Mode != "disabled" || credential(t, root, keys, id).Password != password {
 		t.Fatal("add defaults or exact secret lost")
 	}
 	before := files(t, root)
@@ -214,16 +214,16 @@ func TestConnectionCRUD(t *testing.T) {
 	if !reflect.DeepEqual(before, files(t, root)) {
 		t.Fatal("duplicate changed persisted files")
 	}
-	command(t, root, keys, "", 0, "edit", "analytics", "--alias", "renamed", "--none", "--yes")
+	command(t, root, keys, "", 0, "edit", "analytics", "--alias", "renamed", "--yes")
 	p = snapshot(t, root)
-	if p.Connections[0].ID != id || p.Connections[0].CredentialRef != ref || p.Connections[0].Scope.ContainsSchema("public") {
-		t.Fatal("rename/empty scope/credential preservation")
+	if p.Connections[0].ID != id || p.Connections[0].CredentialRef != ref {
+		t.Fatal("rename/credential preservation")
 	}
 
 	// Completion reuses this CRUD fixture and must not unlock credentials or write.
 	completionBefore := files(t, root)
 	completionCalls := keys.calls
-	for _, action := range []string{"edit", "scope", "remove", "rm", "test", "describe"} {
+	for _, action := range []string{"edit", "remove", "rm", "test", "describe"} {
 		cmd := newCommand(Build{}, keys)
 		var output bytes.Buffer
 		cmd.SetOut(&output)
@@ -246,16 +246,16 @@ func TestConnectionCRUD(t *testing.T) {
 			t.Fatalf("plaintext persisted in %s", path)
 		}
 	}
-	command(t, root, keys, `{"ssh_password":"synthetic-ssh-secret","password":"replacement-secret"}`, 0, "edit", "renamed", "--ssh-host", "jump.local", "--ssh-user", "jump", "--tls", "--tls-ca", "/tmp/synthetic-ca.pem", "--query-timeout", "750ms", "--max-rows", "12", "--max-result-bytes", "4096", "--schema", "public", "--schema", "other", "--credentials-stdin", "--yes")
+	command(t, root, keys, `{"ssh_password":"synthetic-ssh-secret","password":"replacement-secret"}`, 0, "edit", "renamed", "--ssh-host", "jump.local", "--ssh-user", "jump", "--tls", "--tls-ca", "/tmp/synthetic-ca.pem", "--query-timeout", "750ms", "--max-rows", "12", "--max-result-bytes", "4096", "--credentials-stdin", "--yes")
 	p = snapshot(t, root)
 	s := credential(t, root, keys, id)
-	if s.SSHPassword != "synthetic-ssh-secret" || s.Password != "replacement-secret" || p.Connections[0].Limits.QueryTimeoutMS != 750 || !p.Connections[0].Scope.ContainsSchema("other") {
+	if s.SSHPassword != "synthetic-ssh-secret" || s.Password != "replacement-secret" || p.Connections[0].Limits.QueryTimeoutMS != 750 {
 		t.Fatal("advanced settings or secrets lost")
 	}
-	command(t, root, keys, "", 0, "edit", "renamed", "--clear-password", "--tls", "--scope-json", `{"mode":"whitelist","schemas":["a.b"]}`, "--yes")
+	command(t, root, keys, "", 0, "edit", "renamed", "--clear-password", "--tls", "--yes")
 	p = snapshot(t, root)
-	if p.Connections[0].Transport.TLS.CAFile != "/tmp/synthetic-ca.pem" || !p.Connections[0].Scope.ContainsSchema("a.b") {
-		t.Fatal("TLS edit lost omitted CA or structured scope lost exact identifiers")
+	if p.Connections[0].Transport.TLS.CAFile != "/tmp/synthetic-ca.pem" {
+		t.Fatal("TLS edit lost omitted CA")
 	}
 	s = credential(t, root, keys, id)
 	if s.Password != "" || s.SSHPassword != "synthetic-ssh-secret" {
@@ -271,47 +271,17 @@ func TestConnectionCRUD(t *testing.T) {
 	if snapshot(t, root).Connections[0].Limits.QueryTimeoutMS != 300000 {
 		t.Fatal("five-minute timeout was not saved")
 	}
-	// P7 scope replacement is nonsecret and requires neither network nor vault.
-	command(t, root, keys, "", 0, "scope", "renamed", "--exclude-schema", "public", "--exclude-schema", "Mixed.Case", "--yes")
-	excluded := snapshot(t, root).Connections[0].Scope
-	if excluded.Mode != "blacklist" || excluded.ContainsSchema("public") || excluded.ContainsSchema("Mixed.Case") || !excluded.ContainsSchema("future") || !excluded.ContainsSchema("mixed.case") {
-		t.Fatal("blacklist replacement lost exact exclusions or future access")
-	}
-	beforeScope := snapshot(t, root).Connections[0]
-	calls = keys.calls
-	keys.denied = true
-	for _, args := range [][]string{
-		{"--all"}, {"--none"}, {"--schema", "public", "--schema", "other"},
-		{"--scope-json", `{"mode":"whitelist","schemas":["a.b"]}`},
-	} {
-		command(t, root, keys, "", 0, append([]string{"scope", "renamed", "--yes"}, args...)...)
-	}
-	afterScope := snapshot(t, root).Connections[0]
-	if !afterScope.Scope.ContainsSchema("a.b") || afterScope.Scope.ContainsSchema("public") || keys.calls != calls {
-		t.Fatal("scope replacement used credentials or lost exact names")
-	}
-	afterScope.Scope = beforeScope.Scope
-	if !reflect.DeepEqual(afterScope, beforeScope) {
-		t.Fatal("scope modified unrelated profile fields")
-	}
+	// Removed scope commands and flags must fail before touching state or keys.
 	before = files(t, root)
-	for _, args := range [][]string{
-		{"scope", "renamed", "--yes"}, {"scope", "renamed", "--none"},
-		{"scope", "renamed", "--all", "--none", "--yes"},
-		{"scope", "renamed", "--table", "public.orders", "--yes"},
-		{"scope", "renamed", "--schema", "public", "--exclude-schema", "hidden", "--yes"},
-		{"scope", "renamed", "--all", "--exclude-schema", "hidden", "--yes"},
-		{"scope", "renamed", "--scope-json", `{"mode":"whitelist","tables":[{"schema":"public","name":"orders"}]}`, "--yes"},
-		{"scope", "renamed", "--scope-json", `{"mode":"all"}`, "--yes"},
-		{"scope", "renamed", "--scope-json", `{"mode":"selected","schemas":["public"]}`, "--yes"},
-		{"scope", "--all", "--yes"},
-	} {
-		command(t, root, keys, "", 2, args...)
+	calls = keys.calls
+	command(t, root, keys, "", 2, "scope", "renamed")
+	for _, args := range [][]string{{"--all"}, {"--none"}, {"--schema", "public"}, {"--exclude-schema", "private"}, {"--scope-json", `{"mode":"blacklist"}`}} {
+		command(t, root, keys, "", 2, append([]string{"edit", "renamed", "--yes"}, args...)...)
+		command(t, root, keys, "", 2, append(append([]string{}, basicAdd...), args...)...)
 	}
-	if !reflect.DeepEqual(before, files(t, root)) {
-		t.Fatal("invalid scope changed state")
+	if keys.calls != calls || !reflect.DeepEqual(before, files(t, root)) {
+		t.Fatal("removed scope options changed state or accessed keys")
 	}
-	keys.denied = false
 	// Missing manual bundles are reported and repaired without activation records.
 	manual := privateRoot(t)
 	keys = &testKeys{}
@@ -373,7 +343,6 @@ func TestConnectionInputs(t *testing.T) {
 		{"noninteractive host enrollment", "", []string{"--passwordless", "--ssh-enroll"}},
 		{"nonTTY host enrollment", "", []string{"--passwordless", "--ssh-enroll", "--yes=false"}},
 		{"password argv", "", []string{"--password", "secret-sentinel"}},
-		{"scope conflict", "", []string{"--passwordless", "--none", "--all"}},
 		{"transport conflict", "", []string{"--passwordless", "--ssh-host", "jump", "--ssh-user", "u", "--proxy", "socks5://host:1080"}},
 		{"CA without TLS", "", []string{"--passwordless", "--tls-ca", "/tmp/ca.pem"}},
 		{"stdin confirmation", "secret-sentinel", []string{"--password-stdin", "--yes=false"}},
@@ -421,7 +390,7 @@ func TestConnectionInputs(t *testing.T) {
 	cmd := newCommand(Build{}, keys)
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--root", root, "db", "scope", "analytics", "--none", "--yes"})
+	cmd.SetArgs([]string{"--root", root, "db", "edit", "analytics", "--max-rows", "12", "--yes"})
 	changedOnce := false
 	cmd.SetErr(writerFunc(func(b []byte) (int, error) {
 		if !changedOnce {

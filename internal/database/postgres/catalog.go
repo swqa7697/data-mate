@@ -17,26 +17,15 @@ import (
 
 const maxCatalogObjects = 4096
 
-// Selection is always parameterized. It is applied before keyset LIMIT, so sparse
-// scopes do not require materializing the database catalog in the application.
+// Privilege and application-schema filters apply before the keyset limit.
 const accessibleSchemaSQL = `n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema'
  AND pg_catalog.has_schema_privilege(n.oid,'USAGE')`
 
 const readableRelationSQL = `c.relkind IN ('r','p','v','m','f') AND c.relpersistence<>'t'
  AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.has_any_column_privilege(c.oid,'SELECT'))`
 
-const scopedSchemaSQL = accessibleSchemaSQL + `
- AND (($1::text='blacklist' AND NOT (n.nspname::text=ANY($2::text[]))) OR ($1::text='whitelist' AND n.nspname::text=ANY($2::text[])))`
+const visibleSQL = accessibleSchemaSQL + ` AND ` + readableRelationSQL
 
-const visibleSQL = scopedSchemaSQL + ` AND ` + readableRelationSQL
-
-func scopeArgs(s config.Scope) []any {
-	schemas := s.Schemas
-	if schemas == nil {
-		schemas = []string{}
-	}
-	return []any{s.Mode, schemas}
-}
 func validName(s string) bool {
 	return s != "" && len(s) <= 63 && utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
@@ -100,7 +89,7 @@ func (d *Driver) decodeCursor(s string, want cursor) (cursor, error) {
 	return c, nil
 }
 
-// ListTables intersects scope and privileges before returning a keyset page.
+// ListTables filters by privileges before returning a keyset page.
 func (d *Driver) ListTables(ctx context.Context, a database.Access, req database.PageRequest) (database.TablePage, error) {
 	a, rev, err := normalized(a)
 	if err != nil {
@@ -124,10 +113,10 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	}
 	out := database.TablePage{Connection: a.Profile.Alias, Tables: []database.Table{}}
 	err = d.run(ctx, a, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		args := append(scopeArgs(a.Profile.Scope), req.Schema, pos.Schema, pos.Name, req.PageSize+1)
+		args := []any{req.Schema, pos.Schema, pos.Name, req.PageSize + 1}
 		rows, err := tx.Query(ctx, `SELECT n.nspname,c.relname,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+`
- AND ($3::text='' OR n.nspname=$3) AND (n.nspname::text COLLATE "C",c.relname::text COLLATE "C") > ($4::text COLLATE "C",$5::text COLLATE "C")
- ORDER BY n.nspname::text COLLATE "C",c.relname::text COLLATE "C" LIMIT $6`, args...)
+ AND ($1::text='' OR n.nspname=$1) AND (n.nspname::text COLLATE "C",c.relname::text COLLATE "C") > ($2::text COLLATE "C",$3::text COLLATE "C")
+ ORDER BY n.nspname::text COLLATE "C",c.relname::text COLLATE "C" LIMIT $4`, args...)
 		if err != nil {
 			return err
 		}
@@ -191,7 +180,7 @@ func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget)
 	return out, rows.Err()
 }
 
-// DescribeTable reads stored definitions and filters foreign-key endpoints by scope.
+// DescribeTable reads stored definitions and filters foreign-key endpoints by privileges.
 func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name config.Table) (database.Description, error) {
 	if !validName(name.Schema) || !validName(name.Name) {
 		return database.Description{}, database.Fail(contracts.InvalidArgument, "invalid relation name", false)
@@ -202,12 +191,12 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 	}
 	out := database.Description{Connection: a.Profile.Alias, Schema: name.Schema, Table: name.Name, Columns: []database.Column{}, Keys: []database.Key{}, Relationships: []database.Relationship{}, Constraints: []database.Definition{}, Indexes: []database.Definition{}, Triggers: []database.Trigger{}, Policies: []database.Policy{}}
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		args := append(scopeArgs(a.Profile.Scope), name.Schema, name.Name)
+		args := []any{name.Schema, name.Name}
 		var oid uint32
 		var k string
-		err := tx.QueryRow(ctx, `SELECT c.oid,c.relkind::text,c.relrowsecurity,c.relforcerowsecurity,CASE WHEN c.relkind IN ('v','m') THEN pg_catalog.pg_get_viewdef(c.oid) END FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+` AND n.nspname=$3 AND c.relname=$4`, args...).Scan(&oid, &k, &out.RowSecurity, &out.ForceRowSecurity, &out.ViewDefinition)
+		err := tx.QueryRow(ctx, `SELECT c.oid,c.relkind::text,c.relrowsecurity,c.relforcerowsecurity,CASE WHEN c.relkind IN ('v','m') THEN pg_catalog.pg_get_viewdef(c.oid) END FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+visibleSQL+` AND n.nspname=$1 AND c.relname=$2`, args...).Scan(&oid, &k, &out.RowSecurity, &out.ForceRowSecurity, &out.ViewDefinition)
 		if err == pgx.ErrNoRows {
-			return database.Fail(contracts.ScopeDenied, "relation is outside the accessible scope", false)
+			return database.Fail(contracts.PermissionDenied, "relation is unavailable or inaccessible", false)
 		}
 		if err != nil {
 			return err
@@ -219,10 +208,10 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 		}
 		out.Kind = kind(k)
 		out.Columns = cols
-		if err = constraints(ctx, tx, oid, a.Profile.Scope, &out); err != nil {
+		if err = constraints(ctx, tx, oid, &out); err != nil {
 			return err
 		}
-		if err = tableDefinitions(ctx, tx, oid, a, &out, &budget); err != nil {
+		if err = tableDefinitions(ctx, tx, oid, &out, &budget); err != nil {
 			return err
 		}
 		return payloadBound(out, a)
@@ -232,14 +221,14 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 	}
 	return out, nil
 }
-func constraints(ctx context.Context, tx pgx.Tx, oid uint32, scope config.Scope, out *database.Description) error {
-	args := append(scopeArgs(scope), oid)
+func constraints(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description) error {
+	args := []any{oid}
 	rows, err := tx.Query(ctx, `SELECT k.contype::text,
  ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=x.num ORDER BY x.ord),
  COALESCE(n.nspname::text,''),COALESCE(c.relname::text,''),
  ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(k.confkey) WITH ORDINALITY x(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=k.confrelid AND a.attnum=x.num ORDER BY x.ord)
  FROM pg_catalog.pg_constraint k LEFT JOIN pg_catalog.pg_class c ON c.oid=k.confrelid LEFT JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
- WHERE k.conrelid=$3 AND k.contype IN ('p','u','f') AND (k.contype<>'f' OR (`+visibleSQL+`)) ORDER BY k.oid LIMIT 4097`, args...)
+ WHERE k.conrelid=$1 AND k.contype IN ('p','u','f') AND (k.contype<>'f' OR (`+visibleSQL+`)) ORDER BY k.oid LIMIT 4097`, args...)
 	if err != nil {
 		return err
 	}

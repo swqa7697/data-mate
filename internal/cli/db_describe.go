@@ -51,16 +51,12 @@ func describeDatabase(cmd *cobra.Command, root config.Root, revision config.Revi
 		err = json.NewEncoder(cmd.OutOrStdout()).Encode(description)
 	} else {
 		var out strings.Builder
-		fmt.Fprintf(&out, "%s — database=%q\nScope: %s\n", description.Alias, description.Database, scopeSummary(description.Scope))
+		fmt.Fprintf(&out, "%s — database=%q\n", description.Alias, description.Database)
 		if len(description.Schemas) == 0 {
 			out.WriteString("\nNo accessible application schemas.\n")
 		}
 		for _, schema := range description.Schemas {
-			status := "excluded"
-			if schema.Allowed {
-				status = "allowed"
-			}
-			fmt.Fprintf(&out, "\n%q [%s]\n", schema.Name, status)
+			fmt.Fprintf(&out, "\n%q\n", schema.Name)
 			if len(schema.Tables) == 0 {
 				out.WriteString("  (no readable relations)\n")
 			}

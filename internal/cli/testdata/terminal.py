@@ -12,15 +12,13 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
-for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "scope-mixed", "scope-color", "scope-limit", "scope-bulk-fail", "scope-bulk-cancel", "scope-no", "scope-cancel", "scope-fail", "diagnostics", "describe", "describe-cancel"):
+for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel"):
     root = os.path.join(base, mode)
     os.mkdir(root, 0o700)
     master, slave = pty.openpty()
     original = termios.tcgetattr(slave)
     env = dict(os.environ, DATA_MATE_P2_PTY_HELPER=mode,
                DATA_MATE_P2_PTY_ROOT=root, NO_COLOR="1")
-    if mode == "scope-color":
-        env.pop("NO_COLOR", None)
     proc = subprocess.Popen([binary, "-test.run=^TestConnectionTerminal$"],
                             stdin=subprocess.DEVNULL if mode == "diagnostics" else slave,
                             stdout=slave, stderr=slave, env=env,
@@ -58,47 +56,6 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 # unread terminal output on its last close.
                 send_after('{"version":', "")
                 send_after('\r\n', "")
-        elif mode.startswith("scope"):
-            if mode != "scope-fail":
-                send_after("Choose schemas", " ")
-                if mode == "scope-mixed":
-                    send_after('[ ] "Dot.Schema"', 'n')
-                    send_after('schema0049', ' /')
-                    send_after('Search (blank clears):', 'Dot\r')
-                    send_after('[ ] "Dot.Schema"', 'm')
-                    send_after('Whitelist · New schemas blocked', '')
-                    send_after('[ ] "Dot.Schema"', 'm')
-                    send_after('Blacklist · New schemas allowed', '\r')
-                    send_after('Save changes? [y/N]:', 'y\r')
-                    send_after('Choose schemas', 'a')
-                    send_after('[x] "Dot.Schema"', 'a')
-                    send_after('[ ] "Dot.Schema"', ' ')
-                    send_after('[x] "Dot.Schema"', 'm')
-                    send_after('Whitelist · New schemas blocked', '\r')
-                    send_after('Save changes? [y/N]:', 'y\r')
-                    for _ in range(2):
-                        send_after('Connection number or alias:', '1\r')
-                        send_after('Choose schemas', 'm')
-                        send_after('New schemas', 'a')
-                        send_after('Choose schemas', '\r')
-                        send_after('Save changes? [y/N]:', 'y\r')
-                elif mode == "scope-color":
-                    send_after('Choose schemas', '\r')
-                    send_after('Save changes? [y/N]:', 'y\r')
-                elif mode == "scope-bulk-cancel":
-                    send_after('[ ] "Dot.Schema"', 'a')
-                    send_after('Loading all schemas', '')
-                    proc.send_signal(signal.SIGINT)
-                elif mode in ("scope-limit", "scope-bulk-fail"):
-                    send_after('[ ] "Dot.Schema"', 'a')
-                    send_after('Selection unchanged', '\r' if mode == "scope-limit" else 'q')
-                    if mode == "scope-limit":
-                        send_after('Save changes? [y/N]:', 'y\r')
-                elif mode == "scope-no":
-                    send_after('[ ] "Dot.Schema"', '\r')
-                    send_after('Save changes? [y/N]:', '\r')
-                else:
-                    send_after('[ ] "Dot.Schema"', '\x03')
         elif mode.startswith("enroll"):
             send_after("SSH password:", "synthetic\r")
             send_after("Trust this SSH fingerprint? [y/N]:", "\r" if mode == "enroll-no" else "y\r")
@@ -111,7 +68,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith(("enroll", "scope", "describe")) or mode == "diagnostics":
+        if mode.startswith(("enroll", "describe")) or mode == "diagnostics":
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -153,7 +110,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode in ("happy", "enroll", "scope-mixed", "scope-color", "scope-limit", "diagnostics", "describe") else 1 if mode == "scope-fail" else 130), (mode, code, transcript)
+        assert code == (0 if mode in ("happy", "enroll", "diagnostics", "describe") else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
         if mode == "diagnostics":
@@ -177,18 +134,9 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             assert b'{"version"' in transcript, (mode, transcript)
             report, _ = json.JSONDecoder().raw_decode(transcript[transcript.index(b'{"version"'):].decode())
             assert report["alias"] == "analytics" and len(report["schemas"]) == 4, report
-        elif mode == "scope-color":
-            assert b"\x1b[1;36m" in transcript and b"\x1b[32m" in transcript, "picker color missing"
         else:
             assert b"\x1b[36m" not in transcript and b"\x1b[1;36m" not in transcript and b"\x1b[32m" not in transcript, "NO_COLOR ignored"
-        if mode.startswith("scope"):
-            with sqlite3.connect(os.path.join(root, "data-mate.db")) as db:
-                scope = json.loads(db.execute("SELECT settings FROM profiles ORDER BY alias").fetchone()[0])["scope"]
-                expected = {"mode": "whitelist"} if mode == "scope-mixed" else {"mode": "blacklist"}
-                if mode in ("scope-color", "scope-limit"):
-                    expected["schemas"] = ["Dot.Schema"]
-                assert scope == expected, scope
-        elif mode == "enroll":
+        if mode == "enroll":
             with open(os.path.join(root, "known_hosts")) as stream:
                 assert 'ssh-ed25519' in stream.read(), "confirmed key missing"
             assert b'SHA256:' in transcript, "fingerprint not shown"

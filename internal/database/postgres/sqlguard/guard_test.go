@@ -7,14 +7,11 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/swqa7697/data-mate/internal/config"
 )
 
-// Replaces the compiler boundary corpus: scope and writes remain guarded while
+// Replaces the compiler boundary corpus: relation references and writes remain guarded while
 // expression, type and execution semantics are delegated to PostgreSQL.
 func TestQueryGuard(t *testing.T) {
-	scope := config.Scope{Mode: "whitelist", Schemas: []string{"app", "Dot.Schema"}}
 	positive := []string{
 		"SELECT 1", "VALUES (1),(2)", "TABLE app.items", "SELECT * FROM ONLY app.items",
 		"SELECT count(*) FROM app.items", "SELECT enum_range(NULL::app.custom)", "SELECT pg_catalog.lower('A')", "SELECT ARRAY[1,NULL], E'escaped\\ntext', $$dollar; quoted$$",
@@ -29,7 +26,7 @@ func TestQueryGuard(t *testing.T) {
 		`SELECT * FROM "Dot.Schema"."a.b"`, "SELECT * FROM app.items TABLESAMPLE SYSTEM(10)",
 	}
 	for _, q := range positive {
-		if err := Check(q, scope); err != nil {
+		if err := Check(q); err != nil {
 			t.Errorf("accepted query %s: %v", q, err)
 		}
 	}
@@ -42,39 +39,33 @@ func TestQueryGuard(t *testing.T) {
 		"DELETE FROM app.items", "SELECT 1; SELECT 2", "SELECT * INTO app.copy FROM app.items", "SELECT * FROM app.items FOR UPDATE",
 		"WITH x AS (DELETE FROM app.items RETURNING *) SELECT * FROM x", "WITH x AS (UPDATE app.items SET id=1 RETURNING *) SELECT * FROM x",
 		"WITH x AS (INSERT INTO app.items VALUES(1) RETURNING *) SELECT * FROM x", "SET transaction_read_only=off", "COMMIT", "COPY app.items TO STDOUT", "EXPLAIN SELECT 1",
-		"SELECT * FROM hidden.items", "SELECT * FROM items", "SELECT * FROM fixture.app.items", "SELECT * FROM information_schema.tables", "SELECT * FROM pg_catalog.pg_class",
-		"SELECT * FROM app.items a JOIN hidden.items b ON true", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.items)",
+		"SELECT * FROM items", "SELECT * FROM fixture.app.items", "SELECT * FROM information_schema.tables", "SELECT * FROM pg_catalog.pg_class",
+		"SELECT * FROM app.items a JOIN pg_catalog.pg_class b ON true", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM information_schema.tables)",
 		"WITH x AS (SELECT * FROM y),y AS (SELECT * FROM app.items) SELECT * FROM x",
 		"SELECT * FROM (WITH x AS (SELECT 1) SELECT * FROM x) q,x",
-		"WITH x AS (SELECT * FROM app.items) SELECT * FROM (WITH x AS (SELECT * FROM hidden.items) SELECT * FROM x) q",
-		"WITH RECURSIVE x AS (SELECT * FROM hidden.items UNION ALL SELECT * FROM x) SELECT * FROM x",
+		"WITH x AS (SELECT * FROM app.items) SELECT * FROM (WITH x AS (SELECT * FROM information_schema.tables) SELECT * FROM x) q",
+		"WITH RECURSIVE x AS (SELECT * FROM information_schema.tables UNION ALL SELECT * FROM x) SELECT * FROM x",
 		"SELECT * FROM (SELECT * FROM app.items FOR SHARE) q",
 		strings.Repeat("(", 65) + "SELECT 1" + strings.Repeat(")", 65), strings.Repeat(" ", 65537), "SELECT " + strings.Repeat("1,", 8192) + "1",
 	}
 	for _, q := range negative {
-		if err := Check(q, scope); err == nil {
+		if err := Check(q); err == nil {
 			t.Errorf("rejected query accepted: %.200s", q)
 		}
 	}
 	// Authorization must receive nested and sampling names, with duplicates removed.
-	names, err := Inspect("SELECT lower(upper('a')), lower('b'), count(*) FROM app.items TABLESAMPLE SYSTEM(10)", scope)
+	names, err := Inspect("SELECT lower(upper('a')), lower('b'), count(*) FROM app.items TABLESAMPLE SYSTEM(10)")
 	if err != nil || strings.Join(names, ",") != "count,lower,system,upper" {
 		t.Fatalf("routine authorization names: %v %v", names, err)
 	}
 
-	// The same direct references must be checked in nested queries for blacklists.
-	blocked := config.Scope{Mode: "blacklist", Schemas: []string{"hidden"}}
-	for _, q := range []string{"SELECT * FROM hidden.items", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.items)", "SELECT * FROM pg_catalog.pg_class"} {
-		if Check(q, blocked) == nil {
-			t.Fatalf("blacklist accepted %s", q)
+	// Application schema names are unrestricted; privileges are checked by PostgreSQL.
+	for _, q := range []string{"SELECT * FROM hidden.items", "SELECT * FROM future.items", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.items)"} {
+		if err := Check(q); err != nil {
+			t.Fatalf("application relation rejected: %s: %v", q, err)
 		}
 	}
-	if err := Check("SELECT * FROM future.items", blocked); err != nil {
-		t.Fatal("blacklist blocked future schema", err)
-	}
-	if Check("SELECT * FROM pg_catalog.pg_class", config.Scope{Mode: "blacklist"}) == nil {
-		t.Fatal("all exposes catalog")
-	}
+
 }
 
 func FuzzQueryGuard(f *testing.F) {
@@ -85,7 +76,7 @@ func FuzzQueryGuard(f *testing.F) {
 		if len(q) > 4096 {
 			return
 		}
-		_ = Check(q, config.Scope{Mode: "blacklist"})
+		_ = Check(q)
 	})
 }
 
@@ -95,7 +86,7 @@ func TestNativeParserBudget(t *testing.T) {
 	if os.Getenv("DM_PARSER_CHILD") == "1" {
 		corpus := []string{"SELECT " + strings.Repeat("- ", 8000) + "1", "SELECT " + strings.Repeat("NOT ", 8000) + "true", "SELECT " + strings.Repeat("1 + ", 2000) + "1", "SELECT " + strings.Repeat("(", 64) + "1" + strings.Repeat(")", 64), "SELECT $$" + strings.Repeat("(", 60000) + "$$::text", "/*" + strings.Repeat("/*", 64) + strings.Repeat("*/", 65) + "SELECT 1"}
 		for _, s := range corpus {
-			_ = Check(s, config.Scope{Mode: "blacklist"})
+			_ = Check(s)
 		}
 		return
 	}

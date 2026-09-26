@@ -3,10 +3,7 @@
     {
       "alias": "analytics",
       "driver": "postgres",
-      "database": "analytics",
-      "scope": {
-        "mode": "blacklist"
-      }
+      "database": "analytics"
     }
   ]
 }

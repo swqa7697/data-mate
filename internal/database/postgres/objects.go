@@ -30,11 +30,11 @@ const objectsSQL = `WITH objects AS (
  CASE WHEN o.kind='routine' THEN pg_catalog.pg_get_function_identity_arguments(o.oid) END,
  (SELECT e.extname::text FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
  WHERE d.classid=o.classid AND d.objid=o.oid AND d.objsubid=0 AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype='e')
- FROM objects o JOIN pg_catalog.pg_namespace n ON n.oid=o.namespace WHERE ` + scopedSchemaSQL
+ FROM objects o JOIN pg_catalog.pg_namespace n ON n.oid=o.namespace WHERE ` + accessibleSchemaSQL
 
 func objectKind(k string) bool { return k == "routine" || k == "type" || k == "sequence" }
 
-// ListObjects lists routines, explicit types and sequences under the saved scope.
+// ListObjects lists routines, explicit types and sequences in accessible application schemas.
 func (d *Driver) ListObjects(ctx context.Context, a database.Access, req database.ObjectPageRequest) (database.ObjectPage, error) {
 	a, rev, err := normalized(a)
 	if err != nil {
@@ -61,11 +61,11 @@ func (d *Driver) ListObjects(ctx context.Context, a database.Access, req databas
 	}
 	out := database.ObjectPage{Connection: a.Profile.Alias, Objects: []database.Object{}}
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		args := append(scopeArgs(a.Profile.Scope), req.Schema, req.Kind, pos.Schema, pos.Name, pos.Kind, pos.OID, req.PageSize+1)
+		args := []any{req.Schema, req.Kind, pos.Schema, pos.Name, pos.Kind, pos.OID, req.PageSize + 1}
 		rows, e := tx.Query(ctx, objectsSQL+`
- AND ($3::text='' OR n.nspname=$3) AND ($4::text='' OR o.kind=$4)
- AND (n.nspname::text COLLATE "C",o.name::text COLLATE "C",o.kind COLLATE "C",o.oid) > ($5::text COLLATE "C",$6::text COLLATE "C",$7::text COLLATE "C",$8::oid)
- ORDER BY n.nspname::text COLLATE "C",o.name::text COLLATE "C",o.kind COLLATE "C",o.oid LIMIT $9`, args...)
+ AND ($1::text='' OR n.nspname=$1) AND ($2::text='' OR o.kind=$2)
+ AND (n.nspname::text COLLATE "C",o.name::text COLLATE "C",o.kind COLLATE "C",o.oid) > ($3::text COLLATE "C",$4::text COLLATE "C",$5::text COLLATE "C",$6::oid)
+ ORDER BY n.nspname::text COLLATE "C",o.name::text COLLATE "C",o.kind COLLATE "C",o.oid LIMIT $7`, args...)
 		if e != nil {
 			return e
 		}
@@ -125,12 +125,12 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 	}
 	out := database.ObjectDescription{Connection: a.Profile.Alias}
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		args := append(scopeArgs(a.Profile.Scope), req.Schema, req.Name, req.Kind, signature)
+		args := []any{req.Schema, req.Name, req.Kind, signature}
 		var oid uint32
-		err := tx.QueryRow(ctx, objectsSQL+` AND n.nspname=$3 AND o.name=$4 AND o.kind=$5
- AND CASE WHEN o.kind='routine' THEN pg_catalog.pg_get_function_identity_arguments(o.oid)=$6 ELSE true END`, args...).Scan(&oid, &out.Schema, &out.Name, &out.Kind, &out.IdentityArguments, &out.Extension)
+		err := tx.QueryRow(ctx, objectsSQL+` AND n.nspname=$1 AND o.name=$2 AND o.kind=$3
+ AND CASE WHEN o.kind='routine' THEN pg_catalog.pg_get_function_identity_arguments(o.oid)=$4 ELSE true END`, args...).Scan(&oid, &out.Schema, &out.Name, &out.Kind, &out.IdentityArguments, &out.Extension)
 		if err == pgx.ErrNoRows {
-			return database.Fail(contracts.ScopeDenied, "object is outside the accessible scope", false)
+			return database.Fail(contracts.PermissionDenied, "object is unavailable or inaccessible", false)
 		}
 		if err != nil {
 			return err
@@ -142,7 +142,7 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 		case "type":
 			out.Type, err = describeType(ctx, tx, oid, &budget)
 		case "sequence":
-			out.Sequence, err = describeSequence(ctx, tx, oid, a)
+			out.Sequence, err = describeSequence(ctx, tx, oid)
 		}
 		if err != nil {
 			return err
@@ -246,18 +246,18 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBu
 	return out, err
 }
 
-func describeSequence(ctx context.Context, tx pgx.Tx, oid uint32, a database.Access) (*database.SequenceDescription, error) {
+func describeSequence(ctx context.Context, tx pgx.Tx, oid uint32) (*database.SequenceDescription, error) {
 	out := &database.SequenceDescription{}
 	err := tx.QueryRow(ctx, `SELECT pg_catalog.format_type(seqtypid,NULL),seqstart::text,seqincrement::text,seqmin::text,seqmax::text,seqcache::text,seqcycle FROM pg_catalog.pg_sequence WHERE seqrelid=$1`, oid).Scan(&out.DataType, &out.Start, &out.Increment, &out.Min, &out.Max, &out.Cache, &out.Cycle)
 	if err != nil {
 		return nil, err
 	}
-	args := append(scopeArgs(a.Profile.Scope), oid)
+	args := []any{oid}
 	var schema, name, column string
 	err = tx.QueryRow(ctx, `SELECT n.nspname::text,c.relname::text,at.attname::text FROM pg_catalog.pg_depend d
  JOIN pg_catalog.pg_class c ON c.oid=d.refobjid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
  JOIN pg_catalog.pg_attribute at ON at.attrelid=c.oid AND at.attnum=d.refobjsubid
- WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=$3 AND d.refclassid='pg_catalog.pg_class'::regclass AND d.deptype IN ('a','i') AND `+visibleSQL, args...).Scan(&schema, &name, &column)
+ WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=$1 AND d.refclassid='pg_catalog.pg_class'::regclass AND d.deptype IN ('a','i') AND `+visibleSQL, args...).Scan(&schema, &name, &column)
 	if err == pgx.ErrNoRows {
 		return out, nil
 	}

@@ -168,32 +168,6 @@
               ]
             }
           },
-          "scope": {
-            "type": "object",
-            "properties": {
-              "mode": {
-                "enum": [
-                  "blacklist",
-                  "whitelist"
-                ]
-              },
-              "schemas": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "pattern": "^[^\\x00]+$",
-                  "maxLength": 63
-                },
-                "uniqueItems": true,
-                "maxItems": 4096
-              }
-            },
-            "required": [
-              "mode"
-            ],
-            "additionalProperties": false
-          },
           "limits": {
             "type": "object",
             "properties": {
@@ -222,8 +196,7 @@
           "alias",
           "driver",
           "connection",
-          "transport",
-          "scope"
+          "transport"
         ],
         "additionalProperties": false
       },

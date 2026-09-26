@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/testsupport/transportfixture"
 )
 
@@ -24,12 +23,9 @@ func TestConnectionTerminal(t *testing.T) {
 		keys := &testKeys{}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		fixture := &fixtureDatabase{browseError: mode == "scope-fail", bulkError: mode == "scope-bulk-fail", bulkWait: mode == "scope-bulk-cancel"}
-		if mode == "scope-limit" {
-			fixture.schemaCount = 5000
-		}
+		fixture := &fixtureDatabase{}
 		factory := databaseFactory(defaultDatabase)
-		if strings.HasPrefix(mode, "scope") || strings.HasPrefix(mode, "describe") || mode == "diagnostics" {
+		if strings.HasPrefix(mode, "describe") || mode == "diagnostics" {
 			factory = func() (cliDatabase, error) { return fixture, nil }
 		}
 		run := func(args ...string) int {
@@ -87,48 +83,6 @@ func TestConnectionTerminal(t *testing.T) {
 				fmt.Println("diagnostics end")
 			}
 			os.Exit(0)
-		}
-		if strings.HasPrefix(mode, "scope") {
-			args := append(append([]string{}, basicAdd...), "--passwordless")
-			if mode == "scope-mixed" {
-				args = append(args, "--exclude-schema", "missing")
-			}
-			if code := run(args...); code != 0 {
-				os.Exit(code)
-			}
-			before := files(t, root)
-			code := run("scope", "analytics")
-			if mode == "scope-mixed" {
-				want := config.Scope{Mode: "blacklist", Schemas: []string{"Dot.Schema", "missing", "schema0049"}}
-				if got := snapshot(t, root).Connections[0].Scope; code != 0 || !reflect.DeepEqual(got, want) {
-					t.Fatalf("mode switches lost off-page or missing names: %+v", got)
-				}
-				code = run("scope", "analytics")
-			}
-			if mode == "scope-mixed" || mode == "scope-color" || mode == "scope-limit" {
-				p := snapshot(t, root).Connections[0]
-				want := config.Scope{Mode: "blacklist", Schemas: []string{"Dot.Schema"}}
-				if mode == "scope-mixed" {
-					want.Mode = "whitelist"
-				}
-				if code != 0 || !reflect.DeepEqual(p.Scope, want) || !fixture.closed {
-					t.Fatalf("schema picker: %+v requests=%+v code=%d", p.Scope, fixture.requests, code)
-				}
-				if mode == "scope-mixed" {
-					for _, selection := range []string{"all", "none"} {
-						if code = run("scope"); code != 0 {
-							os.Exit(code)
-						}
-						scope := snapshot(t, root).Connections[0].Scope
-						if (selection == "all") != scope.ContainsSchema("future") || len(scope.Schemas) != 0 {
-							t.Fatal("interactive all/none failed")
-						}
-					}
-				}
-			} else if !reflect.DeepEqual(before, files(t, root)) {
-				t.Fatal("failed/canceled picker modified state")
-			}
-			os.Exit(code)
 		}
 		if strings.HasPrefix(mode, "enroll") {
 			peer := transportfixture.New(t, "ssh", transportfixture.Options{User: "fixture", Password: "synthetic"})

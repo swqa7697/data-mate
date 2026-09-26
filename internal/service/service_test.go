@@ -500,7 +500,7 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 		done <- m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
 			close(started)
 			<-finish
-			if a.Profile.Scope.Mode != "blacklist" {
+			if a.Profile.Connection.Port != 1 {
 				return ErrState
 			}
 			return nil
@@ -519,10 +519,10 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	profiles.Connections[0].Scope = config.Scope{Mode: "whitelist", Schemas: []string{}}
+	profiles.Connections[0].Connection.Port = 2
 	putProfiles(t, s, profiles)
 	if err := m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
-		if a.Profile.Scope.Mode != "whitelist" {
+		if a.Profile.Connection.Port != 2 {
 			return ErrState
 		}
 		return nil
@@ -557,14 +557,14 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	queued := make(chan error, 1)
 	go func() {
 		queued <- m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
-			if a.Profile.Scope.Mode != "blacklist" {
+			if a.Profile.Connection.Port != 1 {
 				return ErrState
 			}
 			return nil
 		})
 	}()
 	waitFor(t, func() bool { return len(m.waiting) == 1 })
-	profiles.Connections[0].Scope = config.Scope{Mode: "blacklist"}
+	profiles.Connections[0].Connection.Port = 1
 	putProfiles(t, s, profiles)
 	for range cap(m.waiting) - 1 {
 		m.waiting <- struct{}{}

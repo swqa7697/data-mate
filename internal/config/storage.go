@@ -91,8 +91,7 @@ type Store struct {
 }
 
 // OpenExisting pins initialized state without creating files or migrating an
-// inventory. Interactive catalog browsing uses it so cancellation cannot leave
-// initialization artifacts. A state lease must still validate each snapshot.
+// inventory. A state lease must still validate each snapshot.
 func OpenExisting(ctx context.Context, root Root) (*Store, error) {
 	return openExisting(ctx, root, false)
 }

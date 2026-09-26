@@ -74,31 +74,19 @@ type Stage struct {
 	Error *contracts.Failure `json:"error,omitempty"`
 }
 
-// ScopeRequest pages the user's full role-accessible catalog, independently of saved scope.
-// Browsing returns schemas only; agent table metadata uses PageRequest.
-type ScopeRequest struct{ After, Search string }
-
-// ScopePage retains at most 50 catalog entries. Next is an exact name, not an agent cursor.
-type ScopePage struct {
-	Schemas []string
-	Next    string
-}
-
 // DatabaseDescription is the complete, bounded user-facing catalog. It is never
-// an MCP result: excluded schemas remain visible to the profile's owner.
+// an MCP result; it includes empty accessible application schemas.
 type DatabaseDescription struct {
 	Version  int                 `json:"version"`
 	Alias    string              `json:"alias"`
 	Database string              `json:"database"`
-	Scope    config.Scope        `json:"scope"`
 	Schemas  []SchemaDescription `json:"schemas"`
 }
 
-// SchemaDescription marks saved scope independently of database privileges.
+// SchemaDescription groups readable relations in an accessible application schema.
 type SchemaDescription struct {
-	Name    string         `json:"name"`
-	Allowed bool           `json:"allowed"`
-	Tables  []RelationName `json:"tables"`
+	Name   string         `json:"name"`
+	Tables []RelationName `json:"tables"`
 }
 
 // RelationName describes a relation without reading its columns or rows.

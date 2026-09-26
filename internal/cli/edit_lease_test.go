@@ -18,8 +18,8 @@ import (
 )
 
 // Extends CRUD with an independent database-work owner holding the production
-// read lease. A successful scope publication must wait for that owner to finish.
-func scopeLeaseAcceptance(t *testing.T) {
+// read lease. A successful edit publication must wait for that owner to finish.
+func editLeaseAcceptance(t *testing.T) {
 	t.Helper()
 	root := privateRoot(t)
 	keys := &testKeys{}
@@ -27,7 +27,7 @@ func scopeLeaseAcceptance(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestConnectionCRUD$")
-	child.Env = append(os.Environ(), "DATA_MATE_SCOPE_LEASE="+root)
+	child.Env = append(os.Environ(), "DATA_MATE_EDIT_LEASE="+root)
 	child.WaitDelay = time.Second
 	stdin, err := child.StdinPipe()
 	if err != nil {
@@ -58,7 +58,7 @@ func scopeLeaseAcceptance(t *testing.T) {
 	cmd.SetIn(bytes.NewReader(nil))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"--root", root, "db", "scope", "analytics", "--none", "--yes"})
+	cmd.SetArgs([]string{"--root", root, "db", "edit", "analytics", "--max-rows", "12", "--yes"})
 	done := make(chan error, 1)
 	go func() { done <- cmd.ExecuteContext(ctx) }()
 	// The writer owns admission only once it is waiting for the child's read
@@ -79,20 +79,20 @@ func scopeLeaseAcceptance(t *testing.T) {
 		_ = unix.Flock(int(gate.Fd()), unix.LOCK_UN)
 		select {
 		case err := <-done:
-			t.Fatalf("scope returned before database cleanup: %v", err)
+			t.Fatalf("edit returned before database cleanup: %v", err)
 		case <-ctx.Done():
-			t.Fatal("scope never waited for reader")
+			t.Fatal("edit never waited for reader")
 		default:
 			runtime.Gosched()
 		}
 	}
 	select {
 	case err := <-done:
-		t.Fatalf("scope completed under old lease: %v", err)
+		t.Fatalf("edit completed under old lease: %v", err)
 	default:
 	}
-	if snapshot(t, root).Connections[0].Scope.Mode != "blacklist" {
-		t.Fatal("scope published before cleanup")
+	if snapshot(t, root).Connections[0].Limits.MaxRows != 500 {
+		t.Fatal("edit published before cleanup")
 	}
 	if _, err = stdin.Write([]byte("release\n")); err != nil {
 		t.Fatal(err)
@@ -108,13 +108,13 @@ func scopeLeaseAcceptance(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-ctx.Done():
-		t.Fatal("scope failed to finish")
+		t.Fatal("edit failed to finish")
 	}
-	if snapshot(t, root).Connections[0].Scope.ContainsSchema("app") {
-		t.Fatal("scope publication missing")
+	if snapshot(t, root).Connections[0].Limits.MaxRows != 12 {
+		t.Fatal("edit publication missing")
 	}
 }
-func scopeLeaseChild(t *testing.T, rootPath string) {
+func editLeaseChild(t *testing.T, rootPath string) {
 	root, err := config.ResolveRoot(rootPath, "")
 	if err != nil {
 		t.Fatal(err)

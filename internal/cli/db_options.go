@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -41,16 +40,6 @@ func profileFlags(cmd *cobra.Command) {
 	}
 	cmd.MarkFlagsMutuallyExclusive("password-stdin", "credentials-stdin")
 	cmd.MarkFlagsMutuallyExclusive("password-stdin", "passwordless", "clear-password")
-	scopeFlags(cmd)
-}
-func scopeFlags(cmd *cobra.Command) {
-	f := cmd.Flags()
-	f.Bool("all", false, "Allow all accessible schemas, including future schemas")
-	f.Bool("none", false, "Allow no schemas, including future schemas")
-	f.String("scope-json", "", "Exact nonsecret schema scope JSON")
-	f.StringArray("schema", nil, "Allow only these exact schemas (repeatable whitelist)")
-	f.StringArray("exclude-schema", nil, "Allow all except these exact schemas (repeatable blacklist)")
-	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "schema", "exclude-schema")
 }
 func str(cmd *cobra.Command, name string) string  { v, _ := cmd.Flags().GetString(name); return v }
 func flag(cmd *cobra.Command, name string) bool   { v, _ := cmd.Flags().GetBool(name); return v }
@@ -154,27 +143,6 @@ func applyOptions(cmd *cobra.Command, p *config.Profile) error {
 	if changed(cmd, "max-result-bytes") {
 		p.Limits.MaxResultBytes = integer(cmd, "max-result-bytes")
 	}
-	return applyScope(cmd, p)
-}
-func applyScope(cmd *cobra.Command, p *config.Profile) error {
-	if !scopeSelected(cmd) {
-		return nil
-	}
-	scope := config.Scope{Mode: "whitelist"}
-	if flag(cmd, "all") || changed(cmd, "exclude-schema") {
-		scope.Mode = "blacklist"
-	}
-	if changed(cmd, "scope-json") {
-		b, err := contracts.JSON(strings.NewReader(str(cmd, "scope-json")), config.MaxProfileBytes)
-		if err != nil || contracts.Validate("scope", b) != nil || json.Unmarshal(b, &scope) != nil {
-			return invalid("invalid scope JSON")
-		}
-	} else if changed(cmd, "exclude-schema") {
-		scope.Schemas, _ = cmd.Flags().GetStringArray("exclude-schema")
-	} else {
-		scope.Schemas, _ = cmd.Flags().GetStringArray("schema")
-	}
-	p.Scope = scope
 	return nil
 }
 func sshHost(p *config.Profile) string {

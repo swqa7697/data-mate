@@ -112,7 +112,7 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 			t.Log("native retry root retained", root.Path)
 		}
 	}()
-	args := []string{"db", "add", "--alias", "fixture", "--host", p.Connection.Host, "--port", fmt.Sprint(p.Connection.Port), "--database", p.Connection.Database, "--username", p.Connection.Username, "--password-stdin", "--schema", "app", "--yes"}
+	args := []string{"db", "add", "--alias", "fixture", "--host", p.Connection.Host, "--port", fmt.Sprint(p.Connection.Port), "--database", p.Connection.Database, "--username", p.Connection.Username, "--password-stdin", "--yes"}
 	if out, e := run(password+"\n", args...); e != nil {
 		t.Fatalf("native profile: %v %s", e, out)
 	}
@@ -141,16 +141,15 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 		}
 		t.Logf("%s all six tools and shared policy rejection passed", client)
 	}
-	if out, e := run("", "db", "scope", "fixture", "--none", "--yes"); e != nil {
-		t.Fatalf("native narrow scope: %v %s", e, out)
-	}
+	sql("REVOKE SELECT ON app.native_agent_items FROM reader")
+	defer sql("GRANT SELECT ON app.native_agent_items TO reader")
 	for _, client := range []string{"codex", "claude"} {
 		prompt := fmt.Sprintf("Use only MCP server %s. Call query with connection fixture and sql SELECT id FROM app.native_agent_items. Report the error code. Do not use any other tools or modify settings.", name)
 		raw := runNativeAgent(t, ctx, dir, client, name, prompt, false)
-		if !hasNativeTool(raw, client, name, "query") || !bytes.Contains(nativeResults(raw, client, name, "query"), []byte("SCOPE_DENIED")) {
-			t.Fatalf("%s scope denial missing: %s", client, nativeSummary(raw))
+		if !hasNativeTool(raw, client, name, "query") || !bytes.Contains(nativeResults(raw, client, name, "query"), []byte("PERMISSION_DENIED")) {
+			t.Fatalf("%s privilege denial missing: %s", client, nativeSummary(raw))
 		}
-		t.Logf("%s scope narrowing denied query", client)
+		t.Logf("%s revoked privileges denied query", client)
 	}
 	// A native explicit deny overrides the otherwise allowed read-only tool.
 	prompt := fmt.Sprintf("Try calling the query tool on server %s with connection fixture and sql SELECT 1. Report if permission prevents the call. Do not use other tools or modify settings.", name)

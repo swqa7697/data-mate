@@ -10,7 +10,7 @@ import (
 )
 
 // Extends the existing owned scenario. Former compiler restrictions become
-// successful reads; direct scope and PostgreSQL write rejection remain tested.
+// successful reads; direct relation restrictions and PostgreSQL write rejection remain tested.
 func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(string, ...any)) {
 	t.Helper()
 	sql(`INSERT INTO app.items(id,name,amount) VALUES(1,'alpha',1.25),(2,'beta',2.50),(3,'alpha',NULL),(4,NULL,-4.75);
@@ -34,6 +34,8 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		name, sql string
 		params    []json.RawMessage
 	}{
+		{"cross schema", "SELECT * FROM hidden.target", nil},
+		{"nested cross schema", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.target)", nil},
 		{"literal", "SELECT 1 AS one, 'a''b'::text AS quoted, NULL::int4 AS nullable", nil},
 		{"typed literals", "SELECT true,false,1.25,2147483648,1::numeric,'x'::text,'x'::varchar,'2026-09-23'::date,'{}'::json,'{}'::jsonb", nil},
 		{"duplicate derived labels", "SELECT x.* FROM (SELECT id,id,name FROM app.items ORDER BY id) x ORDER BY 1", nil},
@@ -144,8 +146,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		q    string
 		code contracts.Code
 	}{
-		{"SELECT * FROM hidden.target", contracts.ScopeDenied}, {"SELECT * FROM pg_catalog.pg_class", contracts.ScopeDenied},
-		{"SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.target)", contracts.ScopeDenied},
+		{"SELECT * FROM pg_catalog.pg_class", contracts.QueryUnsupported},
 		{"SELECT secret FROM app.column_grants", contracts.PermissionDenied},
 		{"SELECT app.policy_probe()", contracts.ReadOnlyViolation},
 		{"SELECT * FROM app.read_hidden()", contracts.ReadOnlyViolation},

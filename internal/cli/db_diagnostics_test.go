@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 )
@@ -116,42 +115,25 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatal("invalid config reached vault or driver")
 	}
 	saveProfiles(t, root, original)
-	// Extend the existing CLI/service database scenario: descriptions must pair
-	// the full user catalog with saved policy without altering stored settings.
-	for _, scope := range []config.Scope{
-		{Mode: "blacklist", Schemas: []string{"missing", "private"}},
-		{Mode: "whitelist", Schemas: []string{"missing", "public"}},
-		{Mode: "whitelist"},
-		{Mode: "blacklist"},
-	} {
-		profiles := snapshot(t, root)
-		for i := range profiles.Connections {
-			if profiles.Connections[i].Alias == "good" {
-				profiles.Connections[i].Scope = scope
-			}
-		}
-		saveProfiles(t, root, profiles)
+	// Descriptions preserve the complete readable catalog without changing settings.
+	{
 		out, d := runCommand("describe", &fixtureDatabase{}, 0, "good", "--json")
 		var description database.DatabaseDescription
 		if contracts.Validate("db-describe.output", []byte(out)) != nil || json.Unmarshal([]byte(out), &description) != nil {
 			t.Fatal("description JSON contract", out)
 		}
-		if description.Alias != "good" || description.Database != "app" || !reflect.DeepEqual(description.Scope, scope) || len(description.Schemas) != 4 || len(d.described) != 1 || !d.closed {
+		if description.Alias != "good" || description.Database != "app" || len(description.Schemas) != 4 || len(d.described) != 1 || !d.closed {
 			t.Fatalf("description snapshot: %+v", description)
 		}
 		for _, s := range description.Schemas {
-			if s.Allowed != scope.ContainsSchema(s.Name) || s.Tables == nil {
-				t.Fatal("description lost policy or empty collections")
+			if s.Tables == nil {
+				t.Fatal("description lost empty collections")
 			}
 		}
 		out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
 		for _, s := range description.Schemas {
-			status := "excluded"
-			if s.Allowed {
-				status = "allowed"
-			}
-			if !strings.Contains(out, fmt.Sprintf("%q [%s]", s.Name, status)) {
-				t.Fatal("human description lost schema status", out)
+			if !strings.Contains(out, fmt.Sprintf("%q", s.Name)) {
+				t.Fatal("human description lost schema", out)
 			}
 		}
 		if !strings.Contains(out, `"line\n\x1b[31m" (table)`) {

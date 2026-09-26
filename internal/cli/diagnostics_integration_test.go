@@ -85,8 +85,7 @@ func liveDiagnostics(t *testing.T, path string) {
 		t.Fatal("live diagnostic leaked password")
 	}
 	// Reuse the live CLI/service fixture for the complete describe path, including
-	// scope exclusion labels and all-or-nothing output on connection failures.
-	command(t, root, keys, "", 0, "scope", "good", "--exclude-schema", "hidden", "--yes")
+	// cross-schema access and all-or-nothing output on connection failures.
 	out, _ = command(t, root, keys, "", 0, "describe", "good", "--json")
 	var description database.DatabaseDescription
 	if contracts.Validate("db-describe.output", []byte(out)) != nil || json.Unmarshal([]byte(out), &description) != nil || strings.Contains(out, password) {
@@ -96,13 +95,13 @@ func liveDiagnostics(t *testing.T, path string) {
 	for _, s := range description.Schemas {
 		if s.Name == "hidden" {
 			found = true
-			if s.Allowed || len(s.Tables) == 0 {
-				t.Fatal("excluded readable catalog missing")
+			if len(s.Tables) == 0 {
+				t.Fatal("readable catalog missing")
 			}
 		}
 	}
 	if !found {
-		t.Fatal("description filtered saved scope")
+		t.Fatal("description omitted accessible schema")
 	}
 	for _, alias := range []string{"bad-auth", "bad-tls"} {
 		out, stderr := command(t, root, keys, "", 1, "describe", alias, "--json")

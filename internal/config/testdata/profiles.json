@@ -15,9 +15,6 @@
         "tls": {
           "mode": "disabled"
         }
-      },
-      "scope": {
-        "mode": "blacklist"
       }
     }
   ]

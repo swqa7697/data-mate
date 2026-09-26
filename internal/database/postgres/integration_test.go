@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,7 +21,7 @@ import (
 )
 
 func profile() config.Profile {
-	return config.Profile{ID: "12345678-1234-1234-1234-123456789abc", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "localhost", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "blacklist"}}
+	return config.Profile{ID: "12345678-1234-1234-1234-123456789abc", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "localhost", Port: 5432, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
 }
 func driver(t *testing.T) *Driver {
 	t.Helper()
@@ -185,7 +184,6 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Fatal("readiness audited grants", err)
 	}
 	sql("REVOKE UPDATE ON app.items FROM reader")
-	p.Scope = config.Scope{Mode: "whitelist", Schemas: []string{"app", "Dot.Schema"}}
 	access = database.NewAccess(p, password)
 	seen := map[string]database.Table{}
 	req := database.PageRequest{PageSize: 2}
@@ -200,9 +198,6 @@ func TestPostgresIntegration(t *testing.T) {
 			t.Fatal("metadata contract", err)
 		}
 		for _, table := range page.Tables {
-			if table.Schema == "hidden" {
-				t.Fatal("hidden metadata")
-			}
 			key := table.Schema + "/" + table.Name
 			if _, ok := seen[key]; ok {
 				t.Fatal("duplicate page row")
@@ -217,7 +212,7 @@ func TestPostgresIntegration(t *testing.T) {
 			firstCursor = req.Cursor
 		}
 	}
-	if len(seen) != 8 || seen["app/a_view"].Kind != "view" || seen["app/custom_type"].Name == "" {
+	if len(seen) != 12 || seen["app/a_view"].Kind != "view" || seen["app/custom_type"].Name == "" {
 		t.Fatalf("catalog: %#v", seen)
 	}
 
@@ -229,47 +224,27 @@ func TestPostgresIntegration(t *testing.T) {
 	if err := contracts.Validate("describe_table.output", encoded); err != nil {
 		t.Fatal("description contract", err)
 	}
-	if len(desc.Relationships) != 0 || len(desc.Keys) != 1 || len(desc.Columns) != 5 {
-		t.Fatalf("scoped description: %#v", desc)
+	if len(desc.Relationships) != 1 || len(desc.Keys) != 1 || len(desc.Columns) != 5 {
+		t.Fatalf("readable description: %#v", desc)
 	}
-	all := p
-	all.Scope = config.Scope{Mode: "blacklist"}
-	desc, err = d.DescribeTable(t.Context(), database.NewAccess(all, password), config.Table{Schema: "app", Name: "items"})
-	if err != nil || len(desc.Relationships) != 1 {
-		t.Fatalf("visible relationship: %v", err)
-	}
-	all.Scope.Schemas = []string{"hidden"}
-	desc, err = d.DescribeTable(t.Context(), database.NewAccess(all, password), config.Table{Schema: "app", Name: "items"})
+	// Foreign-key endpoints follow current database privileges, including revocation.
+	sql("REVOKE SELECT ON hidden.target FROM reader")
+	desc, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "app", Name: "items"})
 	if err != nil || len(desc.Relationships) != 0 {
-		t.Fatal("blacklist leaked excluded foreign-key endpoint", err)
+		t.Fatal("inaccessible foreign-key endpoint exposed", err)
 	}
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "hidden", Name: "target"})
-	requireCode(t, err, contracts.ScopeDenied)
-	none := p
-	none.Scope = config.Scope{Mode: "whitelist"}
-	page, err := d.ListTables(t.Context(), database.NewAccess(none, password), database.PageRequest{})
-	if err != nil || len(page.Tables) != 0 {
-		t.Fatal("empty scope", err)
-	}
-	// User browsing ignores saved scope but retains role visibility and relation
-	// support. Agents still see none through ListTables above.
-	browse, err := d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{})
-	if err != nil || !slices.Contains(browse.Schemas, "Dot.Schema") || !slices.Contains(browse.Schemas, "hidden") {
-		t.Fatalf("full user catalog: %+v %v", browse, err)
-	}
-	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Search: "Dot.Schema"})
-	if err != nil || len(browse.Schemas) != 1 || browse.Schemas[0] != "Dot.Schema" {
-		t.Fatalf("exact catalog identifiers: %+v %v", browse, err)
-	}
-	browse, err = d.BrowseScope(t.Context(), database.NewAccess(none, password), database.ScopeRequest{Search: "%"})
-	if err != nil || len(browse.Schemas) != 0 {
-		t.Fatal("search interpreted wildcard", err)
-	}
+	requireCode(t, err, contracts.PermissionDenied)
+	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "hidden", Name: "missing"})
+	requireCode(t, err, contracts.PermissionDenied)
+	sql("GRANT SELECT ON hidden.target TO reader")
+	changed := p
+	changed.Alias = "renamed"
 	for _, r := range []database.PageRequest{{Cursor: firstCursor + "x"}, {Cursor: firstCursor, Schema: "app"}} {
 		_, err = d.ListTables(t.Context(), access, r)
 		requireCode(t, err, contracts.StaleCursor)
 	}
-	_, err = d.ListTables(t.Context(), database.NewAccess(none, password), database.PageRequest{Cursor: firstCursor})
+	_, err = d.ListTables(t.Context(), database.NewAccess(changed, password), database.PageRequest{Cursor: firstCursor})
 	requireCode(t, err, contracts.StaleCursor)
 	fresh := driver(t)
 	_, err = fresh.ListTables(t.Context(), access, database.PageRequest{Cursor: firstCursor})
@@ -283,7 +258,7 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	sql("REVOKE SELECT ON app.items FROM reader")
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "app", Name: "items"})
-	requireCode(t, err, contracts.ScopeDenied)
+	requireCode(t, err, contracts.PermissionDenied)
 	sql("GRANT SELECT ON app.items TO reader")
 	if _, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "DELETE FROM app.rls"}); err == nil {
 		t.Fatal("write query accepted")
@@ -294,7 +269,7 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	mcpAcceptance(t, d, access)
 	nativeAgentAcceptance(t, p, password, sql)
-	scopeAcceptance(t, d, access, password, sql)
+	catalogAcceptance(t, d, access, password, sql)
 	cliDiagnosticsAcceptance(t, fixture.Root)
 	queryAcceptance(t, d, access, sql)
 	objectAcceptance(t, d, access, admin, sql)

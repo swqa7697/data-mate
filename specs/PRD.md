@@ -16,9 +16,9 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
 - Read Only: The MCP service provides only read-only tools and permissions to agents. Explicit calls to application-defined and extension routines are prohibited; core PostgreSQL routines remain available. Indirect execution through permitted database objects remains PostgreSQL's responsibility
-- Database Context: Agents can inspect scoped routines and their source, enum and other explicit type details, sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
+- Database Access: PostgreSQL privileges determine access to application schemas and objects, including newly created ones. Use an operator-managed read-only account with grants limited to the intended data
+- Database Context: Agents can inspect accessible routines and their source, enum and other explicit type details, sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
 - Query Capacity: Support 20–40-second analytical queries with a 60-second default budget, configurable up to five minutes; allow eight database connections per profile, 16 concurrent requests per MCP session, and 32 active database operations across sessions.
-- Flexible Scope: Users configure allowed schemas for each saved DB connection through whitelist or blacklist mode; individual table selection is not supported
 - Simple Management: Users can conveniently and simply add/remove/modify a DB connection without pain
 - Security: Keep nonsecret connection profiles in files, never leak credentials in plain text, and never expose credentials to agents.
 - Full CLI integration: standard + interactive CLI user experience
@@ -69,15 +69,14 @@ Pretty and colored CLI experience. Scrathed commands design below.
 - DB - Interactive | preivew & confirm (Y/N)
   - `db add`: Config "driver (PG only this version), connection alias ("c-alias" below), host, port, DB name, username, password" only -- all advanced options are disabled by default
   - `db add [add-on-options]`: Add optional flags to add connection with advanced options like SSL/TLS, SSH tunnel and proxy
-  - `db scope [c-alias]`: Choose allowed schemas in a colored, searchable checkbox list; Space toggles one schema, `a` toggles all, and `m` switches whitelist/blacklist modes while preserving checkboxes. Enter previews before confirmation. New connections default to an empty blacklist, allowing all current and future accessible application schemas. Whitelists block future schemas; blacklists allow them
   - `db edit [c-alias(optional)]`: Modify a DB connection
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
 - DB - One shot
-  - `db list` / `db ls`: List all available DB connections with their visible scopes
-  - `db describe [c-alias(optional)]`: Print accessible application schemas and readable table/view names, including empty schemas, with allowed/excluded scope labels and the saved future-schema policy. Select one profile interactively when omitted; scripts require an alias. Support versioned `--json`; bound complete results to 4,096 combined schemas/relations and profile byte/time limits, failing without partial output when exceeded
+  - `db list` / `db ls`: List all available DB connections
+  - `db describe [c-alias(optional)]`: Print accessible application schemas and readable table/view names, including empty schemas. Select one profile interactively when omitted; scripts require an alias. Support versioned `--json`; bound complete results to 4,096 combined schemas/relations and profile byte/time limits, failing without partial output when exceeded
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
 - MCP - One shot
-  - `mcp start`: Start the MCP service to expose all available DB connections with configured visible scope, to all supported agents
+  - `mcp start`: Start the MCP service to expose all available DB connections to all supported agents
   - `mcp stop`: Stop the MCP service
   - `mcp status`: Print status of the MCP service
 - General - One Shot
@@ -86,7 +85,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `help`: Print help messages
   - `version`: Print version
 
-**No Start-Agent Commands**: All agents are decoupled from Data Mate -- any session can find and use an active Data Mate MCP service to get information requested by users. Don't require users to do anything other than running `data-mate mcp start` before starting an agent session to analysis data. Configuring the visible scopes is optional, based on users needs.
+**No Start-Agent Commands**: All agents are decoupled from Data Mate -- any session can find and use an active Data Mate MCP service to get information requested by users. Don't require users to do anything other than running `data-mate mcp start` before starting an agent session to analysis data.
 
 ### Singleton & ENV Exclusive
 
