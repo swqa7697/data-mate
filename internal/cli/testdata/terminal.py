@@ -12,7 +12,7 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
-for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "scope-mixed", "scope-color", "scope-limit", "scope-bulk-fail", "scope-bulk-cancel", "scope-no", "scope-cancel", "scope-fail", "diagnostics"):
+for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "scope-mixed", "scope-color", "scope-limit", "scope-bulk-fail", "scope-bulk-cancel", "scope-no", "scope-cancel", "scope-fail", "diagnostics", "describe", "describe-cancel"):
     root = os.path.join(base, mode)
     os.mkdir(root, 0o700)
     master, slave = pty.openpty()
@@ -51,6 +51,13 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             # the JSON write before proc.wait completes.
             send_after("diagnostics json\r\n", "")
             send_after("diagnostics end\r\n", "")
+        elif mode.startswith("describe"):
+            send_after("Connection number or alias:", "1\r" if mode == "describe" else "\x03")
+            if mode == "describe":
+                # Drain the result before closing the slave; Darwin can discard
+                # unread terminal output on its last close.
+                send_after('{"version":', "")
+                send_after('\r\n', "")
         elif mode.startswith("scope"):
             if mode != "scope-fail":
                 send_after("Choose schemas", " ")
@@ -104,7 +111,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith(("enroll", "scope")) or mode == "diagnostics":
+        if mode.startswith(("enroll", "scope", "describe")) or mode == "diagnostics":
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -146,7 +153,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode in ("happy", "enroll", "scope-mixed", "scope-color", "scope-limit", "diagnostics") else 1 if mode == "scope-fail" else 130), (mode, code, transcript)
+        assert code == (0 if mode in ("happy", "enroll", "scope-mixed", "scope-color", "scope-limit", "diagnostics", "describe") else 1 if mode == "scope-fail" else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
         if mode == "diagnostics":
@@ -166,6 +173,10 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                     assert lines[:-1] == [b"bad  " + failed,
                                          b"  authentication: CONNECT_FAILED: authentication failed",
                                          b"good  " + passed], block
+        elif mode == "describe":
+            assert b'{"version"' in transcript, (mode, transcript)
+            report, _ = json.JSONDecoder().raw_decode(transcript[transcript.index(b'{"version"'):].decode())
+            assert report["alias"] == "analytics" and len(report["schemas"]) == 4, report
         elif mode == "scope-color":
             assert b"\x1b[1;36m" in transcript and b"\x1b[32m" in transcript, "picker color missing"
         else:
@@ -188,7 +199,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             assert b'reader' in transcript, "username must remain visible"
             # Raw-mode review must emit CRLF so subsequent lines start at column 0.
             assert b'\r\nAlias: analytics\r\nDriver: postgres\r\n' in transcript
-        elif mode != "diagnostics":
+        elif mode != "diagnostics" and not mode.startswith("describe"):
             assert os.listdir(root) == [], "cancellation created state"
         for parent, _, names in os.walk(root):
             for name in names:

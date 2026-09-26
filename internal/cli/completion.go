@@ -44,7 +44,7 @@ func addCompletion(root *cobra.Command, override *string, build Build) {
 			}
 			_ = cmd.RegisterFlagCompletionFunc(f.Name, callback)
 		})
-		if cmd.Parent() != nil && cmd.Parent().Name() == "db" && slices.Contains([]string{"edit", "scope", "remove", "test"}, cmd.Name()) {
+		if cmd.Parent() != nil && cmd.Parent().Name() == "db" && slices.Contains([]string{"edit", "scope", "remove", "test", "describe"}, cmd.Name()) {
 			cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
 				out := []string{}
 				if len(args) != 0 {

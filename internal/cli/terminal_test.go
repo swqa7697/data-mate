@@ -29,7 +29,7 @@ func TestConnectionTerminal(t *testing.T) {
 			fixture.schemaCount = 5000
 		}
 		factory := databaseFactory(defaultDatabase)
-		if strings.HasPrefix(mode, "scope") || mode == "diagnostics" {
+		if strings.HasPrefix(mode, "scope") || strings.HasPrefix(mode, "describe") || mode == "diagnostics" {
 			factory = func() (cliDatabase, error) { return fixture, nil }
 		}
 		run := func(args ...string) int {
@@ -46,6 +46,21 @@ func TestConnectionTerminal(t *testing.T) {
 		}
 		// Extend the PTY harness because buffered diagnostics cannot verify output
 		// terminal detection, especially when stdin is redirected.
+		if strings.HasPrefix(mode, "describe") {
+			command(t, root, keys, "", 0, append(basicAdd, "--passwordless")...)
+			before := files(t, root)
+			code := run("describe", "--json")
+			if !reflect.DeepEqual(before, files(t, root)) {
+				t.Fatal("description changed saved state")
+			}
+			if mode == "describe" && (code != 0 || len(fixture.described) != 1) {
+				t.Fatal("description picker did not select profile")
+			}
+			if mode == "describe-cancel" && (code != ExitCancelled || len(fixture.described) != 0) {
+				t.Fatal("canceled description reached database")
+			}
+			os.Exit(code)
+		}
 		if mode == "diagnostics" {
 			for _, alias := range []string{"good", "bad"} {
 				command(t, root, keys, "", 0, "add", "--alias", alias, "--host", "localhost", "--database", "app", "--username", "reader", "--passwordless", "--yes")

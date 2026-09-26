@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/database/postgres"
 )
 
@@ -82,5 +83,31 @@ func liveDiagnostics(t *testing.T, path string) {
 	out, _ = command(t, root, keys, "", 0, "test", "good", "--json")
 	if strings.Contains(out, password) {
 		t.Fatal("live diagnostic leaked password")
+	}
+	// Reuse the live CLI/service fixture for the complete describe path, including
+	// scope exclusion labels and all-or-nothing output on connection failures.
+	command(t, root, keys, "", 0, "scope", "good", "--exclude-schema", "hidden", "--yes")
+	out, _ = command(t, root, keys, "", 0, "describe", "good", "--json")
+	var description database.DatabaseDescription
+	if contracts.Validate("db-describe.output", []byte(out)) != nil || json.Unmarshal([]byte(out), &description) != nil || strings.Contains(out, password) {
+		t.Fatal("live description contract or redaction")
+	}
+	found := false
+	for _, s := range description.Schemas {
+		if s.Name == "hidden" {
+			found = true
+			if s.Allowed || len(s.Tables) == 0 {
+				t.Fatal("excluded readable catalog missing")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("description filtered saved scope")
+	}
+	for _, alias := range []string{"bad-auth", "bad-tls"} {
+		out, stderr := command(t, root, keys, "", 1, "describe", alias, "--json")
+		if out != "" || strings.Contains(stderr, password) || strings.Contains(stderr, "synthetic-wrong-password") {
+			t.Fatal("failed description returned partial data or secret")
+		}
 	}
 }

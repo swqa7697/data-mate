@@ -23,8 +23,8 @@ import (
 
 func newDB(override *string, factory managementFactory, build Build) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, action := range []string{"add", "edit", "remove", "list", "scope"} {
-		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose allowed schemas"}[action], Args: cobra.MaximumNArgs(1)}
+	for _, action := range []string{"add", "edit", "remove", "list", "scope", "describe"} {
+		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose allowed schemas", "describe": "Describe accessible schemas, tables, and saved scope"}[action], Args: cobra.MaximumNArgs(1)}
 		if action == "add" || action == "list" {
 			cmd.Args = cobra.NoArgs
 		}
@@ -33,6 +33,11 @@ func newDB(override *string, factory managementFactory, build Build) *cobra.Comm
 		}
 		if action == "list" {
 			cmd.Aliases = []string{"ls"}
+		}
+		if action == "describe" {
+			cmd.Use = "describe [alias]"
+		}
+		if action == "list" || action == "describe" {
 			cmd.Flags().Bool("json", false, "Versioned JSON output")
 		} else {
 			cmd.Flags().Bool("yes", false, "Confirm a complete operation")
@@ -110,6 +115,9 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 			if len(profiles.Connections) == 0 {
 				return invalid("no saved connections")
 			}
+			if action == "describe" && !hasTerminal(cmd) {
+				return invalid("connection alias is required without a terminal")
+			}
 			f, err := getForm()
 			if err != nil {
 				return err
@@ -138,6 +146,17 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		if index < 0 {
 			return invalid("connection alias not found")
 		}
+	}
+	if action == "describe" {
+		// Restore cooked output before printing to a terminal or unlocking keys.
+		if ui != nil {
+			err := ui.restore()
+			ui = nil
+			if err != nil {
+				return failure("cannot restore terminal")
+			}
+		}
+		return describeDatabase(cmd, root, revision, profiles.Connections[index], factory)
 	}
 	var profile, original config.Profile
 	patch := secretPatch{}

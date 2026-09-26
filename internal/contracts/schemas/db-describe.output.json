@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "alias": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "database": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "blacklist",
+            "whitelist"
+          ]
+        },
+        "schemas": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "uniqueItems": true,
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "schemas": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[^\\x00]+$"
+          },
+          "allowed": {
+            "type": "boolean"
+          },
+          "tables": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 63,
+                  "pattern": "^[^\\x00]+$"
+                },
+                "kind": {
+                  "enum": [
+                    "table",
+                    "partitioned_table",
+                    "view",
+                    "materialized_view",
+                    "foreign_table"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "name",
+          "allowed",
+          "tables"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "alias",
+    "database",
+    "scope",
+    "schemas"
+  ],
+  "additionalProperties": false
+}

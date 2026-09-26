@@ -73,6 +73,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections with their visible scopes
+  - `db describe [c-alias(optional)]`: Print accessible application schemas and readable table/view names, including empty schemas, with allowed/excluded scope labels and the saved future-schema policy. Select one profile interactively when omitted; scripts require an alias. Support versioned `--json`; bound complete results to 4,096 combined schemas/relations and profile byte/time limits, failing without partial output when exceeded
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
 - MCP - One shot
   - `mcp start`: Start the MCP service to expose all available DB connections with configured visible scope, to all supported agents

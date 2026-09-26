@@ -16,13 +16,34 @@ import (
 
 // Shared by command diagnostics and the PTY subprocess; no network or native keys.
 type fixtureDatabase struct {
-	requests    []database.ScopeRequest
-	tested      []string
-	closed      bool
-	browseError bool
-	schemaCount int
-	bulkError   bool
-	bulkWait    bool
+	requests      []database.ScopeRequest
+	tested        []string
+	closed        bool
+	browseError   bool
+	schemaCount   int
+	bulkError     bool
+	bulkWait      bool
+	described     []string
+	describeError error
+	emptyCatalog  bool
+}
+
+func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access) (database.DatabaseDescription, error) {
+	d.described = append(d.described, a.Profile.Alias)
+	if d.describeError != nil {
+		return database.DatabaseDescription{}, d.describeError
+	}
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Scope: a.Profile.Scope, Schemas: []database.SchemaDescription{}}
+	if !d.emptyCatalog {
+		for _, name := range []string{"Dot.Schema", "empty", "private", "public"} {
+			s := database.SchemaDescription{Name: name, Allowed: a.Profile.Scope.ContainsSchema(name), Tables: []database.RelationName{}}
+			if name != "empty" {
+				s.Tables = append(s.Tables, database.RelationName{Name: "line\n\x1b[31m", Kind: "table"})
+			}
+			out.Schemas = append(out.Schemas, s)
+		}
+	}
+	return out, nil
 }
 
 func (d *fixtureDatabase) ValidateProfile(p config.Profile) error {
@@ -84,6 +105,7 @@ type cliDatabase interface {
 	ValidateProfile(config.Profile) error
 	Test(context.Context, database.Access) (database.Readiness, error)
 	BrowseScope(context.Context, database.Access, database.ScopeRequest) (database.ScopePage, error)
+	DescribeDatabase(context.Context, database.Access) (database.DatabaseDescription, error)
 	Close()
 }
 type databaseFactory func() (cliDatabase, error)

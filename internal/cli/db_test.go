@@ -223,7 +223,7 @@ func TestConnectionCRUD(t *testing.T) {
 	// Completion reuses this CRUD fixture and must not unlock credentials or write.
 	completionBefore := files(t, root)
 	completionCalls := keys.calls
-	for _, action := range []string{"edit", "scope", "remove", "rm", "test"} {
+	for _, action := range []string{"edit", "scope", "remove", "rm", "test", "describe"} {
 		cmd := newCommand(Build{}, keys)
 		var output bytes.Buffer
 		cmd.SetOut(&output)

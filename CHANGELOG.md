@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `db describe [alias]` with an interactive profile picker and versioned `--json` output to list accessible schemas and readable tables/views, mark allowed and excluded schemas, and show the saved scope policy; fail clearly when complete results exceed catalog, byte, or timeout limits.
+
 ### Changed
 
 - Replace schema/table scope selection with schema-only whitelist and blacklist modes, defaulting new connections to all accessible schemas. Add `--exclude-schema` and a colored picker with immediate checkbox toggling, one-key toggle-all, and mode switching that preserves selections; old scope formats require profile recreation.

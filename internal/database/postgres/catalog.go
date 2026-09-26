@@ -19,9 +19,13 @@ const maxCatalogObjects = 4096
 
 // Selection is always parameterized. It is applied before keyset LIMIT, so sparse
 // scopes do not require materializing the database catalog in the application.
-const visibleSQL = `n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema'
- AND c.relkind IN ('r','p','v','m','f') AND c.relpersistence<>'t'
- AND pg_catalog.has_schema_privilege(n.oid,'USAGE') AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.has_any_column_privilege(c.oid,'SELECT'))
+const accessibleSchemaSQL = `n.nspname NOT LIKE 'pg\_%' AND n.nspname<>'information_schema'
+ AND pg_catalog.has_schema_privilege(n.oid,'USAGE')`
+
+const readableRelationSQL = `c.relkind IN ('r','p','v','m','f') AND c.relpersistence<>'t'
+ AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.has_any_column_privilege(c.oid,'SELECT'))`
+
+const visibleSQL = accessibleSchemaSQL + ` AND ` + readableRelationSQL + `
  AND (($1::text='blacklist' AND NOT (n.nspname::text=ANY($2::text[]))) OR ($1::text='whitelist' AND n.nspname::text=ANY($2::text[])))`
 
 func scopeArgs(s config.Scope) []any {

@@ -2,10 +2,13 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +27,96 @@ func scopeAcceptance(t *testing.T, d *Driver, a database.Access, password string
 	if err != nil || len(empty.Schemas) != 1 || empty.Schemas[0] != "picker_empty" {
 		t.Fatal("empty accessible schema missing", err)
 	}
+	// Extend the catalog fixture: descriptions preserve empty schemas, list only
+	// readable relations, and annotate rather than hide scope exclusions.
+	sql(`CREATE SCHEMA describe_denied; CREATE TABLE describe_denied.items(id int);
+ GRANT SELECT ON describe_denied.items TO reader;
+ CREATE TABLE picker_empty.unreadable(id int);
+ CREATE TABLE picker.unreadable(id int);
+ CREATE TABLE picker.column_only(id int, secret text); GRANT SELECT(id) ON picker.column_only TO reader;
+ CREATE VIEW picker.a_view AS SELECT 1 AS id;
+ CREATE MATERIALIZED VIEW picker.materialized AS SELECT 1 AS id;
+ CREATE TABLE picker.partitioned(id int) PARTITION BY RANGE(id);
+ CREATE FOREIGN DATA WRAPPER describe_fdw;
+ CREATE SERVER describe_server FOREIGN DATA WRAPPER describe_fdw;
+ CREATE FOREIGN TABLE picker.foreign_table(id int) SERVER describe_server;
+ GRANT SELECT ON picker.a_view,picker.materialized,picker.partitioned,picker.foreign_table TO reader`)
+	defer sql("DROP SCHEMA describe_denied CASCADE")
+	defer sql("DROP FOREIGN DATA WRAPPER describe_fdw CASCADE")
+	for _, scope := range []config.Scope{{Mode: "whitelist", Schemas: []string{"missing"}}, {Mode: "blacklist", Schemas: []string{"picker"}}} {
+		p := a.Profile
+		p.Scope = scope
+		description, err := d.DescribeDatabase(t.Context(), database.NewAccess(p, password))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(description)
+		if contracts.Validate("db-describe.output", raw) != nil || !reflect.DeepEqual(description.Scope, scope) {
+			t.Fatal("database description contract", string(raw))
+		}
+		foundEmpty, foundPicker := false, false
+		previous := ""
+		for _, s := range description.Schemas {
+			if s.Name <= previous || strings.HasPrefix(s.Name, "pg_") || s.Name == "information_schema" || s.Name == "describe_denied" || s.Allowed != scope.ContainsSchema(s.Name) {
+				t.Fatalf("schema visibility/order: %+v", s)
+			}
+			previous = s.Name
+			if s.Name == "picker_empty" {
+				foundEmpty = len(s.Tables) == 0
+			}
+			if s.Name == "picker" {
+				foundPicker = true
+				want := []database.RelationName{{Name: "a_view", Kind: "view"}, {Name: "column_only", Kind: "table"}, {Name: "foreign_table", Kind: "foreign_table"}, {Name: "materialized", Kind: "materialized_view"}, {Name: "partitioned", Kind: "partitioned_table"}}
+				if !reflect.DeepEqual(s.Tables, want) {
+					t.Fatalf("readable relations: %+v", s.Tables)
+				}
+			}
+		}
+		if !foundEmpty || !foundPicker {
+			t.Fatal("description omitted excluded or empty schema")
+		}
+		page, err := d.ListTables(t.Context(), database.NewAccess(p, password), database.PageRequest{Schema: "picker"})
+		if err != nil || len(page.Tables) != 0 {
+			t.Fatal("user catalog relaxed agent scope", err)
+		}
+	}
+	// A compact database-generated corpus verifies the combined schema/relation
+	// boundary in this owned fixture, without thousands of test executions.
+	bounded := a.Profile
+	limits := config.DefaultLimits()
+	bounded.Limits = &limits
+	bounded.Limits.MaxResultBytes = 1 << 20
+	description, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := len(description.Schemas)
+	for _, s := range description.Schemas {
+		count += len(s.Tables)
+	}
+	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(maxCatalogObjects-count) + ` LOOP
+ EXECUTE format('CREATE SCHEMA describe_bound%s',i);
+ EXECUTE format('GRANT USAGE ON SCHEMA describe_bound%s TO reader',i);
+ END LOOP; END $$`)
+	cleanupBounds := func() {
+		sql(`DO $$ DECLARE n text; BEGIN FOR n IN SELECT nspname FROM pg_namespace WHERE nspname LIKE 'describe_bound%' LOOP EXECUTE format('DROP SCHEMA %I CASCADE',n); END LOOP; END $$`)
+	}
+	defer cleanupBounds()
+	if _, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password)); err != nil {
+		t.Fatal("exact catalog bound rejected", err)
+	}
+	sql("CREATE TABLE describe_bound1.extra(id int); GRANT SELECT ON describe_bound1.extra TO reader")
+	result, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
+	requireCode(t, err, contracts.ResourceLimit)
+	if result.Schemas != nil {
+		t.Fatal("oversized catalog returned partial result")
+	}
+	sql("DROP TABLE describe_bound1.extra")
+	bounded.Limits.MaxResultBytes = 1024
+	_, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
+	requireCode(t, err, contracts.ResourceLimit)
+	cleanupBounds()
+	sql("DROP TABLE picker.column_only,picker.unreadable,picker.partitioned,picker_empty.unreadable; DROP VIEW picker.a_view; DROP MATERIALIZED VIEW picker.materialized; DROP FOREIGN TABLE picker.foreign_table")
 	// Empty schemas exercise both pagination and selection before tables exist.
 	for i := range 53 {
 		name := fmt.Sprintf("picker_page%03d", i)

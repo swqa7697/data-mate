@@ -48,12 +48,13 @@ type DiagnosticResult struct {
 
 // ManagementReply contains bounded nonsecret results and fixed safe error identifiers.
 type ManagementReply struct {
-	Outcome     *vault.Outcome      `json:"outcome,omitempty"`
-	Diagnostic  *DiagnosticResult   `json:"diagnostic,omitempty"`
-	Page        *database.ScopePage `json:"page,omitempty"`
-	Error       string              `json:"error,omitempty"`
-	MCPEnabled  bool                `json:"mcp_enabled"`
-	KeysetState string              `json:"keyset_state"`
+	Outcome     *vault.Outcome                `json:"outcome,omitempty"`
+	Diagnostic  *DiagnosticResult             `json:"diagnostic,omitempty"`
+	Page        *database.ScopePage           `json:"page,omitempty"`
+	Description *database.DatabaseDescription `json:"description,omitempty"`
+	Error       string                        `json:"error,omitempty"`
+	MCPEnabled  bool                          `json:"mcp_enabled"`
+	KeysetState string                        `json:"keyset_state"`
 }
 
 var managementErrors = []error{context.Canceled, context.DeadlineExceeded, config.ErrRevision, config.ErrCommitUnknown, config.ErrObsolete, config.ErrRecovery, config.ErrState, config.ErrOwnership, config.ErrStale, config.ErrPurging, vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, vault.ErrCredentialMissing, transport.ErrChangedHost, transport.ErrKnownHosts, ErrState, ErrConflict, ErrRestart, ErrUnavailable}
@@ -229,12 +230,16 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			return
 		}
 		err = m.enable(ctx)
-	case "test", "browse":
-		if q.Mutation != nil || q.Pin != nil || q.ProfileID == "" || q.Alias == "" || (q.Operation == "browse" && (q.Scope == nil || q.Expected == "")) || (q.Operation == "test" && q.Scope != nil) {
+	case "test", "browse", "describe":
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID == "" || q.Alias == "" || (q.Operation == "browse" && q.Scope == nil) || (q.Operation != "test" && q.Expected == "") || (q.Operation != "browse" && q.Scope != nil) {
 			err = ErrState
 			return
 		}
-		reply.Diagnostic, reply.Page, err = m.managementDatabase(ctx, q)
+		var description database.DatabaseDescription
+		reply.Diagnostic, reply.Page, err = m.managementDatabase(ctx, q, &description)
+		if q.Operation == "describe" && err == nil && reply.Diagnostic == nil {
+			reply.Description = &description
+		}
 	default:
 		err = ErrState
 	}
@@ -255,7 +260,7 @@ func (m *Manager) keysetState(ctx context.Context) string {
 	}
 	return m.repo.State()
 }
-func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest) (*DiagnosticResult, *database.ScopePage, error) {
+func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest, description *database.DatabaseDescription) (*DiagnosticResult, *database.ScopePage, error) {
 	started := time.Now()
 	parent, finish := context.WithTimeout(parent, config.MaxQueryTimeout)
 	defer finish()
@@ -274,7 +279,7 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 			p = &profiles.Connections[i]
 		}
 	}
-	if q.Operation == "browse" && revision != q.Expected {
+	if q.Operation != "test" && revision != q.Expected {
 		return nil, nil, config.ErrRevision
 	}
 	if p == nil {
@@ -284,6 +289,9 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 	defer cancel()
 	result := &DiagnosticResult{Alias: p.Alias, Stage: "config", Stages: []database.Stage{{Stage: "config", OK: true}}}
 	fail := func(stage string, code contracts.Code, e error) (*DiagnosticResult, *database.ScopePage, error) {
+		if q.Operation == "describe" && errors.Is(e, context.Canceled) {
+			return nil, nil, context.Canceled
+		}
 		if parent.Err() != nil {
 			return nil, nil, parent.Err()
 		}
@@ -291,7 +299,7 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 			code = contracts.QueryTimeout
 			e = context.DeadlineExceeded
 		}
-		if q.Operation == "browse" {
+		if q.Operation == "browse" || errors.Is(e, config.ErrRevision) {
 			return nil, nil, e
 		}
 		result.Stage = stage
@@ -327,13 +335,26 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		if a.Profile.ID != q.ProfileID {
 			return config.ErrRevision
 		}
-		if q.Operation == "browse" {
+		if q.Operation != "test" {
 			// Work holds the state lease, so a second passive read observes the same generation.
 			// Avoid acquiring a second application lease while a writer is waiting.
 			current := m.currentRevision()
 			if current != q.Expected {
 				return config.ErrRevision
 			}
+		}
+		if q.Operation == "describe" {
+			describer, ok := d.(interface {
+				DescribeDatabase(context.Context, database.Access) (database.DatabaseDescription, error)
+			})
+			if !ok {
+				return ErrUnavailable
+			}
+			var e error
+			*description, e = describer.DescribeDatabase(ctx, a)
+			return e
+		}
+		if q.Operation == "browse" {
 			browser, ok := d.(interface {
 				BrowseScope(context.Context, database.Access, database.ScopeRequest) (database.ScopePage, error)
 			})
@@ -373,6 +394,9 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 	}
 	if q.Operation == "browse" {
 		return nil, &page, nil
+	}
+	if q.Operation == "describe" {
+		return nil, nil, nil
 	}
 	return result, nil, nil
 }

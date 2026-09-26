@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/database"
 )
 
 // Step 3: no prior CLI scenario owned staged batch diagnostics. CRUD assertions
@@ -31,11 +34,10 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 	}
 	saveProfiles(t, root, p)
-	run := func(want int, args ...string) (string, *fixtureDatabase) {
+	runCommand := func(action string, d *fixtureDatabase, want int, args ...string) (string, *fixtureDatabase) {
 		t.Helper()
-		d := &fixtureDatabase{}
 		cmd := commandWithDatabase(Build{}, keys, func() (cliDatabase, error) { return d, nil })
-		cmd.SetArgs(append([]string{"--root", root, "db", "test"}, args...))
+		cmd.SetArgs(append([]string{"--root", root, "db", action}, args...))
 		cmd.SetIn(strings.NewReader(""))
 		var out, diag bytes.Buffer
 		cmd.SetOut(&out)
@@ -51,7 +53,14 @@ func TestConnectionDiagnostics(t *testing.T) {
 		if strings.Contains(out.String(), "\x1b") || diag.Len() != 0 {
 			t.Fatalf("diagnostics emitted color or unexpected stderr: %q %q", out.String(), diag.String())
 		}
+		if action == "describe" && err != nil && out.Len() != 0 {
+			t.Fatal("failed description emitted partial stdout")
+		}
 		return out.String(), d
+	}
+	run := func(want int, args ...string) (string, *fixtureDatabase) {
+		t.Helper()
+		return runCommand("test", &fixtureDatabase{}, want, args...)
 	}
 	runJSON := func(want int, args ...string) ([]diagnosticResult, *fixtureDatabase) {
 		t.Helper()
@@ -107,7 +116,72 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatal("invalid config reached vault or driver")
 	}
 	saveProfiles(t, root, original)
+	// Extend the existing CLI/service database scenario: descriptions must pair
+	// the full user catalog with saved policy without altering stored settings.
+	for _, scope := range []config.Scope{
+		{Mode: "blacklist", Schemas: []string{"missing", "private"}},
+		{Mode: "whitelist", Schemas: []string{"missing", "public"}},
+		{Mode: "whitelist"},
+		{Mode: "blacklist"},
+	} {
+		profiles := snapshot(t, root)
+		for i := range profiles.Connections {
+			if profiles.Connections[i].Alias == "good" {
+				profiles.Connections[i].Scope = scope
+			}
+		}
+		saveProfiles(t, root, profiles)
+		out, d := runCommand("describe", &fixtureDatabase{}, 0, "good", "--json")
+		var description database.DatabaseDescription
+		if contracts.Validate("db-describe.output", []byte(out)) != nil || json.Unmarshal([]byte(out), &description) != nil {
+			t.Fatal("description JSON contract", out)
+		}
+		if description.Alias != "good" || description.Database != "app" || !reflect.DeepEqual(description.Scope, scope) || len(description.Schemas) != 4 || len(d.described) != 1 || !d.closed {
+			t.Fatalf("description snapshot: %+v", description)
+		}
+		for _, s := range description.Schemas {
+			if s.Allowed != scope.ContainsSchema(s.Name) || s.Tables == nil {
+				t.Fatal("description lost policy or empty collections")
+			}
+		}
+		out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
+		for _, s := range description.Schemas {
+			status := "excluded"
+			if s.Allowed {
+				status = "allowed"
+			}
+			if !strings.Contains(out, fmt.Sprintf("%q [%s]", s.Name, status)) {
+				t.Fatal("human description lost schema status", out)
+			}
+		}
+		if !strings.Contains(out, `"line\n\x1b[31m" (table)`) {
+			t.Fatal("relation identifier not safely escaped", out)
+		}
+	}
+	for _, args := range [][]string{{}, {"absent"}} {
+		_, d := runCommand("describe", &fixtureDatabase{}, 2, args...)
+		if len(d.described) != 0 {
+			t.Fatal("invalid selection reached catalog")
+		}
+	}
+	for _, e := range []error{database.Fail(contracts.ConnectFailed, "safe connection failure", false), database.Fail(contracts.ResourceLimit, "safe catalog limit", false), database.Fail(contracts.QueryTimeout, "safe query timeout", false), context.Canceled} {
+		want := ExitFailure
+		if e == context.Canceled {
+			want = ExitCancelled
+		}
+		runCommand("describe", &fixtureDatabase{describeError: e}, want, "good", "--json")
+	}
+	out, _ := runCommand("describe", &fixtureDatabase{emptyCatalog: true}, 0, "good", "--json")
+	if !strings.Contains(out, `"schemas":[]`) {
+		t.Fatal("empty catalog was not an array")
+	}
+	runCommand("describe", &fixtureDatabase{emptyCatalog: true}, 0, "good")
+	runCommand("describe", &fixtureDatabase{}, 1, "missing", "--json")
+	saveProfiles(t, root, invalidProfile)
+	runCommand("describe", &fixtureDatabase{}, 2, "good", "--json")
+	saveProfiles(t, root, original)
 	keys.denied = true
+	runCommand("describe", &fixtureDatabase{}, 1, "good", "--json")
 	results, d = runJSON(1)
 	if len(d.tested) != 0 || len(results) != 3 {
 		t.Fatal("vault denial reached driver or stopped batch")
@@ -118,7 +192,8 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 	}
 	empty := privateRoot(t)
-	out, _ := command(t, empty, keys, "", 0, "test", "--json")
+	command(t, empty, keys, "", 2, "describe", "--json")
+	out, _ = command(t, empty, keys, "", 0, "test", "--json")
 	if contracts.Validate("db-test.output", []byte(out)) != nil || len(files(t, empty)) != 1 {
 		t.Fatal("empty diagnostic changed installation")
 	}

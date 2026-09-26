@@ -66,6 +66,10 @@ type blockedDiagnostics struct {
 
 func (d *blockedDiagnostics) Invalidate(string) {}
 func (d *blockedDiagnostics) Close()            {}
+func (d *blockedDiagnostics) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
+	_, err := d.Test(ctx, a)
+	return database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Scope: a.Profile.Scope, Schemas: []database.SchemaDescription{}}, err
+}
 func (d *blockedDiagnostics) Test(ctx context.Context, _ database.Access) (database.Readiness, error) {
 	d.entered <- struct{}{}
 	select {
@@ -127,12 +131,38 @@ func TestPrivateManagement(t *testing.T) {
 	if keys.calls() != calls {
 		t.Fatal("independent clients reloaded OS keyset")
 	}
+	// Describe shares admission and loaded keys but requires the exact selection
+	// revision; malformed/stale requests must never reach the driver or enable MCP.
+	describe := ManagementRequest{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev}
+	if _, e = c.Request(t.Context(), describe); !errors.Is(e, config.ErrRevision) {
+		t.Fatal("description accepted stale selection", e)
+	}
+	_, rev, e = config.Preview(t.Context(), c.Root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	describe.Expected = rev
+	for _, bad := range []ManagementRequest{
+		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias},
+		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev, Scope: &database.ScopeRequest{}},
+	} {
+		if _, e = c.Request(t.Context(), bad); !errors.Is(e, ErrState) {
+			t.Fatal("invalid description request", e)
+		}
+	}
 	// Four blocked database management requests consume the entire admission budget;
 	// a fifth must fail promptly instead of waiting behind them.
 	pending := make(chan error, 4)
 	for i := 0; i < 4; i++ {
 		go func() {
-			_, e := c.Request(t.Context(), ManagementRequest{Operation: "test", ProfileID: profile.ID, Alias: profile.Alias})
+			q := ManagementRequest{Operation: "test", ProfileID: profile.ID, Alias: profile.Alias}
+			if i%2 == 0 {
+				q = describe
+			}
+			r, e := c.Request(t.Context(), q)
+			if e == nil && q.Operation == "describe" && (r.Description == nil || r.Description.Alias != profile.Alias || r.Description.Scope.Mode != profile.Scope.Mode || r.MCPEnabled) {
+				e = errors.New("management description lost snapshot or enabled MCP")
+			}
 			pending <- e
 		}()
 	}
@@ -142,6 +172,9 @@ func TestPrivateManagement(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("management request not admitted")
 		}
+	}
+	if keys.calls() != calls {
+		t.Fatal("description reloaded unlocked keyset")
 	}
 	bounded, finishAdmission := context.WithTimeout(t.Context(), time.Second)
 	_, overload := c.Request(bounded, ManagementRequest{Operation: "test", ProfileID: profile.ID, Alias: profile.Alias})

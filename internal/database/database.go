@@ -84,6 +84,29 @@ type ScopePage struct {
 	Next    string
 }
 
+// DatabaseDescription is the complete, bounded user-facing catalog. It is never
+// an MCP result: excluded schemas remain visible to the profile's owner.
+type DatabaseDescription struct {
+	Version  int                 `json:"version"`
+	Alias    string              `json:"alias"`
+	Database string              `json:"database"`
+	Scope    config.Scope        `json:"scope"`
+	Schemas  []SchemaDescription `json:"schemas"`
+}
+
+// SchemaDescription marks saved scope independently of database privileges.
+type SchemaDescription struct {
+	Name    string         `json:"name"`
+	Allowed bool           `json:"allowed"`
+	Tables  []RelationName `json:"tables"`
+}
+
+// RelationName describes a relation without reading its columns or rows.
+type RelationName struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
 // Table identifies a visible readable relation.
 type Table struct {
 	Schema string `json:"schema"`
