@@ -66,7 +66,7 @@ The service listens on a Unix domain socket in an owner-checked private director
 | `internal/agent`                                    | Client detection, registration inspection, and ownership-safe mutation                              |
 | `internal/devtools`, `scripts`, `.github/workflows` | Developer commands, regression harnesses, and CI                                                    |
 
-Concrete packages implement most behavior. Interfaces represent external seams: the database driver, key provider, lifecycle/client operations, and dialing. `database.Driver` supplies validation, diagnostics, table listing, description, query execution, invalidation, and close. PostgreSQL also supplies the CLI catalog-browsing operation. Callers hold the profile state lease until driver cleanup and result preparation finish. Credentials travel only through private in-memory access snapshots.
+Concrete packages implement most behavior. Interfaces represent external seams: the database driver, key provider, lifecycle/client operations, and dialing. `database.Driver` supplies validation, diagnostics, table/object listing, description, query execution, invalidation, and close. PostgreSQL also supplies the CLI catalog-browsing operation. Callers hold the profile state lease until driver cleanup and result preparation finish. Credentials travel only through private in-memory access snapshots.
 
 Agent adapters own compatibility and registration, not database policy. Scope and query semantics remain driver-aware. Additional drivers must satisfy the credential, visibility, cancellation, and read-only contracts; there is no universal query language or dynamic plugin framework.
 
@@ -357,11 +357,15 @@ Scope lists contain unique exact, case-preserving schema names with no patterns.
 
 Old `all`/`selected` modes and `tables` fields fail strict decoding. There is no migration, legacy alias or automatic reset; invalid saved profiles remain untouched and block operations. Existing profiles must be recreated through the new format. SQLite layout and the outer profile version remain unchanged.
 
-Agent catalog tools apply saved scope and role privileges in parameterized SQL before C-collated keyset pagination. The user's scope picker and database description can inspect the role's full accessible application catalog. Relations readable through table-level or column-level SELECT grants are discoverable. Each page uses one relation query, with no per-relation inspection. Descriptions expose actual type names, columns, keys and visible foreign-key endpoints; they omit expressions and defaults. There are no `supported` or `reason` fields.
+Agent catalog tools apply saved scope and role privileges in parameterized SQL before C-collated keyset pagination. The user's scope picker and database description can inspect the role's full accessible application catalog. Relations readable through table-level or column-level SELECT grants are discoverable. Each page uses one catalog query, with no per-object inspection. Table descriptions expose actual type names, columns, defaults/generated expressions, keys, visible foreign-key endpoints, constraint/index definitions, triggers, view definitions and row-security policies. Expressions are deparsed, never evaluated. There are no `supported` or `reason` fields.
 
-Scope applies to direct schema-qualified relation references, including views, materialized views and foreign tables. PostgreSQL owns indirect dependencies, partitions, ordinary inheritance, RLS and functions; these are not recursively restricted by saved scope. This is a convenience boundary on direct references, not database-enforced isolation against routines or views. `pg_*` schemas and `information_schema` remain excluded even with an empty blacklist. An empty whitelist permits no direct relations but still permits relation-free queries and trusted functions.
+Scope applies to direct schema-qualified relation references, including views, materialized views and foreign tables. PostgreSQL owns indirect dependencies, partitions, ordinary inheritance, RLS and functions; these are not recursively restricted by saved scope. This is a convenience boundary on direct references, not database-enforced isolation against routines or views. `pg_*` schemas and `information_schema` remain excluded even with an empty blacklist. An empty whitelist permits no direct relations but still permits relation-free queries and core PostgreSQL routine calls.
 
-Authenticated cursors bind version, profile ID/revision, schema filter, position, and process invalidation epoch. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600 and constraints at 4096 entries, with deadlines and encoded-size accounting. Metadata shares the profile result-byte cap.
+Object listing and description include routines (functions, procedures, aggregates and window routines), explicit types, and sequences. All require saved schema scope and schema USAGE. Type inspection additionally requires type USAGE; sequence inspection requires SELECT or USAGE. Routine inspection does not require EXECUTE. Automatic arrays and table-row types are excluded from listing. Routine identities include exact `pg_get_function_identity_arguments` output, including an empty string for no arguments; matching uses SQL values, never interpolated identifiers or signatures. Extension membership is reported separately from visibility and never authorizes execution.
+
+Routine descriptions expose arguments, result type, language, volatility, security mode and complete deparsed function/procedure definitions; aggregates expose their kind, transition/state, final/combine functions and initial condition. Types expose ordered enum labels, domain base/default/nullability/constraints, composite attributes, range/multirange metadata and basic category/kind. Sequences expose configuration as exact strings and scoped owner-table/column metadata, never advancing or reading their current value. Table attachments inherit relation visibility. Definitions are returned in full even when their text references excluded schemas; referenced objects are not recursively fetched. Structured foreign-key endpoints and constraint entries retain existing endpoint filtering.
+
+Authenticated cursors bind version, tool, profile ID/revision, schema/kind filters, position, and process invalidation epoch. Object ordering uses C-collated schema/name/kind followed by OID to distinguish overloads without embedding unbounded signatures in cursors. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600, existing key/relationship collections at 4096 and combined new metadata collections at 4096 entries, with incremental byte accounting, deadlines and final encoded-size accounting. Oversized definitions fail with RESOURCE_LIMIT without partial output. Metadata shares the profile result-byte cap.
 
 ## 8. Database transport and connection management
 
@@ -403,25 +407,27 @@ Every PostgreSQL connection, including readiness and catalog connections, caps m
 
 ## 9. Read-only PostgreSQL execution
 
-Data Mate is a bounded PostgreSQL reader. It checks one read statement and direct relation scope, executes the original SQL with bound values, and leaves SQL semantics to PostgreSQL.
+Data Mate is a bounded PostgreSQL reader. It checks one read statement, direct relation scope, and explicit routine calls, executes the original SQL with bound values, and leaves other SQL semantics to PostgreSQL.
 
 ### 9.1 Account and server trust
 
 Operators provision a dedicated non-owner read-only account with CONNECT, schema USAGE and SELECT on intended relations/columns. Data Mate never grants privileges and does not audit ownership, role memberships, PUBLIC grants or function implementations. Diagnostics verify transaction read-only state, not account safety. Every operation explicitly starts READ ONLY regardless of account defaults.
 
-Database-installed routines, extensions, views, types, operators, indexes and RLS policies are trusted configuration. PostgreSQL applies normal grants, view-owner rules and RLS, including partitioned tables. Functions can access data indirectly beyond saved scope. Read-only transactions prevent ordinary database mutations but are not a sandbox for arbitrary server-side code or external side effects; see [PostgreSQL transaction semantics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
+The server and administrator remain trusted. Explicit calls to database-installed and extension routines are prohibited. Indirect execution through views, types, operators, indexes and RLS policies remains trusted database configuration. PostgreSQL applies normal grants, view-owner rules and RLS, including partitioned tables. Functions can access data indirectly beyond saved scope. Read-only transactions prevent ordinary database mutations but are not a sandbox for arbitrary server-side code or external side effects; see [PostgreSQL transaction semantics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
 
 ### 9.2 Query guard
 
 The pinned native scanner bounds tokens and delimiter nesting before parsing. The AST walk bounds messages/depth, permits one SELECT-family statement (`SELECT`, `VALUES`, `TABLE`), rejects modifying CTEs, SELECT INTO and locking clauses, and checks all direct relation references. Transaction/session/utility commands and multi-statements are rejected. CTE visibility follows lexical scopes, including recursion and nested shadowing. Physical relations require explicit schema names; cross-database and system-schema references are rejected.
 
-There is no expression/type/function/index allowlist or SQL emitter. Normal PostgreSQL joins, windows, recursive CTEs, correlated/lateral queries, set operations, arrays, casts, custom operators and functions pass through to PostgreSQL. Session `search_path` starts as `pg_catalog`, with `standard_conforming_strings=on` to align server string parsing with the native guard. There are no semantic manifests, catalog fingerprints, hierarchy snapshots or explicit authorization locks.
+The AST walk checks explicit function calls (including aggregates/windows and functions in FROM) and TABLESAMPLE methods at every depth. Reject names qualified outside pg_catalog. Before preparing agent SQL, check distinct unqualified/pg_catalog names against the live catalog in one bounded parameterized query. Require a core pg_catalog routine or core type-conversion name, using OIDs below 16384 and excluding extension membership. If any non-core routine overload exists in pg_catalog, reject the entire name conservatively. Do not reproduce PostgreSQL overload resolution. Application casts using `::` or CAST remain available; function-style application constructors are rejected. Prohibited calls return READ_ONLY_VIOLATION without SQLSTATE because no agent SQL has reached PostgreSQL.
+
+There is no general expression/type/index allowlist or SQL emitter. Normal PostgreSQL joins, core aggregates/windows, recursive CTEs, correlated/lateral queries, set operations, arrays, casts and custom operators pass through to PostgreSQL. Indirect calls, including execution behind core routines, are not recursively audited. Core routines are not guaranteed free of side effects. Session `search_path` starts as `pg_catalog`, with `standard_conforming_strings=on` to align server string parsing with the native guard. There are no semantic manifests, catalog fingerprints, hierarchy snapshots or explicit authorization locks.
 
 ### 9.3 Execution
 
 1. Validate the current profile, JSON parameters and bounded query guard under the existing state lease.
 2. Admit work, acquire a connection, begin READ ONLY READ COMMITTED, set local timeouts and verify transaction state/identity.
-3. Parse/describe the original SQL through PostgreSQL's extended protocol with unspecified parameter OIDs. Check the server's parameter count.
+3. Authorize explicit routine names against the live catalog, then parse/describe the original SQL through PostgreSQL's extended protocol with unspecified parameter OIDs. Check the server's parameter count.
 4. Fetch only result type names and array/domain dependencies in one bounded recursive catalog query. This is decoding metadata, not a semantic audit.
 5. Bind values separately and execute the same prepared statement with text-format results. Preserve labels, including duplicates, and PostgreSQL's query semantics; do not rewrite SQL or LIMIT.
 6. Consume complete rows within the row/byte budgets. One extra row detects truncation. Close the socket before closing the result reader on truncation or early failure, preventing unbounded draining.
@@ -453,13 +459,15 @@ PostgreSQL arrays become nested JSON arrays, retaining null elements, multidimen
 
 ### 10.1 Tools and results
 
-Four tools expose strict embedded [input/output schemas](../internal/contracts/schemas):
+Six tools expose strict embedded [input/output schemas](../internal/contracts/schemas):
 
 | Tool               | Input                                                              | Output                                                              |
 | ------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------- |
 | `list_connections` | Empty object                                                       | Aliases, drivers, database labels, and configured scope             |
-| `list_tables`      | `connection`; optional `schema`, `cursor`, `page_size`             | Visible table names, kinds, support labels, and next cursor         |
-| `describe_table`   | `connection`, `schema`, `table`                                    | Columns, actual types, nullability, keys, and visible relationships |
+| `list_tables`      | `connection`; optional `schema`, `cursor`, `page_size`             | Visible table names, kinds, and next cursor         |
+| `describe_table`   | `connection`, `schema`, `table`                                    | Columns, expressions, keys, relationships, indexes, triggers, views and RLS |
+| `list_objects` | `connection`; optional `kind`, `schema`, `cursor`, `page_size` | Routine/type/sequence identities, extension membership and next cursor |
+| `describe_object` | `connection`, `kind`, `schema`, `name`; `identity_arguments` required only for routines | Identity plus kind-specific routine/type/sequence metadata |
 | `query`            | `connection`, `sql`; optional JSON-value `parameters`, `row_limit` | Columns, rows, row count, truncation, and elapsed time              |
 
 All tools declare read-only intent, enforced server-side. Inputs reject additional fields. No tool accepts connection overrides, credentials, DSNs, hosts, or arbitrary file paths; no tool modifies profiles or broadens scope. Schema validation alone does not authorize execution. Connection listing reads only the public profile snapshot and never loads credentials.
@@ -553,7 +561,7 @@ Bounded fuzz seeds exercise decoding and query guard. Race tests cover concurren
 
 Native Keychain, launchd, registration, and agent round-trip checks have explicit opt-in commands in the README. Those fixtures exercise the centralized storage design; their presence alone does not establish a successful run. Native service fixtures isolate client configuration; actual agent workflows use authenticated clients and unique owned registrations in their current user configuration, with an owned Docker database and temporary installation. These checks cover boundaries that fakes cannot prove. Test availability or a documented acceptance scenario is not a claim of a completed native/integration run; results and environment-dependent skips belong in validation reports.
 
-The end-to-end acceptance workflow is local installation, profile creation through the management-only service, optional scope narrowing, `mcp start`, and independently launched Codex/Claude Code sessions using the four tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, fresh scope enforcement, bounded read-only execution, and ownership-safe default uninstall/purge across the supported PostgreSQL matrix.
+The end-to-end acceptance workflow is local installation, profile creation through the management-only service, optional scope narrowing, `mcp start`, and independently launched Codex/Claude Code sessions using the six tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, fresh scope enforcement, bounded read-only execution, and ownership-safe default uninstall/purge across the supported PostgreSQL matrix.
 
 ## 13. Production distribution and terminal integration
 

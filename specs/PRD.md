@@ -15,7 +15,8 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
-- Read Only: The MCP service provides only read-only tools and permissions to agents
+- Read Only: The MCP service provides only read-only tools and permissions to agents. Explicit calls to application-defined and extension routines are prohibited; core PostgreSQL routines remain available. Indirect execution through permitted database objects remains PostgreSQL's responsibility
+- Database Context: Agents can inspect scoped routines and their source, enum and other explicit type details, sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
 - Query Capacity: Support 20–40-second analytical queries with a 60-second default budget, configurable up to five minutes; allow eight database connections per profile, 16 concurrent requests per MCP session, and 32 active database operations across sessions.
 - Flexible Scope: Users configure allowed schemas for each saved DB connection through whitelist or blacklist mode; individual table selection is not supported
 - Simple Management: Users can conveniently and simply add/remove/modify a DB connection without pain

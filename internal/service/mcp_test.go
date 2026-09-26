@@ -121,7 +121,7 @@ func TestMCPSessions(t *testing.T) {
 	a, _ := sessionClient(t, c)
 	b, _ := sessionClient(t, c)
 	listed, err := a.ListTools(t.Context(), nil)
-	if err != nil || len(listed.Tools) != 4 {
+	if err != nil || len(listed.Tools) != 6 {
 		t.Fatal("tools", err)
 	}
 	names := map[string]bool{}
@@ -137,7 +137,7 @@ func TestMCPSessions(t *testing.T) {
 			t.Fatal("loose schema")
 		}
 	}
-	for _, name := range []string{"list_connections", "list_tables", "describe_table", "query"} {
+	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query"} {
 		if !names[name] {
 			t.Fatal("missing tool", name)
 		}

@@ -47,12 +47,43 @@
           },
           "nullable": {
             "type": "boolean"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "generated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identity": {
+            "type": "string",
+            "enum": [
+              "",
+              "a",
+              "d"
+            ]
           }
         },
         "required": [
           "name",
           "type",
-          "nullable"
+          "nullable",
+          "default",
+          "generated",
+          "identity"
         ],
         "additionalProperties": false
       }
@@ -142,6 +173,170 @@
         ],
         "additionalProperties": false
       }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "kind": {
+            "type": "string"
+          },
+          "definition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "definition"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "indexes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "kind": {
+            "type": "string"
+          },
+          "definition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "definition"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "definition": {
+            "type": "string"
+          },
+          "enabled": {
+            "enum": [
+              "origin",
+              "disabled",
+              "replica",
+              "always"
+            ]
+          },
+          "internal": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "definition",
+          "enabled",
+          "internal"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "maxLength": 63
+          },
+          "command": {
+            "enum": [
+              "all",
+              "select",
+              "insert",
+              "update",
+              "delete"
+            ]
+          },
+          "permissive": {
+            "type": "boolean"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "using": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "check": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "command",
+          "permissive",
+          "roles",
+          "using",
+          "check"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "view_definition": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "row_security": {
+      "type": "boolean"
+    },
+    "force_row_security": {
+      "type": "boolean"
     }
   },
   "required": [
@@ -151,7 +346,14 @@
     "kind",
     "columns",
     "keys",
-    "relationships"
+    "relationships",
+    "constraints",
+    "indexes",
+    "triggers",
+    "policies",
+    "view_definition",
+    "row_security",
+    "force_row_security"
   ],
   "additionalProperties": false
 }

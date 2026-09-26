@@ -39,11 +39,15 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 	if err != nil {
 		return database.QueryResult{}, err
 	}
-	if err := sqlguard.Check(req.SQL, a.Profile.Scope); err != nil {
+	names, err := sqlguard.Inspect(req.SQL, a.Profile.Scope)
+	if err != nil {
 		return database.QueryResult{}, err
 	}
 	var out database.QueryResult
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, version int) error {
+		if e := checkRoutineCalls(ctx, tx, names); e != nil {
+			return e
+		}
 		description, e := tx.Conn().PgConn().Prepare(ctx, "data_mate_query", req.SQL, nil)
 		if e != nil {
 			return e
@@ -62,6 +66,33 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 		return database.QueryResult{}, err
 	}
 	return out, nil
+}
+
+// Authorize names, not guessed overloads. A non-core overload in pg_catalog
+// makes the entire name unavailable. Core type-conversion syntax is allowed,
+// but must not mask a non-core routine. The server and administrator are trusted.
+func checkRoutineCalls(ctx context.Context, tx pgx.Tx, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	var allowed bool
+	err := tx.QueryRow(ctx, `SELECT COALESCE(bool_and(
+ (EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+   WHERE n.nspname='pg_catalog' AND p.proname=x.name AND p.oid<16384)
+  OR EXISTS (SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
+   WHERE n.nspname='pg_catalog' AND t.typname=x.name AND t.oid<16384
+   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')))
+ AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+   WHERE n.nspname='pg_catalog' AND p.proname=x.name AND (p.oid>=16384 OR EXISTS
+    (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')))
+ ),false) FROM pg_catalog.unnest($1::text[]) x(name)`, names).Scan(&allowed)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return database.Fail(contracts.ReadOnlyViolation, "explicit calls require core PostgreSQL routines", false)
+	}
+	return nil
 }
 
 // QueryPayloadSize counts the complete tool result, including the duplicated

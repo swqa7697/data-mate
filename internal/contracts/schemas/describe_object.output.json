@@ -1,0 +1,533 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "routine",
+        "type",
+        "sequence"
+      ]
+    },
+    "schema": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "identity_arguments": {
+      "type": "string",
+      "maxLength": 65536,
+      "pattern": "^[^\\x00]*$"
+    },
+    "extension": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00]+$",
+          "maxLength": 63
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "routine": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "function",
+            "procedure",
+            "aggregate",
+            "window"
+          ]
+        },
+        "arguments": {
+          "type": "string"
+        },
+        "return_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "language": {
+          "type": "string"
+        },
+        "volatility": {
+          "enum": [
+            "immutable",
+            "stable",
+            "volatile"
+          ]
+        },
+        "security_definer": {
+          "type": "boolean"
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "aggregate": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "normal",
+                "ordered_set",
+                "hypothetical_set"
+              ]
+            },
+            "transition_function": {
+              "type": "string"
+            },
+            "state_type": {
+              "type": "string"
+            },
+            "final_function": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "combine_function": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "initial_condition": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "transition_function",
+            "state_type",
+            "final_function",
+            "combine_function",
+            "initial_condition"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "kind",
+        "arguments",
+        "return_type",
+        "language",
+        "volatility",
+        "security_definer",
+        "definition"
+      ],
+      "additionalProperties": false
+    },
+    "type": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "enum",
+            "domain",
+            "composite",
+            "range",
+            "multirange",
+            "base"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "base_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "not_null": {
+          "type": "boolean"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enum_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 63
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
+              },
+              "nullable": {
+                "type": "boolean"
+              },
+              "default": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "generated": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "identity": {
+                "type": "string",
+                "enum": [
+                  "",
+                  "a",
+                  "d"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "type",
+              "nullable",
+              "default",
+              "generated",
+              "identity"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 63
+              },
+              "kind": {
+                "type": "string"
+              },
+              "definition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "definition"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "range": {
+          "type": "object",
+          "properties": {
+            "subtype": {
+              "type": "string"
+            },
+            "range_type": {
+              "type": "string"
+            },
+            "multirange_type": {
+              "type": "string"
+            },
+            "collation": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "canonical_function": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subtype_diff_function": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "subtype",
+            "range_type",
+            "multirange_type",
+            "collation",
+            "canonical_function",
+            "subtype_diff_function"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "kind",
+        "category",
+        "base_type",
+        "not_null",
+        "default",
+        "enum_labels",
+        "attributes",
+        "constraints"
+      ],
+      "additionalProperties": false
+    },
+    "sequence": {
+      "type": "object",
+      "properties": {
+        "data_type": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        },
+        "increment": {
+          "type": "string"
+        },
+        "min": {
+          "type": "string"
+        },
+        "max": {
+          "type": "string"
+        },
+        "cache": {
+          "type": "string"
+        },
+        "cycle": {
+          "type": "boolean"
+        },
+        "owner_table": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 63
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 63
+                }
+              },
+              "required": [
+                "schema",
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_column": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\x00]+$",
+              "maxLength": 63
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "data_type",
+        "start",
+        "increment",
+        "min",
+        "max",
+        "cache",
+        "cycle",
+        "owner_table",
+        "owner_column"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "connection",
+    "kind",
+    "schema",
+    "name",
+    "extension"
+  ],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "routine"
+        }
+      },
+      "required": [
+        "routine",
+        "identity_arguments"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "required": [
+              "sequence"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "type"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "routine"
+            ]
+          },
+          {
+            "required": [
+              "sequence"
+            ]
+          },
+          {
+            "required": [
+              "identity_arguments"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "sequence"
+        }
+      },
+      "required": [
+        "sequence"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "routine"
+            ]
+          },
+          {
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "required": [
+              "identity_arguments"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

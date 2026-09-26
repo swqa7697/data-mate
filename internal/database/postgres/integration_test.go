@@ -297,6 +297,7 @@ func TestPostgresIntegration(t *testing.T) {
 	scopeAcceptance(t, d, access, password, sql)
 	cliDiagnosticsAcceptance(t, fixture.Root)
 	queryAcceptance(t, d, access, sql)
+	objectAcceptance(t, d, access, admin, sql)
 	executorAcceptance(t, d, access, admin, sql)
 	transportAcceptance(t, p, password, fixture.Root, admin)
 	// Observe eight executing queries before admitting a ninth: the old two-slot

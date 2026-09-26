@@ -86,6 +86,9 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 		t.Fatal("hidden relationship exposed")
 	}
 	call("describe_table", map[string]any{"connection": "fixture", "schema": "hidden", "table": "target"}, contracts.ScopeDenied)
+	call("list_objects", map[string]any{"connection": "fixture", "kind": "type", "schema": "app"}, "")
+	call("describe_object", map[string]any{"connection": "fixture", "kind": "type", "schema": "app", "name": "custom"}, "")
+	call("describe_object", map[string]any{"connection": "fixture", "kind": "routine", "schema": "app", "name": "policy_probe", "identity_arguments": ""}, "")
 	call("query", map[string]any{"connection": "fixture", "sql": "select count(*) from app.items"}, "")
 	call("query", map[string]any{"connection": "fixture", "sql": "select app.policy_probe()"}, contracts.ReadOnlyViolation)
 

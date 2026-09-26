@@ -56,17 +56,17 @@ data-mate mcp start
 
 ## Manage connections
 
-| Command                       | Purpose                                             |
-| ----------------------------- | --------------------------------------------------- |
-| `data-mate db add`            | Save a PostgreSQL connection.                       |
-| `data-mate db list`           | View aliases, nonsecret settings, and scopes.       |
-| `data-mate db describe [alias]` | List accessible schemas/tables and allowed scope.  |
-| `data-mate db test [alias]`   | Test one connection, or all connections if omitted. |
-| `data-mate db edit [alias]`   | Update settings or credentials.                     |
-| `data-mate db scope [alias]`  | Choose allowed schemas.                             |
-| `data-mate db remove [alias]` | Remove a connection and its saved credentials.      |
-| `data-mate mcp status`        | Check service and agent registration status.        |
-| `data-mate mcp stop`          | Stop agent access.                                  |
+| Command                         | Purpose                                             |
+| ------------------------------- | --------------------------------------------------- |
+| `data-mate db add`              | Save a PostgreSQL connection.                       |
+| `data-mate db list`             | View aliases, nonsecret settings, and scopes.       |
+| `data-mate db describe [alias]` | List accessible schemas/tables and allowed scope.   |
+| `data-mate db test [alias]`     | Test one connection, or all connections if omitted. |
+| `data-mate db edit [alias]`     | Update settings or credentials.                     |
+| `data-mate db scope [alias]`    | Choose allowed schemas.                             |
+| `data-mate db remove [alias]`   | Remove a connection and its saved credentials.      |
+| `data-mate mcp status`          | Check service and agent registration status.        |
+| `data-mate mcp stop`            | Stop agent access.                                  |
 
 Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively. Use `--json` for versioned machine-readable output; scripts must supply an alias. The description groups readable tables, views, materialized views, partitioned tables, and foreign tables by schema, including empty accessible schemas. Each schema is labeled allowed or excluded by the saved scope, whose summary also states the future-schema policy. PostgreSQL privileges still determine which objects appear; “allowed” does not grant permissions.
 
@@ -90,12 +90,14 @@ Scope limits direct table references and catalog results; PostgreSQL privileges 
 
 ## What agents can do
 
-| MCP tool           | Capability                                       |
-| ------------------ | ------------------------------------------------ |
-| `list_connections` | Find available aliases and scopes.               |
-| `list_tables`      | Browse visible tables.                           |
-| `describe_table`   | Inspect columns, keys, and relationships.        |
-| `query`            | Run one read statement with optional parameters. |
+| MCP tool           | Capability                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| `list_connections` | Find available aliases and scopes.                                                    |
+| `list_tables`      | Browse visible tables.                                                                |
+| `describe_table`   | Inspect columns, defaults, keys, indexes, triggers, views, and row-security policies. |
+| `list_objects`     | Browse routines, explicit types, and sequences.                                       |
+| `describe_object`  | Read routine source, enum labels, type details, and sequence configuration.           |
+| `query`            | Run one read statement with optional parameters.                                      |
 
 Queries run in read-only transactions. The default budget per query is **60 seconds, 500 rows, and 1 MiB of results**; connection settings can adjust these limits. MCP tools cannot edit connections or retrieve saved passwords.
 

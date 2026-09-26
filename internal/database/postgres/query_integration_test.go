@@ -94,7 +94,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		"SELECT * FROM app.foreign_empty", "SELECT * FROM app.a_view", "SELECT * FROM app.materialized", "SELECT * FROM app.expr_index", "SELECT * FROM app.partial_index", "SELECT * FROM app.generated", "SELECT * FROM app.custom_index", "SELECT * FROM app.custom_collation_table", "SELECT * FROM app.custom_type", "SELECT * FROM app.rls_parts", "SELECT * FROM app.parent",
 		"SELECT count(*) OVER(),id FROM app.items", "SELECT DISTINCT name FROM app.items", "SELECT id FROM app.items a WHERE EXISTS(SELECT 1 FROM app.items b WHERE b.id=a.id)",
 		"SELECT * FROM app.items a,LATERAL(SELECT a.id) b", "SELECT 1 UNION SELECT 2", "WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM x WHERE n<3) SELECT * FROM x",
-		"SELECT * FROM app.indirect", "SELECT * FROM app.read_hidden()", "SELECT id OPERATOR(app.=) 1 FROM app.items",
+		"SELECT * FROM app.indirect", "SELECT id OPERATOR(app.=) 1 FROM app.items",
 	} {
 		if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: q}); err != nil {
 			t.Fatalf("newly readable %s: %v", q, err)
@@ -105,7 +105,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		want any
 	}{
 		{"SELECT count(*) FROM app.mixed", "1"}, {"SELECT id FROM app.mixed", int64(1)},
-		{"SELECT * FROM app.indirect", int64(42)}, {"SELECT * FROM app.read_hidden()", int64(42)},
+		{"SELECT * FROM app.indirect", int64(42)},
 	} {
 		r, e := d.Query(t.Context(), access, database.QueryRequest{SQL: c.q})
 		if e != nil || r.RowCount != 1 || r.Rows[0][0] != c.want {
@@ -148,11 +148,13 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		{"SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.target)", contracts.ScopeDenied},
 		{"SELECT secret FROM app.column_grants", contracts.PermissionDenied},
 		{"SELECT app.policy_probe()", contracts.ReadOnlyViolation},
+		{"SELECT * FROM app.read_hidden()", contracts.ReadOnlyViolation},
+		{"WITH x AS (SELECT app.sum(1)) SELECT * FROM x", contracts.ReadOnlyViolation},
 		{"DELETE FROM app.items", contracts.ReadOnlyViolation}, {"WITH x AS (DELETE FROM app.items RETURNING *) SELECT * FROM x", contracts.ReadOnlyViolation},
 	} {
 		_, e := d.Query(t.Context(), access, database.QueryRequest{SQL: c.q})
 		requireCode(t, e, c.code)
-		if c.code == contracts.PermissionDenied || c.q == "SELECT app.policy_probe()" {
+		if c.code == contracts.PermissionDenied {
 			if safeSQLState(e.(*database.Error).SQLState) == "" {
 				t.Fatal("missing SQLSTATE")
 			}

@@ -17,11 +17,11 @@ func TestQueryGuard(t *testing.T) {
 	scope := config.Scope{Mode: "whitelist", Schemas: []string{"app", "Dot.Schema"}}
 	positive := []string{
 		"SELECT 1", "VALUES (1),(2)", "TABLE app.items", "SELECT * FROM ONLY app.items",
-		"SELECT count(*) FROM app.items", "SELECT ARRAY[1,NULL], E'escaped\\ntext', $$dollar; quoted$$",
+		"SELECT count(*) FROM app.items", "SELECT enum_range(NULL::app.custom)", "SELECT pg_catalog.lower('A')", "SELECT ARRAY[1,NULL], E'escaped\\ntext', $$dollar; quoted$$",
 		"SELECT count(*) OVER(),sum(id) FILTER(WHERE id>1) FROM app.items GROUP BY ROLLUP(id)",
 		"SELECT * FROM app.items a JOIN app.items b USING(id)", "SELECT * FROM app.items NATURAL JOIN app.items b",
 		"SELECT * FROM app.items a,LATERAL(SELECT a.id) b", "SELECT id FROM app.items a WHERE EXISTS(SELECT 1 FROM app.items b WHERE b.id=a.id)",
-		"SELECT 1 UNION SELECT 2", "SELECT app.custom(1),id::app.custom FROM app.items",
+		"SELECT 1 UNION SELECT 2", "SELECT id::app.custom FROM app.items",
 		"WITH x AS (SELECT * FROM app.items),y AS (SELECT * FROM x) SELECT * FROM y",
 		"WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM x WHERE n<3) SELECT * FROM x",
 		"WITH RECURSIVE x AS (SELECT * FROM y), y AS (SELECT * FROM app.items) SELECT * FROM x",
@@ -34,6 +34,11 @@ func TestQueryGuard(t *testing.T) {
 		}
 	}
 	negative := []string{
+		// Explicit user routines must be caught at every expression depth.
+		"SELECT app.custom(1)", "SELECT * FROM app.read_hidden()", "SELECT 1 WHERE EXISTS(SELECT app.custom(1))",
+		"WITH x AS (SELECT app.custom(1)) SELECT * FROM x", "SELECT app.sum(id) OVER() FROM app.items",
+		"SELECT pg_catalog.count(app.custom(id)) FROM app.items", "SELECT * FROM app.items TABLESAMPLE app.sampler(10)",
+		"CALL app.proc()", "DO $$ BEGIN NULL; END $$",
 		"DELETE FROM app.items", "SELECT 1; SELECT 2", "SELECT * INTO app.copy FROM app.items", "SELECT * FROM app.items FOR UPDATE",
 		"WITH x AS (DELETE FROM app.items RETURNING *) SELECT * FROM x", "WITH x AS (UPDATE app.items SET id=1 RETURNING *) SELECT * FROM x",
 		"WITH x AS (INSERT INTO app.items VALUES(1) RETURNING *) SELECT * FROM x", "SET transaction_read_only=off", "COMMIT", "COPY app.items TO STDOUT", "EXPLAIN SELECT 1",
@@ -51,6 +56,12 @@ func TestQueryGuard(t *testing.T) {
 			t.Errorf("rejected query accepted: %.200s", q)
 		}
 	}
+	// Authorization must receive nested and sampling names, with duplicates removed.
+	names, err := Inspect("SELECT lower(upper('a')), lower('b'), count(*) FROM app.items TABLESAMPLE SYSTEM(10)", scope)
+	if err != nil || strings.Join(names, ",") != "count,lower,system,upper" {
+		t.Fatalf("routine authorization names: %v %v", names, err)
+	}
+
 	// The same direct references must be checked in nested queries for blacklists.
 	blocked := config.Scope{Mode: "blacklist", Schemas: []string{"hidden"}}
 	for _, q := range []string{"SELECT * FROM hidden.items", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM hidden.items)", "SELECT * FROM pg_catalog.pg_class"} {

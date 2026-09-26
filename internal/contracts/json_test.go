@@ -48,6 +48,8 @@ func TestToolInputsFailClosed(t *testing.T) {
 	cases := map[string][]string{
 		"list_connections.input": {`{"host":"secret"}`, `null`},
 		"list_tables.input":      {`{}`, `{"connection":"analytics","page_size":501}`, `{"connection":"analytics","scope":{"mode":"blacklist"}}`},
+		"list_objects.input":     {`{"connection":"analytics","kind":"trigger"}`, `{"connection":"analytics","page_size":501}`},
+		"describe_object.input":  {`{"connection":"analytics","kind":"routine","schema":"app","name":"f"}`, `{"connection":"analytics","kind":"type","schema":"app","name":"t","identity_arguments":""}`},
 		"describe_table.input":   {`{"connection":"analytics","schema":"public"}`},
 		"query.input":            {`{"connection":"analytics","sql":"select 1","timeout":99}`, `{"connection":"analytics","sql":"select 1","row_limit":0}`, `{"connection":"analytics","sql":"select $1","parameters":{}}`},
 	}

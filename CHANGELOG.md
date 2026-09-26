@@ -4,10 +4,12 @@
 
 ### Added
 
+- Add scoped `list_objects` and `describe_object` MCP tools for routine source, enum and other type details, and sequence configuration; expand table descriptions with defaults, indexes, constraints, triggers, view definitions, and row-security policies without evaluating stored expressions.
 - Add `db describe [alias]` with an interactive profile picker and versioned `--json` output to list accessible schemas and readable tables/views, mark allowed and excluded schemas, and show the saved scope policy; fail clearly when complete results exceed catalog, byte, or timeout limits.
 
 ### Changed
 
+- Restrict explicit agent SQL calls to core PostgreSQL routines, retaining functions such as `enum_range` while rejecting application and extension routine calls; preserve indirect reads through permitted views, operators, casts, and policies.
 - Replace schema/table scope selection with schema-only whitelist and blacklist modes, defaulting new connections to all accessible schemas. Add `--exclude-schema` and a colored picker with immediate checkbox toggling, one-key toggle-all, and mode switching that preserves selections; old scope formats require profile recreation.
 - Show one `PASS` or `FAIL` summary per connection in `db test`, with details only for failed checks and green/red terminal status labels that honor `NO_COLOR`; preserve plain redirected output and complete JSON diagnostics.
 

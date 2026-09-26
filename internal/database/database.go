@@ -128,11 +128,14 @@ type TablePage struct {
 	NextCursor *string `json:"next_cursor"`
 }
 
-// Column exposes safe type metadata without expressions or defaults.
+// Column exposes type metadata and stored expressions without evaluating them.
 type Column struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Nullable bool   `json:"nullable"`
+	Name      string  `json:"name"`
+	Type      string  `json:"type"`
+	Nullable  bool    `json:"nullable"`
+	Default   *string `json:"default"`
+	Generated *string `json:"generated"`
+	Identity  string  `json:"identity"`
 }
 
 // Key contains a primary or unique key without its server definition.
@@ -150,13 +153,20 @@ type Relationship struct {
 
 // Description is the bounded describe_table result.
 type Description struct {
-	Connection    string         `json:"connection"`
-	Schema        string         `json:"schema"`
-	Table         string         `json:"table"`
-	Kind          string         `json:"kind"`
-	Columns       []Column       `json:"columns"`
-	Keys          []Key          `json:"keys"`
-	Relationships []Relationship `json:"relationships"`
+	Connection       string         `json:"connection"`
+	Schema           string         `json:"schema"`
+	Table            string         `json:"table"`
+	Kind             string         `json:"kind"`
+	Columns          []Column       `json:"columns"`
+	Keys             []Key          `json:"keys"`
+	Relationships    []Relationship `json:"relationships"`
+	Constraints      []Definition   `json:"constraints"`
+	Indexes          []Definition   `json:"indexes"`
+	Triggers         []Trigger      `json:"triggers"`
+	Policies         []Policy       `json:"policies"`
+	ViewDefinition   *string        `json:"view_definition"`
+	RowSecurity      bool           `json:"row_security"`
+	ForceRowSecurity bool           `json:"force_row_security"`
 }
 
 // ResultColumn preserves result labels and optional value encoding.
@@ -189,6 +199,8 @@ type Driver interface {
 	Validate(Access) error
 	Test(context.Context, Access) (Readiness, error)
 	ListTables(context.Context, Access, PageRequest) (TablePage, error)
+	ListObjects(context.Context, Access, ObjectPageRequest) (ObjectPage, error)
+	DescribeObject(context.Context, Access, ObjectRequest) (ObjectDescription, error)
 	DescribeTable(context.Context, Access, config.Table) (Description, error)
 	Query(context.Context, Access, QueryRequest) (QueryResult, error)
 	Invalidate(string)

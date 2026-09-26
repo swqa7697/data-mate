@@ -1,7 +1,8 @@
-// Package sqlguard checks statement kind and direct relation scope, not SQL semantics.
+// Package sqlguard checks statement kind, direct relation scope and explicit calls.
 package sqlguard
 
 import (
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -23,9 +24,30 @@ func scopeDenied() error {
 	return database.Fail(contracts.ScopeDenied, "direct relation is outside the configured application scope", false)
 }
 
-// Check accepts one SELECT-family statement and checks every direct reference.
-// Database functions and view definitions are trusted; PostgreSQL owns semantics.
+// Check checks syntax and scope. Callers executing SQL must also authorize the
+// routine names returned by Inspect against the live server catalog.
 func Check(sql string, scope config.Scope) error {
+	_, err := Inspect(sql, scope)
+	return err
+}
+
+// Inspect returns distinct pg_catalog routine names requiring live authorization.
+// Indirect execution through database objects remains PostgreSQL's responsibility.
+func Inspect(sql string, scope config.Scope) ([]string, error) {
+	names := map[string]bool{}
+	err := inspect(sql, scope, names)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func inspect(sql string, scope config.Scope, names map[string]bool) error {
 	if len(sql) > 64<<10 {
 		return resource()
 	}
@@ -122,6 +144,23 @@ func Check(sql string, scope config.Scope) error {
 				return scopeDenied()
 			}
 			return nil
+		}
+		var parts []*pg.Node
+		switch f := m.Interface().(type) {
+		case *pg.FuncCall:
+			parts = f.Funcname
+		case *pg.RangeTableSample:
+			parts = f.Method
+		}
+		if parts != nil {
+			if len(parts) < 1 || len(parts) > 2 || (len(parts) == 2 && parts[0].GetString_().GetSval() != "pg_catalog") {
+				return database.Fail(contracts.ReadOnlyViolation, "explicit calls require core PostgreSQL routines", false)
+			}
+			name := parts[len(parts)-1].GetString_().GetSval()
+			if name == "" {
+				return invalid()
+			}
+			names[name] = true
 		}
 		var err error
 		m.Range(func(f protoreflect.FieldDescriptor, v protoreflect.Value) bool {

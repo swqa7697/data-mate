@@ -95,7 +95,7 @@ for image in "${images[@]}"; do
     --publish 127.0.0.1::5432 --mount "type=volume,src=$volume_name,dst=/var/lib/postgresql" \
     --mount "type=bind,src=$fixture_dir,dst=/fixture,readonly" \
     -e POSTGRES_PASSWORD_FILE=/fixture/admin-password -e POSTGRES_DB=fixture -e PGDATA=/var/lib/postgresql/data \
-    --entrypoint /bin/bash "$image" -c 'mkdir -p /tmp/tls; cp /fixture/server.key /fixture/server.crt /tmp/tls/; chown -R postgres:postgres /tmp/tls; chmod 600 /tmp/tls/server.key; exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/tls/server.crt -c ssl_key_file=/tmp/tls/server.key -c log_statement=none' >/dev/null
+    --entrypoint /bin/bash "$image" -c 'mkdir -p /tmp/tls; cp /fixture/server.key /fixture/server.crt /tmp/tls/; chown -R postgres:postgres /tmp/tls; chmod 600 /tmp/tls/server.key; exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/tls/server.crt -c ssl_key_file=/tmp/tls/server.key -c log_statement=none -c shared_preload_libraries=pg_stat_statements' >/dev/null
   ready=0
   for ((i = 0; i < 90; i++)); do
     if docker exec "$container_name" pg_isready -h 127.0.0.1 -U postgres -d fixture >/dev/null 2>&1; then

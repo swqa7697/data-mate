@@ -161,7 +161,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal("installed bridge initialization", err)
 		}
 		tools, err := session.ListTools(ctx, nil)
-		if err != nil || len(tools.Tools) != 4 {
+		if err != nil || len(tools.Tools) != 6 {
 			t.Fatal("installed bridge tools", err)
 		}
 		toolResult, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_connections", Arguments: map[string]any{}})
