@@ -29,7 +29,7 @@ func TestConnectionTerminal(t *testing.T) {
 			fixture.schemaCount = 5000
 		}
 		factory := databaseFactory(defaultDatabase)
-		if strings.HasPrefix(mode, "scope") {
+		if strings.HasPrefix(mode, "scope") || mode == "diagnostics" {
 			factory = func() (cliDatabase, error) { return fixture, nil }
 		}
 		run := func(args ...string) int {
@@ -43,6 +43,35 @@ func TestConnectionTerminal(t *testing.T) {
 				fmt.Fprintln(os.Stderr, err)
 			}
 			return ExitCode(err)
+		}
+		// Extend the PTY harness because buffered diagnostics cannot verify output
+		// terminal detection, especially when stdin is redirected.
+		if mode == "diagnostics" {
+			for _, alias := range []string{"good", "bad"} {
+				command(t, root, keys, "", 0, "add", "--alias", alias, "--host", "localhost", "--database", "app", "--username", "reader", "--passwordless", "--yes")
+			}
+			for _, output := range []string{"color", "no-color", "empty-no-color", "json"} {
+				switch output {
+				case "no-color":
+					t.Setenv("NO_COLOR", "1")
+				case "empty-no-color":
+					t.Setenv("NO_COLOR", "")
+				default:
+					if err := os.Unsetenv("NO_COLOR"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				args := []string{"test"}
+				if output == "json" {
+					args = append(args, "--json")
+				}
+				fmt.Println("diagnostics " + output)
+				if code := run(args...); code != ExitFailure {
+					t.Fatalf("diagnostics %s exit: %d", output, code)
+				}
+				fmt.Println("diagnostics end")
+			}
+			os.Exit(0)
 		}
 		if strings.HasPrefix(mode, "scope") {
 			args := append(append([]string{}, basicAdd...), "--passwordless")

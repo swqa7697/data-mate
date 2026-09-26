@@ -135,6 +135,8 @@ Each service-side fetch opens a fresh shared state lease, verifies the preview r
 
 The terminal `stage` and `ok` fields summarize each result. A failed stage includes a safe error object; later stages are omitted. Ordinary per-profile failures continue the batch. Invalid profile state and unknown aliases fail before output because no validated selection exists. Cancellation stops the command. Output occurs after releasing state leases. Diagnostics run through the management service and may unlock an existing keyset, but do not create or repair secrets, keysets, or database grants.
 
+Human `db test` output prints one `alias  PASS` or `alias  FAIL` summary per connection, followed only by failed checks as indented `stage: CODE: message` lines. Successful check details are omitted. Only the status labels are colored: green for `PASS`, red for `FAIL`, when stdout is a terminal and `NO_COLOR` is absent. Color detection is independent of stdin; any present `NO_COLOR` value, including an empty value, disables color. Redirected output remains plain text. JSON retains all reached stages.
+
 Human previews honor `NO_COLOR`; machine output has no color. `db list`, `db test`, and all three public MCP lifecycle commands support `--json`. Their version-1 envelopes contain `connections`, `results`, or service `state`/`agents`/`mcp_enabled`/`keyset_state`; exact contracts live in [schemas](../internal/contracts/schemas). Diagnostics use stderr. Exit codes are 0 for success, 1 for operational failure, 2 for invalid usage/configuration, and 130 for cancellation. A test batch exits nonzero if any profile fails.
 
 ## 4. Agent integration and service lifecycle

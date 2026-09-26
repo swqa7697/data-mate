@@ -5,6 +5,7 @@
 ### Changed
 
 - Replace schema/table scope selection with schema-only whitelist and blacklist modes, defaulting new connections to all accessible schemas. Add `--exclude-schema` and a colored picker with immediate checkbox toggling, one-key toggle-all, and mode switching that preserves selections; old scope formats require profile recreation.
+- Show one `PASS` or `FAIL` summary per connection in `db test`, with details only for failed checks and green/red terminal status labels that honor `NO_COLOR`; preserve plain redirected output and complete JSON diagnostics.
 
 ### Fixed
 

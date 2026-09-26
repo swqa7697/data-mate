@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -30,7 +31,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 	}
 	saveProfiles(t, root, p)
-	run := func(want int, args ...string) ([]diagnosticResult, *fixtureDatabase) {
+	run := func(want int, args ...string) (string, *fixtureDatabase) {
 		t.Helper()
 		d := &fixtureDatabase{}
 		cmd := commandWithDatabase(Build{}, keys, func() (cliDatabase, error) { return d, nil })
@@ -47,18 +48,26 @@ func TestConnectionDiagnostics(t *testing.T) {
 		if !reflect.DeepEqual(before, files(t, root)) || strings.Contains(out.String()+diag.String(), "synthetic-secret") {
 			t.Fatal("diagnostics wrote state or exposed credentials")
 		}
-		if contracts.Validate("db-test.output", out.Bytes()) != nil {
-			t.Fatalf("invalid diagnostics output: %s", &out)
+		if strings.Contains(out.String(), "\x1b") || diag.Len() != 0 {
+			t.Fatalf("diagnostics emitted color or unexpected stderr: %q %q", out.String(), diag.String())
+		}
+		return out.String(), d
+	}
+	runJSON := func(want int, args ...string) ([]diagnosticResult, *fixtureDatabase) {
+		t.Helper()
+		out, d := run(want, append(args, "--json")...)
+		if contracts.Validate("db-test.output", []byte(out)) != nil {
+			t.Fatalf("invalid diagnostics output: %s", out)
 		}
 		var report struct {
 			Results []diagnosticResult `json:"results"`
 		}
-		if json.Unmarshal(out.Bytes(), &report) != nil {
+		if json.Unmarshal([]byte(out), &report) != nil {
 			t.Fatal("decode diagnostics")
 		}
 		return report.Results, d
 	}
-	results, d := run(1, "--json")
+	results, d := runJSON(1)
 	if len(results) != 3 || results[0].Alias != "bad" || results[0].Stage != "authentication" || results[0].OK || !results[1].OK || results[2].Error.Code != contracts.CredentialMissing || results[2].Stage != "vault" || !reflect.DeepEqual(d.tested, []string{"bad", "good"}) || !d.closed {
 		t.Fatalf("batch diagnostics: %+v", results)
 	}
@@ -69,7 +78,16 @@ func TestConnectionDiagnostics(t *testing.T) {
 			}
 		}
 	}
-	results, d = run(0, "good", "--json")
+	// Extend the staged diagnostics scenario: successful checks must not obscure
+	// failed checks in human output, and pipes must never receive ANSI escapes.
+	if out, _ := run(0, "good"); out != "good  PASS\n" {
+		t.Fatalf("single success: %q", out)
+	}
+	wantBatch := fmt.Sprintf("bad  FAIL\n  authentication: %s: %s\ngood  PASS\nmissing  FAIL\n  vault: %s: %s\n", results[0].Error.Code, results[0].Error.Message, results[2].Error.Code, results[2].Error.Message)
+	if out, _ := run(1); out != wantBatch {
+		t.Fatalf("compact batch diagnostics: %q", out)
+	}
+	results, d = runJSON(0, "good")
 	if len(results) != 1 || len(results[0].Stages) != 6 || len(d.tested) != 1 {
 		t.Fatal("single diagnostics")
 	}
@@ -84,13 +102,13 @@ func TestConnectionDiagnostics(t *testing.T) {
 	}
 	saveProfiles(t, root, invalidProfile)
 	calls := keys.calls
-	results, d = run(2, "good", "--json")
+	results, d = runJSON(2, "good")
 	if len(results) != 1 || results[0].Stage != "config" || len(results[0].Stages) != 1 || keys.calls != calls || len(d.tested) != 0 {
 		t.Fatal("invalid config reached vault or driver")
 	}
 	saveProfiles(t, root, original)
 	keys.denied = true
-	results, d = run(1, "--json")
+	results, d = runJSON(1)
 	if len(d.tested) != 0 || len(results) != 3 {
 		t.Fatal("vault denial reached driver or stopped batch")
 	}

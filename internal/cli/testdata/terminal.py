@@ -12,7 +12,7 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
-for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "scope-mixed", "scope-color", "scope-limit", "scope-bulk-fail", "scope-bulk-cancel", "scope-no", "scope-cancel", "scope-fail"):
+for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "scope-mixed", "scope-color", "scope-limit", "scope-bulk-fail", "scope-bulk-cancel", "scope-no", "scope-cancel", "scope-fail", "diagnostics"):
     root = os.path.join(base, mode)
     os.mkdir(root, 0o700)
     master, slave = pty.openpty()
@@ -22,7 +22,8 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
     if mode == "scope-color":
         env.pop("NO_COLOR", None)
     proc = subprocess.Popen([binary, "-test.run=^TestConnectionTerminal$"],
-                            stdin=slave, stdout=slave, stderr=slave, env=env,
+                            stdin=subprocess.DEVNULL if mode == "diagnostics" else slave,
+                            stdout=slave, stderr=slave, env=env,
                             start_new_session=True)
     transcript = bytearray()
     cursor = 0
@@ -45,7 +46,12 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         os.write(master, answer.encode())
 
     try:
-        if mode.startswith("scope"):
+        if mode == "diagnostics":
+            # Drain output while the child runs so the PTY buffer cannot block
+            # the JSON write before proc.wait completes.
+            send_after("diagnostics json\r\n", "")
+            send_after("diagnostics end\r\n", "")
+        elif mode.startswith("scope"):
             if mode != "scope-fail":
                 send_after("Choose schemas", " ")
                 if mode == "scope-mixed":
@@ -98,7 +104,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith(("enroll", "scope")):
+        if mode.startswith(("enroll", "scope")) or mode == "diagnostics":
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -140,10 +146,27 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode in ("happy", "enroll", "scope-mixed", "scope-color", "scope-limit") else 1 if mode == "scope-fail" else 130), (mode, code, transcript)
+        assert code == (0 if mode in ("happy", "enroll", "scope-mixed", "scope-color", "scope-limit", "diagnostics") else 1 if mode == "scope-fail" else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
-        if mode == "scope-color":
+        if mode == "diagnostics":
+            for output in ("color", "no-color", "empty-no-color", "json"):
+                block = transcript.split(("diagnostics " + output + "\r\n").encode(), 1)[1].split(b"diagnostics end\r\n", 1)[0]
+                lines = block.splitlines()
+                assert lines[-1] == b"one or more connection checks failed", block
+                if output == "json":
+                    assert b"\x1b" not in block, block
+                    report = json.loads(lines[0])
+                    assert report["version"] == 1 and len(report["results"]) == 2, report
+                    assert [r["ok"] for r in report["results"]] == [False, True], report
+                    assert len(report["results"][1]["stages"]) == 6, report
+                else:
+                    passed = b"\x1b[32mPASS\x1b[0m" if output == "color" else b"PASS"
+                    failed = b"\x1b[31mFAIL\x1b[0m" if output == "color" else b"FAIL"
+                    assert lines[:-1] == [b"bad  " + failed,
+                                         b"  authentication: CONNECT_FAILED: authentication failed",
+                                         b"good  " + passed], block
+        elif mode == "scope-color":
             assert b"\x1b[1;36m" in transcript and b"\x1b[32m" in transcript, "picker color missing"
         else:
             assert b"\x1b[36m" not in transcript and b"\x1b[1;36m" not in transcript and b"\x1b[32m" not in transcript, "NO_COLOR ignored"
@@ -165,7 +188,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             assert b'reader' in transcript, "username must remain visible"
             # Raw-mode review must emit CRLF so subsequent lines start at column 0.
             assert b'\r\nAlias: analytics\r\nDriver: postgres\r\n' in transcript
-        else:
+        elif mode != "diagnostics":
             assert os.listdir(root) == [], "cancellation created state"
         for parent, _, names in os.walk(root):
             for name in names:
@@ -178,4 +201,4 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         if slave is not None:
             os.close(slave)
         os.close(master)
-print("PTY create/edit/remove, hidden input, default-No, Ctrl-C, SIGINT and restoration passed")
+print("PTY create/edit/remove, hidden input, default-No, Ctrl-C, SIGINT, restoration and diagnostics colors passed")
