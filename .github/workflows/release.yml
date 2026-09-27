@@ -167,9 +167,13 @@ jobs:
         with:
           name: signed-release-candidate-${{ matrix.platform }}
           path: ${{ runner.temp }}/data-mate-release
-      - name: Prepare Linux user service manager
+      - name: Prepare Linux runtime prerequisites
         if: runner.os == 'Linux'
-        run: sudo systemctl start "user@$(id -u).service"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-user-session gnome-keyring
+          sudo systemctl start "user@$(id -u).service"
       - name: Accept signed candidate with system tools
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
