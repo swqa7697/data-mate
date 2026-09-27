@@ -412,7 +412,7 @@ Direct and indirect application/extension routines, aggregates, windows, samplin
 
 | Resource              | Bound                                               |
 | --------------------- | --------------------------------------------------- |
-| Query deadline        | Profile default 60 seconds, maximum five minutes      |
+| Query deadline        | Profile default 60 seconds, maximum five minutes    |
 | Lock wait             | 1 second                                            |
 | Returned rows         | Profile default 500, maximum 5000; caller may lower |
 | Result envelope       | Profile cap, at most 1 MiB                          |
@@ -527,7 +527,7 @@ Tests live beside the owning Go packages; reusable fixtures and public examples 
 | Lifecycle and agents    | Independent checkouts, management-only start, explicit MCP enablement, registration ownership, start/stop, locked/ready keysets, stale/rebuilt identities, and cleanup retries |
 | MCP and resources       | Initialization, schemas, independent sessions, frame/queue limits, disconnect/cancellation, bounded output, and redaction                                                      |
 | Management and secrets  | Interface separation, peer identity, credential patch semantics, no secret-return endpoint, cancellation without late publication, and no OS access after unlock               |
-| PostgreSQL              | Broad read SQL, schema qualification, cached account admission, server write/permission rejection, codecs, truncation, rollback/reset and connection disposal                                 |
+| PostgreSQL              | Broad read SQL, schema qualification, cached account admission, server write/permission rejection, codecs, truncation, rollback/reset and connection disposal                  |
 | Ownership and purge     | Symlink/identity protection, state-reader draining, tombstones/receipts, exact-key deletion, and preservation of unrelated files                                               |
 
 Bounded fuzz seeds exercise decoding and query guard. Race tests cover concurrent behavior. CI uses `macos-15` jobs for Format and lint, Test and build, and Race tests, each with `make setup`; Docker integration is excluded.
