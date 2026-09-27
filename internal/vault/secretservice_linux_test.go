@@ -18,7 +18,7 @@ import (
 // a private bus without host activation files and a synthetic service; the real
 // keyring remains opt-in. A running service must not require an activation file.
 func TestSecretServiceBoundary(t *testing.T) {
-	for _, scenario := range []string{"lifecycle", "unavailable", "locked", "denied", "canceled-prompt", "ambiguous", "oversized", "wrong-session", "session-collection"} {
+	for _, scenario := range []string{"lifecycle", "unavailable", "locked", "denied", "canceled-prompt", "ambiguous", "wrong-account", "unexpected-attribute", "oversized", "wrong-session", "session-collection"} {
 		t.Run(scenario, func(t *testing.T) {
 			bus := dbusfixture.Start(t)
 			server, err := bus.Connect(t.Context())
@@ -89,11 +89,32 @@ func TestSecretServiceBoundary(t *testing.T) {
 				},
 			})
 			export(collection, "org.freedesktop.DBus.Properties", map[string]any{
-				"Get": func(iface, name string) (dbus.Variant, *dbus.Error) { return dbus.MakeVariant(locked), nil },
+				"Get": func(iface, name string) (dbus.Variant, *dbus.Error) {
+					mu.Lock()
+					defer mu.Unlock()
+					return dbus.MakeVariant(locked), nil
+				},
 			})
 			export(item, "org.freedesktop.DBus.Properties", map[string]any{
 				"Get": func(iface, name string) (dbus.Variant, *dbus.Error) {
-					return dbus.MakeVariant(secretAttributes(account)), nil
+					mu.Lock()
+					defer mu.Unlock()
+					attributes := secretAttributes(account)
+					// GNOME exposes hashed lookup fields while locked, and adds a
+					// schema after reloading an item from persistent storage.
+					if locked {
+						attributes = map[string]string{"gkr:compat:hashed:application": "synthetic-hash", "gkr:compat:hashed:account": "synthetic-hash"}
+					}
+					if scenario != "lifecycle" || locked || promptCalls > 0 {
+						attributes["xdg:schema"] = "org.freedesktop.Secret.Generic"
+					}
+					if scenario == "wrong-account" {
+						attributes["account"] = strings.Repeat("b", 64)
+					}
+					if scenario == "unexpected-attribute" {
+						attributes["unexpected"] = "synthetic"
+					}
+					return dbus.MakeVariant(attributes), nil
 				},
 			})
 			export(item, secretInterface+"Item", map[string]any{
@@ -117,10 +138,15 @@ func TestSecretServiceBoundary(t *testing.T) {
 				"Prompt": func(window string) *dbus.Error {
 					mu.Lock()
 					promptCalls++
+					if scenario == "lifecycle" {
+						locked = false
+					}
 					mu.Unlock()
 					prompted <- struct{}{}
 					if scenario == "denied" {
 						_ = server.Emit(prompt, secretInterface+"Prompt.Completed", true, dbus.MakeVariant([]dbus.ObjectPath{}))
+					} else if scenario == "lifecycle" {
+						_ = server.Emit(prompt, secretInterface+"Prompt.Completed", false, dbus.MakeVariant([]dbus.ObjectPath{collection}))
 					}
 					return nil
 				},
@@ -139,12 +165,21 @@ func TestSecretServiceBoundary(t *testing.T) {
 				if err != nil || string(first) != "first" {
 					t.Fatal("create", err)
 				}
-				second, err := k.CreateIfAbsent(ctx, account, []byte("second"))
+				mu.Lock()
+				locked = true
+				mu.Unlock()
+				second, err := k.CreateIfAbsent(WithInteraction(ctx, true), account, []byte("second"))
 				if err != nil || !bytes.Equal(first, second) {
 					t.Fatal("existing key overwritten", err)
 				}
 				if err = k.Delete(ctx, account); err != nil {
 					t.Fatal(err)
+				}
+				mu.Lock()
+				calls := promptCalls
+				mu.Unlock()
+				if calls != 1 {
+					t.Fatalf("expected one unlock before verifying item identity, got %d", calls)
 				}
 				if err = k.Delete(ctx, account); err != nil {
 					t.Fatal(err)

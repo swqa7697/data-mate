@@ -145,7 +145,7 @@ func (s *secretSession) prompt(ctx context.Context, path dbus.ObjectPath) error 
 			return ctx.Err()
 		case signal := <-signals:
 			if signal == nil {
-				return ErrUnavailable
+				return secretError(ctx, ErrUnavailable)
 			}
 			if signal.Path != path || signal.Name != secretInterface+"Prompt.Completed" || signal.Sender != s.owner {
 				continue
@@ -207,12 +207,24 @@ func (s *secretSession) find(ctx context.Context, account string) (dbus.ObjectPa
 	if len(items) != 1 || !items[0].IsValid() || !strings.HasPrefix(string(items[0]), string(s.collection)+"/") {
 		return "", ErrUnavailable
 	}
+	// GNOME can match hashed lookup attributes while locked. Unlock before
+	// verifying the plaintext identity, retaining the caller's prompt policy.
+	if err := s.unlock(ctx, s.collection); err != nil {
+		return "", err
+	}
 	var attributes dbus.Variant
 	if err := s.object(items[0]).CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, secretInterface+"Item", "Attributes").Store(&attributes); err != nil {
 		return "", secretError(ctx, err)
 	}
 	actual, ok := attributes.Value().(map[string]string)
-	if !ok || len(actual) != 2 || actual["application"] != secretAttributes(account)["application"] || actual["account"] != account {
+	// GNOME adds this descriptive schema when reloading persistent items.
+	// It is not an ownership field; still require the exact application/account
+	// and reject all other unexpected attributes.
+	identityFields := len(actual)
+	if _, hasSchema := actual["xdg:schema"]; hasSchema {
+		identityFields--
+	}
+	if !ok || identityFields != 2 || actual["application"] != secretAttributes(account)["application"] || actual["account"] != account {
 		return "", ErrUnavailable
 	}
 	return items[0], nil

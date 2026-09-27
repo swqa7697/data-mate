@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix Linux credential access after a GNOME Keyring restart by unlocking before validating saved keyset identity and accepting GNOME's added schema metadata.
+
 ## [0.2.1] - 2026-09-27
 
 ### Changed
