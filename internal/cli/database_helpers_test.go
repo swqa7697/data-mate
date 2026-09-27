@@ -32,11 +32,13 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	if !d.emptyCatalog {
 		for _, name := range []string{"Dot.Schema", "empty", "private", "public"} {
-			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}}
+			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}, Functions: []database.CatalogName{}}
 			if name != "empty" {
 				s.Tables = append(s.Tables, database.RelationName{Name: "line\n\x1b[31m", Kind: "table"})
 			}
 			if name == "public" {
+				s.Indexes = append(s.Indexes, database.CatalogName{Name: "z_idx"}, database.CatalogName{Name: "a_idx"}, database.CatalogName{Name: "idx\n\x1b[31m"})
+				s.Functions = append(s.Functions, database.CatalogName{Name: "z_fn"}, database.CatalogName{Name: "a_fn"}, database.CatalogName{Name: "fn\n\x1b[31m"})
 				s.Enums = append(s.Enums, database.CatalogName{Name: "status"})
 				s.Sequences = append(s.Sequences, database.CatalogName{Name: "items_id_seq"})
 				s.Tables = append(s.Tables, database.RelationName{Name: "items", Kind: "table"}, database.RelationName{Name: "report", Kind: "view"}, database.RelationName{Name: "cached_report", Kind: "materialized_view"})

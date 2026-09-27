@@ -89,6 +89,8 @@ type SchemaDescription struct {
 	Tables    []RelationName `json:"tables"`
 	Enums     []CatalogName  `json:"enums"`
 	Sequences []CatalogName  `json:"sequences"`
+	Indexes   []CatalogName  `json:"indexes"`
+	Functions []CatalogName  `json:"functions"`
 }
 
 // CatalogName identifies an object without fetching its definition or values.

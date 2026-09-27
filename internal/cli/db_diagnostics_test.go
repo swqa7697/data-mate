@@ -134,7 +134,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 			t.Fatalf("description snapshot: %+v", description)
 		}
 		for _, s := range description.Schemas {
-			if s.Tables == nil || s.Enums == nil || s.Sequences == nil {
+			if s.Tables == nil || s.Enums == nil || s.Sequences == nil || s.Indexes == nil || s.Functions == nil {
 				t.Fatal("description lost empty collections")
 			}
 		}
@@ -149,6 +149,11 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 		if strings.Contains(out, `"Dot.Schema"`) || strings.Contains(out, `(table)`) || !strings.Contains(out, "items  line") || !strings.Contains(out, "cached_report  report") || !strings.Contains(out, "status") || !strings.Contains(out, "items_id_seq") {
 			t.Fatalf("description lost compact categories or unquoted names: %q", out)
+		}
+		for _, names := range []string{`a_idx  idx\n\x1b[31m  z_idx`, `a_fn  fn\n\x1b[31m  z_fn`} {
+			if !strings.Contains(out, names) {
+				t.Fatalf("index/function names lost sorting or escaping: %q", out)
+			}
 		}
 		// Extend the description scenario with narrow grids, display-cell widths,
 		// punctuation, and hostile names. These are output behaviors, not help prose.

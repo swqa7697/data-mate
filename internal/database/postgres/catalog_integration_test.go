@@ -38,6 +38,18 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
  CREATE VIEW picker.a_view AS SELECT 1 AS id;
  CREATE MATERIALIZED VIEW picker.materialized AS SELECT 1 AS id;
  CREATE TABLE picker.partitioned(id int) PARTITION BY RANGE(id);
+ CREATE INDEX column_idx ON picker.column_only(id);
+ ALTER TABLE picker.unreadable ADD PRIMARY KEY(id);
+ CREATE INDEX partitioned_idx ON picker.partitioned(id);
+ CREATE FUNCTION picker.lookup(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
+ CREATE FUNCTION picker.lookup(text) RETURNS text LANGUAGE sql AS 'SELECT $1';
+ REVOKE EXECUTE ON FUNCTION picker.lookup(integer),picker.lookup(text) FROM PUBLIC;
+ DO $$ BEGIN
+ EXECUTE format('CREATE FUNCTION picker.window_probe() RETURNS bigint LANGUAGE internal WINDOW AS %L',
+ (SELECT prosrc FROM pg_catalog.pg_proc WHERE oid='pg_catalog.row_number()'::regprocedure));
+ END $$;
+ CREATE PROCEDURE picker.procedure_probe() LANGUAGE sql AS 'SELECT 1';
+ CREATE AGGREGATE picker.aggregate_probe(integer) (SFUNC=pg_catalog.int4pl, STYPE=integer);
  CREATE FOREIGN DATA WRAPPER describe_fdw;
  CREATE SERVER describe_server FOREIGN DATA WRAPPER describe_fdw;
  CREATE FOREIGN TABLE picker.foreign_table(id int) SERVER describe_server;
@@ -65,9 +77,9 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 				t.Fatalf("system schema fetched: %s", s.Name)
 			}
 			if s.Name == "picker_vacant" {
-				foundVacant = len(s.Tables)+len(s.Enums)+len(s.Sequences) == 0
+				foundVacant = len(s.Tables)+len(s.Enums)+len(s.Sequences)+len(s.Indexes)+len(s.Functions) == 0
 			}
-			if s.Enums == nil || s.Sequences == nil || s.Tables == nil {
+			if s.Enums == nil || s.Sequences == nil || s.Tables == nil || s.Indexes == nil || s.Functions == nil {
 				t.Fatal("null collection")
 			}
 			if s.Name == "picker_empty" {
@@ -75,6 +87,23 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			}
 			if s.Name == "picker" {
 				foundPicker = true
+				if !reflect.DeepEqual(s.Indexes, []database.CatalogName{{Name: "column_idx"}, {Name: "partitioned_idx"}, {Name: "unreadable_pkey"}}) {
+					t.Fatalf("ordinary, partitioned or constraint index missing: %+v", s.Indexes)
+				}
+				// Overloads collapse to one name, including extension functions;
+				// metadata remains visible without EXECUTE and excludes other routines.
+				functions := map[string]bool{}
+				last := ""
+				for _, function := range s.Functions {
+					if function.Name <= last {
+						t.Fatalf("function order or duplicate name: %+v", s.Functions)
+					}
+					last = function.Name
+					functions[function.Name] = true
+				}
+				if !functions["lookup"] || !functions["window_probe"] || !functions["hstore"] || functions["procedure_probe"] || functions["aggregate_probe"] {
+					t.Fatalf("function visibility: %+v", s.Functions)
+				}
 				if !reflect.DeepEqual(s.Enums, []database.CatalogName{{Name: "priority"}, {Name: "status"}}) || !reflect.DeepEqual(s.Sequences, []database.CatalogName{{Name: "items_id_seq"}, {Name: "shared"}}) {
 					t.Fatalf("enum/sequence metadata: %+v", s)
 				}
@@ -104,7 +133,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	}
 	count := len(description.Schemas)
 	for _, s := range description.Schemas {
-		count += len(s.Tables) + len(s.Enums) + len(s.Sequences)
+		count += len(s.Tables) + len(s.Enums) + len(s.Sequences) + len(s.Indexes) + len(s.Functions)
 	}
 	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(maxCatalogObjects-count) + ` LOOP
  EXECUTE format('CREATE SCHEMA describe_bound%s',i);
@@ -116,6 +145,24 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	defer cleanupBounds()
 	if _, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password)); err != nil {
 		t.Fatal("exact catalog bound rejected", err)
+	}
+	// An overload adds no displayed entry; new index/function names do and must
+	// fail at the same combined bound without returning a partial description.
+	sql("CREATE FUNCTION picker.lookup(bigint) RETURNS bigint LANGUAGE sql AS 'SELECT $1'")
+	if _, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password)); err != nil {
+		t.Fatal("overload consumed an extra catalog entry", err)
+	}
+	for _, object := range []struct{ create, drop string }{
+		{"CREATE INDEX extra ON picker.unreadable(id)", "DROP INDEX picker.extra"},
+		{"CREATE FUNCTION describe_bound1.extra() RETURNS integer LANGUAGE sql AS 'SELECT 1'", "DROP FUNCTION describe_bound1.extra()"},
+	} {
+		sql(object.create)
+		result, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
+		requireCode(t, err, contracts.ResourceLimit)
+		if result.Schemas != nil {
+			t.Fatal("oversized index/function catalog returned partial result")
+		}
+		sql(object.drop)
 	}
 	sql("CREATE SEQUENCE describe_bound1.extra")
 	result, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))

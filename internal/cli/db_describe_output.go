@@ -35,8 +35,9 @@ func writeDescription(cmd *cobra.Command, description *database.DatabaseDescript
 }
 
 func renderDescription(description *database.DatabaseDescription, width int, color bool) string {
-	labels := [...]string{"Enums", "Tables", "Views", "Sequences"}
-	tints := [...]string{"\x1b[35m", "\x1b[32m", "\x1b[36m", "\x1b[33m"}
+	labels := [...]string{"Enum", "Table", "View", "Sequence", "Index", "Function"}
+	headings := [...]string{"Enums", "Tables", "Views", "Sequences", "Indexes", "Functions"}
+	tints := [...]string{"\x1b[35m", "\x1b[32m", "\x1b[36m", "\x1b[33m", "\x1b[34m", "\x1b[31m"}
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s — database=%s\n", displayName(description.Alias), displayName(description.Database))
 	if len(description.Schemas) == 0 {
@@ -44,17 +45,20 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		return out.String()
 	}
 	if color {
+		out.WriteString("\x1b[1mSchema\x1b[0m")
 		for i, label := range labels {
-			if i > 0 {
-				out.WriteString("  ")
-			}
+			out.WriteString("  ")
 			out.WriteString(tints[i] + label + "\x1b[0m")
 		}
 		out.WriteByte('\n')
 	}
 	for _, schema := range description.Schemas {
-		fmt.Fprintf(&out, "\n%s\n", displayName(schema.Name))
-		groups := [4][]string{}
+		name := displayName(schema.Name)
+		if color {
+			name = "\x1b[1m" + name + "\x1b[0m"
+		}
+		fmt.Fprintf(&out, "\n%s\n", name)
+		groups := [6][]string{}
 		for _, item := range schema.Enums {
 			groups[0] = append(groups[0], item.Name)
 		}
@@ -68,6 +72,12 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		for _, item := range schema.Sequences {
 			groups[3] = append(groups[3], item.Name)
 		}
+		for _, item := range schema.Indexes {
+			groups[4] = append(groups[4], item.Name)
+		}
+		for _, item := range schema.Functions {
+			groups[5] = append(groups[5], item.Name)
+		}
 		populated := false
 		for i, names := range groups {
 			if len(names) == 0 {
@@ -78,7 +88,7 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 			}
 			populated = true
 			if !color {
-				fmt.Fprintf(&out, "  %s\n", labels[i])
+				fmt.Fprintf(&out, "  %s\n", headings[i])
 			}
 			sort.Strings(names)
 			for j := range names {

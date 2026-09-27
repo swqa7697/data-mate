@@ -71,7 +71,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections
-  - `db describe [c-alias(optional)]`: Print enums, tables, views and sequences under each schema of a DB connection
+  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a DB connection
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
 - MCP - One shot
   - `mcp start`: Start the MCP service to expose all available DB connections to all supported agents

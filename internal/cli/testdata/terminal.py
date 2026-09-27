@@ -143,12 +143,13 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                     report = json.loads(block)
                     assert report["schemas"][0]["enums"] == [{"name":"status"}], report
                     assert report["schemas"][0]["sequences"] == [{"name":"items_id_seq"}], report
+                    assert report["schemas"][0]["indexes"] == [{"name":"alpha_idx"}], report
+                    assert report["schemas"][0]["functions"] == [{"name":"lookup"}], report
                     continue
                 plain = re.sub(rb"\x1b\[[0-9;]*m", b"", block)
                 if variant in ("color", "narrow"):
-                    for tint, name in ((b"35", b"status"), (b"32", b"alpha"), (b"36", b"report"), (b"33", b"items_id_seq")):
+                    for tint, name in ((b"35", b"status"), (b"32", b"alpha"), (b"36", b"report"), (b"33", b"items_id_seq"), (b"34", b"alpha_idx"), (b"31", b"lookup"), (b"1", b"public")):
                         assert b"\x1b["+tint+b"m"+name+b"\x1b[0m" in block, block
-                    assert plain.count(b"Tables") == 1, plain
                 else:
                     assert b"\x1b" not in block, block
                 if variant == "narrow":
