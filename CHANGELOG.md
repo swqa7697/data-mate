@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Simplify `data-mate version` output by omitting the commit hash and showing `(dirty)` only for dirty builds.
 - Require a live read-only account check before saving every connection addition/edit and before using a newly opened pool; reuse approval only while physical connections remain, and make `db test` always check fresh privileges. Failed saves preserve existing profiles and credentials.
 - Allow system-catalog reads, application and extension routines, `SHOW`, and `EXPLAIN` of read queries; keep schema-qualified table names, read-only transactions, and resource limits. Return catalog-visible definitions and relationships independently of row-access grants.
 - Show one `PASS` or `FAIL` summary per connection in `db test`, with details only for failed checks and green/red terminal status labels that honor `NO_COLOR`; preserve plain redirected output and complete JSON diagnostics.

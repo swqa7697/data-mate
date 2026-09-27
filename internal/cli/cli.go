@@ -102,8 +102,12 @@ func commandWithManagement(build Build, keys vault.KeyProvider, factory manageme
 		root.PersistentFlags().StringVar(&override, "root", "", "Absolute installation root (defaults to executable location)")
 	}
 	root.SetFlagErrorFunc(func(_ *cobra.Command, _ error) error { return &Error{ExitInvalid, "invalid flags; run data-mate help"} })
-	root.AddCommand(&cobra.Command{Use: "version", Short: "Show application version and build metadata", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		_, err := fmt.Fprintf(cmd.OutOrStdout(), "data-mate %s (revision %s, dirty %s)\n", build.Version, build.Revision, build.Dirty)
+	root.AddCommand(&cobra.Command{Use: "version", Short: "Show application version", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		suffix := ""
+		if build.Dirty == "true" {
+			suffix = " (dirty)"
+		}
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "data-mate %s%s\n", build.Version, suffix)
 		if err != nil {
 			return &Error{ExitFailure, "cannot write output"}
 		}

@@ -64,7 +64,7 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		}
 		run(t, root, true, installArgs...)
 		bin := filepath.Join(root, ".dev", "bin", "data-mate")
-		if output := run(t, temp, true, bin, "version"); !strings.Contains(output, "data-mate "+strings.TrimSpace(string(version))+" ") {
+		if output := run(t, temp, true, bin, "version"); !strings.Contains(output, "data-mate "+strings.TrimSpace(string(version))) {
 			t.Fatal(output)
 		}
 		if i == 0 {

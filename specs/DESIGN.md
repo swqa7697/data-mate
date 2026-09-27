@@ -484,7 +484,7 @@ The bridge owns and closes its streams. Cancellable file reads allow service dis
 
 ### 11.1 Build and validation commands
 
-`VERSION` is the sole checked-in application version. Build metadata may add revision and dirty-state information. The pinned toolchain in `go.mod` and `scripts/common.sh`, native cgo, and the macOS SDK are required. Dependency checks provide guidance rather than installing system software. Docker is needed only for explicit integration tests.
+`VERSION` is the sole checked-in application version. Build metadata may add revision and dirty-state information. The public `version` command omits the revision and appends ` (dirty)` only when the build dirty state is true. The pinned toolchain in `go.mod` and `scripts/common.sh`, native cgo, and the macOS SDK are required. Dependency checks provide guidance rather than installing system software. Docker is needed only for explicit integration tests.
 
 | Target                     | Contract                                                                                                       |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
