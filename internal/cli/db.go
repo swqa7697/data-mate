@@ -289,6 +289,9 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 }
 
 func storageError(err error, input bool) error {
+	if message := keyringError(err); message != "" {
+		return failure(message)
+	}
 	var dbError *database.Error
 	if errors.As(err, &dbError) {
 		if dbError.Code == contracts.Cancelled {
@@ -365,4 +368,16 @@ func listProfiles(cmd *cobra.Command, p config.Profiles) error {
 		}
 	}
 	return nil
+}
+
+func keyringError(err error) string {
+	for _, safe := range []error{vault.ErrTerminal, vault.ErrPassword, vault.ErrUserBus, vault.ErrUnsupported, vault.ErrProviderChanged, vault.ErrProviderUnavailable} {
+		if errors.Is(err, safe) {
+			return safe.Error()
+		}
+	}
+	if errors.Is(err, vault.ErrLocked) {
+		return "credential store is locked; rerun this command with terminal input and stderr to authenticate"
+	}
+	return ""
 }

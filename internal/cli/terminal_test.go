@@ -23,6 +23,12 @@ func TestConnectionTerminal(t *testing.T) {
 	if mode := os.Getenv("DATA_MATE_P2_PTY_HELPER"); mode != "" {
 		root := os.Getenv("DATA_MATE_P2_PTY_ROOT")
 		keys := &testKeys{}
+		if strings.HasPrefix(mode, "keyring") {
+			keys.keyring = "create"
+			if mode == "keyring-unlock" {
+				keys.keyring = "unlock"
+			}
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
 		fixture := &fixtureDatabase{}
@@ -34,6 +40,9 @@ func TestConnectionTerminal(t *testing.T) {
 			cmd := commandWithDatabase(Build{}, keys, factory)
 			cmd.SetArgs(append([]string{"--root", root, "db"}, args...))
 			cmd.SetIn(os.Stdin)
+			if mode == "keyring-noninteractive" {
+				cmd.SetIn(strings.NewReader("pty-hidden-secret"))
+			}
 			cmd.SetOut(os.Stdout)
 			cmd.SetErr(os.Stderr)
 			err := cmd.ExecuteContext(ctx)
@@ -159,7 +168,31 @@ func TestConnectionTerminal(t *testing.T) {
 			}
 			os.Exit(code)
 		}
+		if mode == "keyring-noninteractive" {
+			code := run(append(basicAdd, "--password-stdin")...)
+			if code != ExitFailure {
+				t.Fatal("noninteractive keyring authentication", code)
+			}
+			if len(snapshot(t, root).Connections) != 0 {
+				t.Fatal("noninteractive request published")
+			}
+			os.Exit(code)
+		}
 		code := run("add")
+		if strings.HasPrefix(mode, "keyring") {
+			keys.keyring = ""
+			p := snapshot(t, root)
+			if mode == "keyring-cancel" {
+				if code != ExitCancelled || len(p.Connections) != 0 {
+					t.Fatal("canceled keyring request published", code)
+				}
+			} else {
+				if code != 0 || len(p.Connections) != 1 || credential(t, root, keys, p.Connections[0].ID).Password != "pty-hidden-secret" {
+					t.Fatal("keyring preparation did not resume original save", code)
+				}
+			}
+			os.Exit(code)
+		}
 		if mode != "happy" {
 			os.Exit(code)
 		}

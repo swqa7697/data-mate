@@ -44,6 +44,7 @@ func Connect(ctx context.Context) (*dbus.Conn, error) {
 		socket.Close()
 		return nil, err
 	}
+	_ = socket.SetDeadline(time.Now().Add(5 * time.Second))
 	if err = conn.Auth([]dbus.Auth{dbus.AuthExternal(strconv.Itoa(os.Geteuid()))}); err == nil {
 		err = conn.Hello()
 	}
@@ -51,5 +52,6 @@ func Connect(ctx context.Context) (*dbus.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
+	_ = socket.SetDeadline(time.Time{})
 	return conn, nil
 }

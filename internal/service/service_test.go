@@ -210,7 +210,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			binary.BigEndian.PutUint32(header[:], 4097)
 			_, _ = conn.Write(header[:])
 		} else {
-			h := hello{2, "session", rec.Identity, c.Build, os.Getpid(), rec.Nonce, "", "", false, ""}
+			h := hello{3, "session", rec.Identity, c.Build, os.Getpid(), rec.Nonce, "", "", false, ""}
 			if kind == "pid" {
 				h.PID++
 			} else {
@@ -434,6 +434,28 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 	}
 	if e = os.Remove(registration); e != nil {
 		t.Fatal(e)
+	}
+	// Authentication must finish before destructive cleanup, without retaining
+	// a state lease even when damaged SQLite requires conservative exact deletion.
+	prepared := false
+	preflight := &cleanupKeys{prepare: func(ctx context.Context, _ string) error {
+		prepared = true
+		inspect, done := context.WithTimeout(ctx, time.Second)
+		defer done()
+		read, e := s.ReadLease(inspect)
+		if e != nil {
+			t.Error("purge prompt held state", e)
+		} else {
+			read.Release()
+		}
+		return context.Canceled
+	}}
+	removed := false
+	if e = c.Uninstall(t.Context(), true, preflight, func() error { removed = true; return nil }); !errors.Is(e, context.Canceled) || !prepared || removed || len(preflight.digests) != 0 {
+		t.Fatal("purge preparation was destructive", e)
+	}
+	if _, e = os.Stat(filepath.Join(filepath.Dir(c.Root.Path), "bin/data-mate")); e != nil {
+		t.Fatal("canceled preparation removed executable", e)
 	}
 	keys := &cleanupKeys{err: vault.ErrDenied}
 	if e = c.Uninstall(t.Context(), true, keys); !errors.Is(e, vault.ErrDenied) {

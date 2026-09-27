@@ -16,7 +16,7 @@ import time
 
 binary, base = sys.argv[1:]
 base_duration = catalog_duration = 0.0
-for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel", "catalog-layout", "catalog-short", "catalog-pager", "catalog-cancel", "catalog-no-pager", "catalog-json", "catalog-redirected"):
+for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noninteractive", "happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel", "catalog-layout", "catalog-short", "catalog-pager", "catalog-cancel", "catalog-no-pager", "catalog-json", "catalog-redirected"):
     mode_started = time.monotonic()
     print("PTY mode: " + mode, file=sys.stderr, flush=True)
     root = os.path.join(base, mode)
@@ -51,7 +51,9 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         os.write(master, answer.encode())
 
     try:
-        if mode.startswith("catalog"):
+        if mode == "keyring-noninteractive":
+            pass
+        elif mode.startswith("catalog"):
             if mode == "catalog-layout":
                 send_after("catalog json\r\n", "")
                 send_after("catalog end\r\n", "")
@@ -90,7 +92,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith(("enroll", "describe", "catalog")) or mode == "diagnostics":
+        if mode.startswith(("enroll", "describe", "catalog")) or mode in ("diagnostics", "keyring-noninteractive"):
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -99,7 +101,18 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Password:", "hidden-cancel-secret\x03")
         else:
             send_after("Password:", "pty-hidden-secret\r")
-            send_after("Save changes? [y/N]:", "y\r" if mode == "happy" else "\r")
+            send_after("Save changes? [y/N]:", "y\r" if mode == "happy" or mode.startswith("keyring") else "\r")
+            if mode.startswith("keyring"):
+                if mode == "keyring-unlock":
+                    send_after("Keyring password:", "pty-wrong-keyring-secret\r")
+                    send_after("Keyring password:", "pty-keyring-secret\r")
+                else:
+                    send_after("Create keyring? [y/N]:", "y\r")
+                    send_after("New keyring password:", "pty-keyring-secret\r" if mode != "keyring-cancel" else "pty-keyring-secret\x03")
+                    if mode != "keyring-cancel":
+                        send_after("Confirm keyring password:", "pty-mismatch-secret\r")
+                        send_after("New keyring password:", "pty-keyring-secret\r")
+                        send_after("Confirm keyring password:", "pty-keyring-secret\r")
             if mode == "happy":
                 send_after("Save changes? [y/N]:", "n\r")
                 send_after("Connection number or alias:", "1\r")
@@ -132,9 +145,11 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode in ("happy", "enroll", "diagnostics", "describe") or (mode.startswith("catalog") and mode != "catalog-cancel") else 130), (mode, code, transcript)
+        assert code == (1 if mode=="keyring-noninteractive" else 0 if mode in ("keyring-create", "keyring-unlock", "happy", "enroll", "diagnostics", "describe") or (mode.startswith("catalog") and mode != "catalog-cancel") else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
+        for secret in (b"pty-keyring-secret", b"pty-wrong-keyring-secret", b"pty-mismatch-secret"):
+            assert secret not in transcript, (mode, transcript)
         if mode == "catalog-layout":
             for variant in ("color", "narrow", "no-color", "empty-no-color", "json"):
                 block = transcript.split(("catalog " + variant + "\r\n").encode(), 1)[1].split(b"catalog end\r\n", 1)[0]
@@ -199,12 +214,14 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             assert b'reader' in transcript, "username must remain visible"
             # Raw-mode review must emit CRLF so subsequent lines start at column 0.
             assert b'\r\nAlias: analytics\r\nDriver: postgres\r\n' in transcript
-        elif mode != "diagnostics" and not mode.startswith(("describe", "catalog")):
+        elif mode != "diagnostics" and not mode.startswith(("describe", "catalog", "keyring")):
             assert os.listdir(root) == [], "cancellation created state"
         for parent, _, names in os.walk(root):
             for name in names:
                 with open(os.path.join(parent, name), 'rb') as stream:
-                    assert b"pty-hidden-secret" not in stream.read(), name
+                    raw = stream.read()
+                    for secret in (b"pty-hidden-secret", b"pty-keyring-secret", b"pty-mismatch-secret"):
+                        assert secret not in raw, name
     finally:
         try:
             os.killpg(proc.pid, signal.SIGKILL)

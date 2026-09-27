@@ -61,6 +61,27 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 	if l.Identity().Purging && !purge {
 		return config.ErrPurging
 	}
+	if purge {
+		stage = "keyring preparation"
+		state, e := l.CleanupLease(ctx)
+		if e != nil {
+			return e
+		}
+		hasKey, e := state.HasKeysetForPurge()
+		state.Release()
+		if e != nil {
+			return e
+		}
+		if hasKey {
+			if keys == nil {
+				keys = vault.NewKeyProvider()
+			}
+			if e = vault.PrepareDeletion(vault.WithInteraction(ctx, c.Interactive), keys, l.Identity().KeyAccount); e != nil {
+				return e
+			}
+		}
+	}
+	stage = "service shutdown"
 	r, err := readRecord(l.Read, c.Root, l.Identity())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -118,7 +139,7 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 		if keys == nil {
 			keys = vault.NewKeyProvider()
 		}
-		if err = vault.New(s, keys).PurgeLocked(vault.WithInteraction(ctx, c.Interactive), state); err != nil {
+		if err = vault.New(s, keys).PurgeLocked(vault.WithKeyringPrompt(vault.WithInteraction(ctx, c.Interactive), nil), state); err != nil {
 			return err
 		}
 		stage = "owned files and final identity"

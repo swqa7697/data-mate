@@ -169,8 +169,8 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 			if h.Identity != r.Identity || h.Nonce != r.Nonce || h.PID != pid || !validPurpose || h.State != "" || h.Error != "" || h.MCPEnabled || h.KeysetState != "" {
 				return
 			}
-			reply := hello{Protocol: 2, Purpose: h.Purpose, Identity: r.Identity, Build: r.Build, PID: os.Getpid(), Nonce: r.Nonce, State: "starting"}
-			if h.Protocol != 2 || h.Build != r.Build {
+			reply := hello{Protocol: 3, Purpose: h.Purpose, Identity: r.Identity, Build: r.Build, PID: os.Getpid(), Nonce: r.Nonce, State: "starting"}
+			if h.Protocol != 3 || h.Build != r.Build {
 				reply.Error = "restart"
 			} else {
 				check, finish := context.WithTimeout(ctx, time.Second)

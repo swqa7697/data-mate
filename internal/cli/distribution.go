@@ -32,6 +32,9 @@ func distributionError(err error) error {
 	if errors.As(err, &directory) {
 		return failure(directory.Error())
 	}
+	if message := keyringError(err); message != "" {
+		return failure(message)
+	}
 	var cleanup *service.CleanupError
 	if errors.As(err, &cleanup) {
 		return failure(cleanup.Error() + "; retry uninstall with the same options")
