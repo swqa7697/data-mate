@@ -11,7 +11,7 @@
       "minLength": 1,
       "pattern": "^[^\\x00]+$",
       "maxLength": 65536,
-      "description": "One PostgreSQL read query (SELECT, VALUES or TABLE). Physical tables and views must use schema-qualified names within saved application scope; system schemas, writes and session commands are excluded."
+      "description": "One PostgreSQL read statement (SELECT, VALUES, TABLE, SHOW, or EXPLAIN of a read query). Physical tables and views require schema-qualified names. System schemas and application routines are permitted; writes and transaction control are rejected."
     },
     "parameters": {
       "type": "array",

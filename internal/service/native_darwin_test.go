@@ -140,7 +140,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 				clean = false
 				t.Error("native registration cleanup", e)
 			}
-			if e := (vault.Keychain{}).Delete(cleanup, account); e != nil {
+			if e := vault.NewKeyProvider().Delete(cleanup, account); e != nil {
 				clean = false
 				t.Error("native exact key cleanup", e)
 			}
@@ -161,7 +161,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			t.Fatal("installed bridge initialization", err)
 		}
 		tools, err := session.ListTools(ctx, nil)
-		if err != nil || len(tools.Tools) != 4 {
+		if err != nil || len(tools.Tools) != 6 {
 			t.Fatal("installed bridge tools", err)
 		}
 		toolResult, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_connections", Arguments: map[string]any{}})
@@ -448,7 +448,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	run(restore, "__install", "--root", c.Root.Path)
 	run(binary, "mcp", "start", "--json") // authenticates the retained vault/key in a new process
 	run(original, "__uninstall", "--root", c.Root.Path, "--purge")
-	if _, e = (vault.Keychain{}).Load(ctx, accounts[0]); !errors.Is(e, vault.ErrMissing) {
+	if _, e = vault.NewKeyProvider().Load(ctx, accounts[0]); !errors.Is(e, vault.ErrMissing) {
 		t.Fatal("native purge key remains", e)
 	}
 	if b, err := os.ReadFile(sentinel); err != nil || string(b) != "keep" {

@@ -146,3 +146,6 @@ func (k Keychain) Delete(ctx context.Context, account string) error {
 	}
 	return keychainStatus(status)
 }
+
+// NewKeyProvider selects the native secure store without accessing it.
+func NewKeyProvider() KeyProvider { return Keychain{} }

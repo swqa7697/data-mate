@@ -9,7 +9,6 @@ const (
 	CredentialMissing  Code = "CREDENTIAL_MISSING"
 	VaultUnavailable   Code = "VAULT_UNAVAILABLE"
 	ConnectFailed      Code = "CONNECT_FAILED"
-	ScopeDenied        Code = "SCOPE_DENIED"
 	QueryUnsupported   Code = "QUERY_UNSUPPORTED"
 	QueryTimeout       Code = "QUERY_TIMEOUT"
 	ResourceLimit      Code = "RESOURCE_LIMIT"

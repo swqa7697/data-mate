@@ -49,6 +49,9 @@ func (d *observedDriver) Invalidate(id string) {
 	defer d.mu.Unlock()
 	d.invalidated = append(d.invalidated, id)
 }
+func (d *observedDriver) Test(context.Context, database.Access) (database.Readiness, error) {
+	return database.Readiness{Stage: "read_only"}, nil
+}
 func (d *observedDriver) Close()       { d.mu.Lock(); defer d.mu.Unlock(); d.closed = true }
 func (d *observedDriver) retired() int { d.mu.Lock(); defer d.mu.Unlock(); return len(d.invalidated) }
 func serviceFixture(t *testing.T, environments ...config.Environment) (*config.Store, config.Root) {
@@ -94,7 +97,7 @@ func putProfiles(t *testing.T, s *config.Store, p config.Profiles) {
 }
 func fixtureProfile() config.Profile {
 	limits := config.DefaultLimits()
-	return config.Profile{ID: "936e3468-5b48-4ef2-9a89-964449f06d98", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 1, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}, Limits: &limits}
+	return config.Profile{ID: "936e3468-5b48-4ef2-9a89-964449f06d98", Alias: "fixture", Driver: "postgres", Connection: config.Connection{Host: "127.0.0.1", Port: 1, Database: "fixture", Username: "reader"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Limits: &limits}
 }
 
 type fakeLaunch struct {
@@ -155,7 +158,7 @@ func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 		s.Close()
 		return err
 	}
-	f.job = job{true, os.Getpid(), filepath.Join(root.Path, "service.plist"), r.args()}
+	f.job = job{true, os.Getpid(), filepath.Join(root.Path, config.ServiceFile()), r.args()}
 	f.starts++
 	if f.noReady {
 		s.Close()

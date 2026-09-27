@@ -7,7 +7,10 @@
     {
       "name": "id",
       "type": "int8",
-      "nullable": false
+      "nullable": false,
+      "default": null,
+      "generated": null,
+      "identity": ""
     }
   ],
   "keys": [
@@ -18,5 +21,12 @@
       ]
     }
   ],
-  "relationships": []
+  "relationships": [],
+  "constraints": [],
+  "indexes": [],
+  "triggers": [],
+  "policies": [],
+  "view_definition": null,
+  "row_security": false,
+  "force_row_security": false
 }

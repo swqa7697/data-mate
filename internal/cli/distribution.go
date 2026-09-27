@@ -24,6 +24,10 @@ func distributionError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
+	var conflict *distribution.ArtifactError
+	if errors.As(err, &conflict) {
+		return failure(conflict.Error())
+	}
 	return failure("distribution operation incomplete; rerun the installer or the recorded cleanup helper after resolving ownership, compatibility, or release verification errors")
 }
 
@@ -203,7 +207,15 @@ func addDistribution(root *cobra.Command, build Build) {
 			}
 			if err = e.Uninstall(cmd.Context(), flag(cmd, "purge")); err != nil {
 				targets, _ := e.Preview(cmd.Context())
-				return failure(fmt.Sprintf("cleanup incomplete; remaining recorded targets: %q; reconcile conflicts and retry %s __cleanup%s", targets, distribution.Quote(e.Candidate), purgeArg(flag(cmd, "purge"))))
+				detail := "ownership or cleanup operation failed"
+				var conflict *distribution.ArtifactError
+				var cleanup *service.CleanupError
+				if errors.As(err, &conflict) {
+					detail = conflict.Error()
+				} else if errors.As(err, &cleanup) {
+					detail = cleanup.Error()
+				}
+				return failure(fmt.Sprintf("cleanup incomplete: %s; remaining recorded targets: %q; reconcile conflicts and retry %s __cleanup%s", detail, targets, distribution.Quote(e.Candidate), purgeArg(flag(cmd, "purge"))))
 			}
 			if _, err = fmt.Fprintln(cmd.OutOrStdout(), "Production cleanup complete."); err != nil {
 				return failure("cannot write cleanup result")

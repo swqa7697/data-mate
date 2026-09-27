@@ -74,18 +74,37 @@ type Stage struct {
 	Error *contracts.Failure `json:"error,omitempty"`
 }
 
-// ScopeRequest pages the user's full role-accessible catalog, independently of saved scope.
-// An empty Schema requests schemas; otherwise it requests that schema's tables.
-type ScopeRequest struct{ Schema, After, Search string }
-
-// ScopePage retains at most 50 catalog entries. Next is an exact name, not an agent cursor.
-type ScopePage struct {
-	Schemas []string
-	Tables  []Table
-	Next    string
+// DatabaseDescription is the complete, bounded user-facing catalog. It is never
+// an MCP result; it includes empty application schemas but excludes system schemas.
+type DatabaseDescription struct {
+	Version  int                 `json:"version"`
+	Alias    string              `json:"alias"`
+	Database string              `json:"database"`
+	Schemas  []SchemaDescription `json:"schemas"`
 }
 
-// Table identifies a visible readable relation.
+// SchemaDescription groups catalog-visible application objects in a schema.
+type SchemaDescription struct {
+	Name      string         `json:"name"`
+	Tables    []RelationName `json:"tables"`
+	Enums     []CatalogName  `json:"enums"`
+	Sequences []CatalogName  `json:"sequences"`
+	Indexes   []CatalogName  `json:"indexes"`
+	Functions []CatalogName  `json:"functions"`
+}
+
+// CatalogName identifies an object without fetching its definition or values.
+type CatalogName struct {
+	Name string `json:"name"`
+}
+
+// RelationName describes a relation without reading its columns or rows.
+type RelationName struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+// Table identifies a catalog-visible relation.
 type Table struct {
 	Schema string `json:"schema"`
 	Name   string `json:"name"`
@@ -106,11 +125,14 @@ type TablePage struct {
 	NextCursor *string `json:"next_cursor"`
 }
 
-// Column exposes safe type metadata without expressions or defaults.
+// Column exposes type metadata and stored expressions without evaluating them.
 type Column struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Nullable bool   `json:"nullable"`
+	Name      string  `json:"name"`
+	Type      string  `json:"type"`
+	Nullable  bool    `json:"nullable"`
+	Default   *string `json:"default"`
+	Generated *string `json:"generated"`
+	Identity  string  `json:"identity"`
 }
 
 // Key contains a primary or unique key without its server definition.
@@ -128,13 +150,20 @@ type Relationship struct {
 
 // Description is the bounded describe_table result.
 type Description struct {
-	Connection    string         `json:"connection"`
-	Schema        string         `json:"schema"`
-	Table         string         `json:"table"`
-	Kind          string         `json:"kind"`
-	Columns       []Column       `json:"columns"`
-	Keys          []Key          `json:"keys"`
-	Relationships []Relationship `json:"relationships"`
+	Connection       string         `json:"connection"`
+	Schema           string         `json:"schema"`
+	Table            string         `json:"table"`
+	Kind             string         `json:"kind"`
+	Columns          []Column       `json:"columns"`
+	Keys             []Key          `json:"keys"`
+	Relationships    []Relationship `json:"relationships"`
+	Constraints      []Definition   `json:"constraints"`
+	Indexes          []Definition   `json:"indexes"`
+	Triggers         []Trigger      `json:"triggers"`
+	Policies         []Policy       `json:"policies"`
+	ViewDefinition   *string        `json:"view_definition"`
+	RowSecurity      bool           `json:"row_security"`
+	ForceRowSecurity bool           `json:"force_row_security"`
 }
 
 // ResultColumn preserves result labels and optional value encoding.
@@ -167,6 +196,8 @@ type Driver interface {
 	Validate(Access) error
 	Test(context.Context, Access) (Readiness, error)
 	ListTables(context.Context, Access, PageRequest) (TablePage, error)
+	ListObjects(context.Context, Access, ObjectPageRequest) (ObjectPage, error)
+	DescribeObject(context.Context, Access, ObjectRequest) (ObjectDescription, error)
 	DescribeTable(context.Context, Access, config.Table) (Description, error)
 	Query(context.Context, Access, QueryRequest) (QueryResult, error)
 	Invalidate(string)

@@ -21,14 +21,13 @@ const managementLimit = 8 << 20
 
 // ManagementRequest is the private CLI protocol. No operation returns saved secrets.
 type ManagementRequest struct {
-	Operation   string                 `json:"operation"`
-	Interactive bool                   `json:"interactive"`
-	Mutation    *vault.Mutation        `json:"mutation,omitempty"`
-	Expected    config.Revision        `json:"expected,omitempty"`
-	ProfileID   string                 `json:"profile_id,omitempty"`
-	Alias       string                 `json:"alias,omitempty"`
-	Scope       *database.ScopeRequest `json:"scope,omitempty"`
-	Pin         *HostPin               `json:"pin,omitempty"`
+	Operation   string          `json:"operation"`
+	Interactive bool            `json:"interactive"`
+	Mutation    *vault.Mutation `json:"mutation,omitempty"`
+	Expected    config.Revision `json:"expected,omitempty"`
+	ProfileID   string          `json:"profile_id,omitempty"`
+	Alias       string          `json:"alias,omitempty"`
+	Pin         *HostPin        `json:"pin,omitempty"`
 }
 
 // HostPin carries only a newly confirmed SSH public key, never a caller path.
@@ -48,12 +47,21 @@ type DiagnosticResult struct {
 
 // ManagementReply contains bounded nonsecret results and fixed safe error identifiers.
 type ManagementReply struct {
-	Outcome     *vault.Outcome      `json:"outcome,omitempty"`
-	Diagnostic  *DiagnosticResult   `json:"diagnostic,omitempty"`
-	Page        *database.ScopePage `json:"page,omitempty"`
-	Error       string              `json:"error,omitempty"`
-	MCPEnabled  bool                `json:"mcp_enabled"`
-	KeysetState string              `json:"keyset_state"`
+	Outcome     *vault.Outcome                `json:"outcome,omitempty"`
+	Diagnostic  *DiagnosticResult             `json:"diagnostic,omitempty"`
+	Description *database.DatabaseDescription `json:"description,omitempty"`
+	Error       string                        `json:"error,omitempty"`
+	Failure     *contracts.Failure            `json:"failure,omitempty"`
+	MCPEnabled  bool                          `json:"mcp_enabled"`
+	KeysetState string                        `json:"keyset_state"`
+}
+
+// ResultError decodes the service's redacted database and fixed local failures.
+func (r ManagementReply) ResultError() error {
+	if r.Failure != nil {
+		return &database.Error{Failure: *r.Failure}
+	}
+	return ManagementError(r.Error)
 }
 
 var managementErrors = []error{context.Canceled, context.DeadlineExceeded, config.ErrRevision, config.ErrCommitUnknown, config.ErrObsolete, config.ErrRecovery, config.ErrState, config.ErrOwnership, config.ErrStale, config.ErrPurging, vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, vault.ErrCredentialMissing, transport.ErrChangedHost, transport.ErrKnownHosts, ErrState, ErrConflict, ErrRestart, ErrUnavailable}
@@ -151,7 +159,7 @@ func (c *Controller) Request(ctx context.Context, request ManagementRequest) (Ma
 		}
 		return reply, ErrUnavailable
 	}
-	return reply, ManagementError(reply.Error)
+	return reply, reply.ResultError()
 }
 
 // HandleManagement owns independent admission and service-side input validation.
@@ -174,14 +182,19 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 		m.mu.Unlock()
 		reply.KeysetState = m.keysetState(ctx)
 		if err != nil {
-			reply.Error = safeManagementError(err)
+			var safe *database.Error
+			if errors.As(err, &safe) {
+				reply.Failure = &safe.Failure
+			} else {
+				reply.Error = safeManagementError(err)
+			}
 		}
 	}()
 	switch q.Operation {
 	case "mutate":
 		ctx, finish := context.WithTimeout(ctx, 30*time.Second)
 		defer finish()
-		if q.Mutation == nil || q.Scope != nil || q.ProfileID != "" || q.Expected != "" || q.Alias != "" {
+		if q.Mutation == nil || q.Expected != "" || q.Alias != "" {
 			err = ErrState
 			return
 		}
@@ -192,6 +205,10 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 				return
 			}
 			q.Mutation.HostKey = &transport.HostKey{Address: q.Pin.Address, Key: key}
+		}
+		if err = m.validateMutation(ctx, q); err != nil {
+			reply.Outcome = &vault.Outcome{}
+			return
 		}
 		out, e := m.repo.Apply(ctx, *q.Mutation)
 		reply.Outcome = &out
@@ -205,7 +222,7 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			err = e
 		}
 	case "enable":
-		if q.Mutation != nil || q.Scope != nil || q.Pin != nil || q.ProfileID != "" || q.Expected != "" || q.Alias != "" {
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID != "" || q.Expected != "" || q.Alias != "" {
 			err = ErrState
 			return
 		}
@@ -229,12 +246,16 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			return
 		}
 		err = m.enable(ctx)
-	case "test", "browse":
-		if q.Mutation != nil || q.Pin != nil || q.ProfileID == "" || q.Alias == "" || (q.Operation == "browse" && (q.Scope == nil || q.Expected == "")) || (q.Operation == "test" && q.Scope != nil) {
+	case "test", "describe":
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID == "" || q.Alias == "" || (q.Operation != "test" && q.Expected == "") {
 			err = ErrState
 			return
 		}
-		reply.Diagnostic, reply.Page, err = m.managementDatabase(ctx, q)
+		var description database.DatabaseDescription
+		reply.Diagnostic, err = m.managementDatabase(ctx, q, &description)
+		if q.Operation == "describe" && err == nil && reply.Diagnostic == nil {
+			reply.Description = &description
+		}
 	default:
 		err = ErrState
 	}
@@ -255,18 +276,18 @@ func (m *Manager) keysetState(ctx context.Context) string {
 	}
 	return m.repo.State()
 }
-func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest) (*DiagnosticResult, *database.ScopePage, error) {
+func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest, description *database.DatabaseDescription) (*DiagnosticResult, error) {
 	started := time.Now()
 	parent, finish := context.WithTimeout(parent, config.MaxQueryTimeout)
 	defer finish()
 	l, err := m.store.ReadLease(parent)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	profiles, revision, err := l.ProfileSnapshot()
 	l.Release()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var p *config.Profile
 	for i := range profiles.Connections {
@@ -274,25 +295,28 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 			p = &profiles.Connections[i]
 		}
 	}
-	if q.Operation == "browse" && revision != q.Expected {
-		return nil, nil, config.ErrRevision
+	if q.Operation != "test" && revision != q.Expected {
+		return nil, config.ErrRevision
 	}
 	if p == nil {
-		return nil, nil, config.ErrRevision
+		return nil, config.ErrRevision
 	}
 	ctx, cancel := context.WithDeadline(parent, started.Add(time.Duration(p.Limits.QueryTimeoutMS)*time.Millisecond))
 	defer cancel()
 	result := &DiagnosticResult{Alias: p.Alias, Stage: "config", Stages: []database.Stage{{Stage: "config", OK: true}}}
-	fail := func(stage string, code contracts.Code, e error) (*DiagnosticResult, *database.ScopePage, error) {
+	fail := func(stage string, code contracts.Code, e error) (*DiagnosticResult, error) {
+		if q.Operation == "describe" && errors.Is(e, context.Canceled) {
+			return nil, context.Canceled
+		}
 		if parent.Err() != nil {
-			return nil, nil, parent.Err()
+			return nil, parent.Err()
 		}
 		if ctx.Err() != nil {
 			code = contracts.QueryTimeout
 			e = context.DeadlineExceeded
 		}
-		if q.Operation == "browse" {
-			return nil, nil, e
+		if errors.Is(e, config.ErrRevision) {
+			return nil, e
 		}
 		result.Stage = stage
 		message := safeManagementError(e)
@@ -302,18 +326,15 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		}
 		result.Error = &contracts.Failure{Code: code, Message: message, Retryable: false}
 		result.Stages = append(result.Stages, database.Stage{Stage: stage, Error: result.Error})
-		return result, nil, nil
+		return result, nil
 	}
 	validator, validates := m.driver.(interface{ ValidateProfile(config.Profile) error })
 	if validates {
 		if e := validator.ValidateProfile(*p); e != nil {
-			if q.Operation == "browse" {
-				return nil, nil, config.ErrState
-			}
 			result.Stage = "config"
 			result.Error = &contracts.Failure{Code: contracts.ConfigInvalid, Message: "invalid driver profile settings; repair with db edit"}
 			result.Stages = []database.Stage{{Stage: "config", Error: result.Error}}
-			return result, nil, nil
+			return result, nil
 		}
 	}
 	if p.CredentialRef != "" {
@@ -322,26 +343,27 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		}
 	}
 	// Work admits before acquiring a fresh snapshot, preserving query-vs-mutation leases.
-	var page database.ScopePage
 	err = m.Work(ctx, p.Alias, func(ctx context.Context, d database.Driver, a database.Access) error {
 		if a.Profile.ID != q.ProfileID {
 			return config.ErrRevision
 		}
-		if q.Operation == "browse" {
+		if q.Operation != "test" {
 			// Work holds the state lease, so a second passive read observes the same generation.
 			// Avoid acquiring a second application lease while a writer is waiting.
 			current := m.currentRevision()
 			if current != q.Expected {
 				return config.ErrRevision
 			}
-			browser, ok := d.(interface {
-				BrowseScope(context.Context, database.Access, database.ScopeRequest) (database.ScopePage, error)
+		}
+		if q.Operation == "describe" {
+			describer, ok := d.(interface {
+				DescribeDatabase(context.Context, database.Access) (database.DatabaseDescription, error)
 			})
 			if !ok {
 				return ErrUnavailable
 			}
 			var e error
-			page, e = browser.BrowseScope(ctx, a, *q.Scope)
+			*description, e = describer.DescribeDatabase(ctx, a)
 			return e
 		}
 		result.Stages = append(result.Stages, database.Stage{Stage: "vault", OK: true})
@@ -371,10 +393,10 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		}
 		return fail("vault", code, err)
 	}
-	if q.Operation == "browse" {
-		return nil, &page, nil
+	if q.Operation == "describe" {
+		return nil, nil
 	}
-	return result, nil, nil
+	return result, nil
 }
 func (m *Manager) currentRevision() config.Revision {
 	m.mu.Lock()

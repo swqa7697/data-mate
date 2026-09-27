@@ -1,4 +1,4 @@
-// Package sqlguard checks statement kind and direct relation scope, not SQL semantics.
+// Package sqlguard checks read statement kinds and explicit relation schemas.
 package sqlguard
 
 import (
@@ -6,7 +6,6 @@ import (
 	"unicode/utf8"
 
 	pg "github.com/pganalyze/pg_query_go/v6"
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -19,13 +18,9 @@ func resource() error {
 func readOnly() error {
 	return database.Fail(contracts.ReadOnlyViolation, "only one read query is allowed", false)
 }
-func scopeDenied() error {
-	return database.Fail(contracts.ScopeDenied, "direct relation is outside the configured application scope", false)
-}
 
-// Check accepts one SELECT-family statement and checks every direct reference.
-// Database functions and view definitions are trusted; PostgreSQL owns semantics.
-func Check(sql string, scope config.Scope) error {
+// Check bounds and validates one read statement without reproducing PostgreSQL semantics.
+func Check(sql string) error {
 	if len(sql) > 64<<10 {
 		return resource()
 	}
@@ -57,9 +52,20 @@ func Check(sql string, scope config.Scope) error {
 	if err != nil {
 		return invalid()
 	}
-	if len(tree.Stmts) != 1 || tree.Stmts[0].Stmt.GetSelectStmt() == nil {
+	if len(tree.Stmts) != 1 {
 		return readOnly()
 	}
+	statement := tree.Stmts[0].Stmt
+	if explain := statement.GetExplainStmt(); explain != nil {
+		statement = explain.Query
+		if statement.GetSelectStmt() == nil {
+			return readOnly()
+		}
+	}
+	if statement.GetSelectStmt() == nil && statement.GetVariableShowStmt() == nil {
+		return readOnly()
+	}
+
 	count := 0
 	var walk func(protoreflect.Message, map[string]bool, int) error
 	walk = func(m protoreflect.Message, ctes map[string]bool, depth int) error {
@@ -109,17 +115,11 @@ func Check(sql string, scope config.Scope) error {
 			ctes = local
 		}
 		if r, ok := m.Interface().(*pg.RangeVar); ok {
-			if r.Catalogname != "" {
-				return scopeDenied()
-			}
 			if r.Schemaname == "" {
 				if ctes[r.Relname] {
 					return nil
 				}
-				return database.Fail(contracts.ScopeDenied, "physical relations must use schema-qualified names", false)
-			}
-			if strings.HasPrefix(r.Schemaname, "pg_") || r.Schemaname == "information_schema" || !scope.ContainsName(r.Schemaname, r.Relname) {
-				return scopeDenied()
+				return database.Fail(contracts.QueryUnsupported, "physical relations must use schema-qualified names", false)
 			}
 			return nil
 		}

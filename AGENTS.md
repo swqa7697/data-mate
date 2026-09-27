@@ -2,7 +2,7 @@
 
 ## Scope and sources of truth
 
-- Data Mate is one Go executable for macOS on Apple Silicon, exposing read-only PostgreSQL access through MCP. Development installs at `.dev/bin/data-mate` with managed data directly in `.dev/data-mate/`. Production installation uses `~/.local/share/data-mate/` with its executable at `bin/data-mate` and a command symlink at `~/.local/bin/data-mate`; follow DESIGN for availability and ownership contracts. PostgreSQL 16 and 18 are the integration test matrix.
+- Data Mate is one Go executable for macOS on Apple Silicon and Linux x86_64, exposing read-only PostgreSQL access through MCP. Development installs at `.dev/bin/data-mate` with managed data directly in `.dev/data-mate/`. Production installation uses `~/.local/share/data-mate/` with its executable at `bin/data-mate` and a command symlink at `~/.local/bin/data-mate`; follow DESIGN for availability and ownership contracts. PostgreSQL 16 and 18 are the integration test matrix.
 - Read [PRD](specs/PRD.md) for product scope, [DESIGN](specs/DESIGN.md) for target technical contracts, and [README](README.md) for implemented commands and setup. An accepted design may precede implementation; document that distinction and update usage documentation when behavior lands.
 - Keep retained development artifacts, such as test results, diagnostic logs and performance measurements, in ignored `.misc`. `.tmp` is developer-managed; read supplied reference material there without modifying it.
 - [CLAUDE.md](CLAUDE.md) points here. Maintain one shared set of project guidelines.
@@ -25,7 +25,7 @@
 
 - Keep database and authorization behavior shared across CLI/MCP callers through the service. The service owns normal OS keyset access and credential encryption/decryption; the CLI submits credential patches through the private management protocol. Agent adapters own registration and compatibility; the bridge must not acquire vault or driver responsibilities. MCP and the bridge must not acquire management, keyset-export or saved-password retrieval endpoints.
 - Keep management-only service startup separate from explicit MCP enablement. Passive listing and previews read nonsecret state without starting the service or unlocking the keyset. Ordinary connection edits use the service's loaded keyset without additional OS credential-store access; follow DESIGN for initialization, restart and cleanup exceptions.
-- The lifecycle permits one service per macOS user across production and development, including management-only services. First wins: a competing installation must report the owner rather than stop it or use its profiles/credentials. Preserve per-installation ownership and follow DESIGN for launchd arbitration, explicit handoff, and legacy recovery.
+- The lifecycle permits one service per OS user across production and development, including management-only services. First wins: a competing installation must report the owner rather than stop it or use its profiles/credentials. Preserve per-installation ownership and follow DESIGN for launchd/systemd arbitration, explicit handoff, and legacy recovery.
 - Shell completion must remain passive: suggest public commands/flags and bounded nonsecret aliases without starting a service, accessing Keychain, querying a database, or initializing state. Follow the active environment's root and command availability rules.
 - Prefer concrete packages and small functions. Introduce interfaces only at real external seams used by callers/tests; do not add a plugin framework or universal query abstraction in advance.
 - Keep deterministic parsing/validation separate from filesystem, subprocess, network and key-store effects. Follow DESIGN for lock ordering, publication and cleanup contracts.
@@ -44,8 +44,8 @@
 - Profiles contain nonsecret settings only. Never persist plaintext credentials or expose them through command arguments, previews, logs or MCP responses. Use synthetic secret values in tests; never commit real credentials.
 - Store profiles and opaque encrypted credential bundles in separate SQLite records, publishing their changes and revision generation in one transaction. Credentials must be encrypted before reaching SQLite, including its journal and temporary storage. SQLite is authoritative; legacy JSON profiles are not a parallel configuration source. Follow DESIGN for usage reservations, OS keyset initialization and recovery across those separate stores.
 - Keep one serialized Tink keyset per installation in OS secure storage. Keyset bytes must not enter SQLite, files, environment variables or subprocess output. Preserve ciphertext on decryption failure and never silently replace a missing keyset or fall back to plaintext storage. Verify database and sidecar ownership before opening them; leave journal recovery to SQLite.
-- Validate input size, structure, duplicate keys, versions and unknown fields before use. Saved scope controls directly referenced application relations; PostgreSQL enforces privileges and query semantics.
-- Use a dedicated operator-managed read-only PostgreSQL account and a read-only transaction for every PostgreSQL operation. Internal SQLite state changes use write transactions under the service's mutation and ownership contracts. Keep the PostgreSQL query guard limited to statement kind and direct relation scope; trust database-defined views, routines, types, indexes, partitions and RLS. Preserve resource bounds and do not reintroduce semantic manifests or exhaustive privilege audits.
+- Validate input size, structure, duplicate keys, versions and unknown fields before use. PostgreSQL enforces application-data privileges and query semantics.
+- Use a dedicated operator-managed read-only PostgreSQL account and a read-only transaction for every PostgreSQL operation. Internal SQLite state changes use write transactions under the service's mutation and ownership contracts. Validate read-only account capabilities before confirmed add/edit saves and when a physical connection pool opens; cache approval only while that pool retains live connections. Keep the PostgreSQL query guard limited to read statement kinds and explicit schema qualification. Allow system catalogs and direct application/extension routines; trust administrator-controlled routines, views, operators, types, indexes, partitions, RLS, and external capabilities. Catalog definitions are inspected without evaluating their expressions. Preserve resource bounds. Audit effective persistent-write, ownership, and administrative capabilities at admission; do not audit privileges per query or introduce semantic manifests or routine-body analysis. Metadata follows PostgreSQL catalog access, independently of row privileges.
 - Use explicit connection/transport configuration. Do not inherit ambient database credentials, SSH agents or proxy settings as fallback behavior.
 - Resolve the data root independently of the caller's working directory. Keep the installed executable binding separate from the data-file inventory; service launch, agent registration, and cleanup use its verified recorded path. Verify ownership and symlink safety before mutating owned state; preserve unrelated files and external certificates/key sources.
 - Production uses the fixed `~/.local/share/data-mate` root resolved from the OS account home and rejects `--root` and alternate-root environment/configuration settings, including in hidden entry points. Development retains `--root`, executable-relative defaults, and `make dev`. Select command availability from build metadata, verify matching installation identity, and keep shared storage operations parameterized by the resolved root. Production tests use injected path/account-home seams or isolated OS accounts, not a production root-override option.
@@ -70,7 +70,7 @@ Use Make as the developer entry point; `make help` lists the available targets.
 | `make clean` | Alias for uninstall with purge disabled; preserves profiles and credentials |
 | `make uninstall` / `make uninstall PURGE=1` | Remove owned installation resources; purge also removes profiles and credentials |
 
-- Source builds use the Go toolchain pinned in `go.mod` and `scripts/common.sh`, native cgo and the macOS SDK. Dependency checks must provide guidance rather than silently install system software. Production installation, upgrade, and uninstall use verified prebuilt executables and must not require Go, Xcode, Homebrew, or a checkout.
+- Source builds use the Go toolchain pinned in `go.mod` and `scripts/common.sh`, native cgo and the macOS SDK or Linux C compiler/libc headers. Dependency checks must provide guidance rather than silently install system software. Production installation, upgrade, and uninstall use verified prebuilt executables and must not require Go, Xcode, Homebrew, or a checkout.
 - Format changed Go/shell code with `make format`. After code changes, run this checklist in order:
   - [ ] `make format-check`
   - [ ] `make lint`
@@ -78,7 +78,7 @@ Use Make as the developer entry point; `make help` lists the available targets.
   - [ ] `make test-race`
   - [ ] `make build`
 - For a documentation-only change, verify references, commands and `git diff --check`; do not add tests or rerun application suites without a behavioral reason.
-- CI separates Format and lint, Test and build, and Race tests on `macos-15`, with `make setup` in each job. Preserve check coverage and test isolation when changing job structure.
+- CI separates Format and lint, Test and build, and Race tests on `macos-15` and `ubuntu-latest`, with `make setup` in each job. Preserve check coverage and test isolation when changing job structure.
 - Report checks run, results and limitations in the task response. Skipped checks are unverified; claim hosted CI success only after an actual successful run.
 
 ## Test suite design
@@ -91,8 +91,23 @@ Use Make as the developer entry point; `make help` lists the available targets.
 - Use `t.Parallel` only for independent fixtures. Tests changing process-global environment, working directory, or shared resources must remain serialized or move those effects into isolated subprocesses.
 - Prefer deterministic synchronization and context deadlines to sleeps for concurrency tests. Exercise cross-process locking separately from goroutine races when the contract spans processes.
 - For PostgreSQL behavior changes, run `make test-integration DB_DRIVER=postgres DB_IMAGE=postgres:16` and the corresponding `postgres:18` invocation. Docker fixtures must be owned and isolated; never redirect them to a user's database or enable them in CI.
-- Native Keychain/launchd/agent checks need explicit opt-in and isolated identities; follow the opt-in commands in README. Environment-guarded skips must name the missing prerequisite and be reported as unverified.
+- Native Keychain/Secret Service/launchd/systemd/agent checks need explicit opt-in and isolated identities; follow the Linux opt-in commands below and the platform test prerequisites. Environment-guarded skips must name the missing prerequisite and be reported as unverified.
 - Bound fuzz input size and run time, retain meaningful regression seeds, and keep extended fuzzing outside normal CI. Existing seeds run with the ordinary Go suite.
+
+### Linux native validation
+
+Ubuntu source builds require `build-essential`; offline Linux tests also require `dbus-daemon`. zsh is optional. `make setup` checks prerequisites without installing system packages.
+
+Run these checks explicitly when validating native Linux integrations. The keyring fixture uses a private bus, temporary home, and synthetic credentials. The systemd fixture requires a vacant Data Mate service slot and stops only its own installations.
+
+```bash
+# Requires dbus-daemon and gnome-keyring-daemon
+DATA_MATE_NATIVE_TEST=1 go test -count=1 -run '^TestNativeSecretServiceLifecycle$' ./internal/vault
+# Requires a running systemd user manager
+DATA_MATE_NATIVE_TEST=1 go test -count=1 -run '^TestNativeServiceLifecycle$' ./internal/service
+```
+
+Release configuration and signing are documented in [DESIGN](specs/DESIGN.md#139-linux-distribution-and-release-operations).
 
 ## Test growth rules
 

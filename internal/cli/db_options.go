@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -41,17 +40,6 @@ func profileFlags(cmd *cobra.Command) {
 	}
 	cmd.MarkFlagsMutuallyExclusive("password-stdin", "credentials-stdin")
 	cmd.MarkFlagsMutuallyExclusive("password-stdin", "passwordless", "clear-password")
-	scopeFlags(cmd)
-}
-func scopeFlags(cmd *cobra.Command) {
-	f := cmd.Flags()
-	f.Bool("all", false, "Expose all accessible tables")
-	f.Bool("none", false, "Expose no tables")
-	f.String("scope-json", "", "Exact nonsecret scope JSON")
-	f.StringArray("schema", nil, "All current and future tables in an exact schema (repeatable)")
-	f.StringArray("table", nil, "Exact schema.table selection (repeatable)")
-	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "schema")
-	cmd.MarkFlagsMutuallyExclusive("all", "none", "scope-json", "table")
 }
 func str(cmd *cobra.Command, name string) string  { v, _ := cmd.Flags().GetString(name); return v }
 func flag(cmd *cobra.Command, name string) bool   { v, _ := cmd.Flags().GetBool(name); return v }
@@ -155,35 +143,6 @@ func applyOptions(cmd *cobra.Command, p *config.Profile) error {
 	if changed(cmd, "max-result-bytes") {
 		p.Limits.MaxResultBytes = integer(cmd, "max-result-bytes")
 	}
-	return applyScope(cmd, p)
-}
-func applyScope(cmd *cobra.Command, p *config.Profile) error {
-	if flag(cmd, "all") || flag(cmd, "none") || changed(cmd, "scope-json", "schema", "table") {
-		p.Scope = config.Scope{Mode: "selected"}
-		if flag(cmd, "all") {
-			p.Scope.Mode = "all"
-		}
-		if changed(cmd, "scope-json") {
-			b, err := contracts.JSON(strings.NewReader(str(cmd, "scope-json")), config.MaxProfileBytes)
-			if err != nil || contracts.Validate("scope", b) != nil {
-				return invalid("invalid scope JSON")
-			}
-			if json.Unmarshal(b, &p.Scope) != nil {
-				return invalid("invalid scope JSON")
-			}
-		} else {
-			p.Scope.Schemas, _ = cmd.Flags().GetStringArray("schema")
-			tables, _ := cmd.Flags().GetStringArray("table")
-			for _, t := range tables {
-				parts := strings.Split(t, ".")
-				if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-					return invalid("table requires schema.table; use --scope-json for names containing dots")
-				}
-				p.Scope.Tables = append(p.Scope.Tables, config.Table{Schema: parts[0], Name: parts[1]})
-			}
-		}
-	}
-
 	return nil
 }
 func sshHost(p *config.Profile) string {

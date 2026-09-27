@@ -27,7 +27,7 @@ func (b *wireBackend) Work(ctx context.Context, alias string, fn func(context.Co
 }
 func (b *wireBackend) Connections(_ context.Context, fn func([]protocol.Connection) error) error {
 	p := b.access.Profile
-	return fn([]protocol.Connection{{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database, Scope: p.Scope}})
+	return fn([]protocol.Connection{{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database}})
 }
 
 // Regression ladder 2: extend the existing PostgreSQL 16/18 acceptance scenario
@@ -82,16 +82,19 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	raw = call("describe_table", map[string]any{"connection": "fixture", "schema": "app", "table": "items"}, "")
 	var desc database.Description
 	_ = json.Unmarshal(raw, &desc)
-	if len(desc.Relationships) != 0 {
-		t.Fatal("hidden relationship exposed")
+	if len(desc.Relationships) != 1 {
+		t.Fatal("readable cross-schema relationship missing")
 	}
-	call("describe_table", map[string]any{"connection": "fixture", "schema": "hidden", "table": "target"}, contracts.ScopeDenied)
+	call("describe_table", map[string]any{"connection": "fixture", "schema": "hidden", "table": "target"}, "")
+	call("list_objects", map[string]any{"connection": "fixture", "kind": "type", "schema": "app"}, "")
+	call("describe_object", map[string]any{"connection": "fixture", "kind": "type", "schema": "app", "name": "custom"}, "")
+	call("describe_object", map[string]any{"connection": "fixture", "kind": "routine", "schema": "app", "name": "policy_probe", "identity_arguments": ""}, "")
 	call("query", map[string]any{"connection": "fixture", "sql": "select count(*) from app.items"}, "")
 	call("query", map[string]any{"connection": "fixture", "sql": "select app.policy_probe()"}, contracts.ReadOnlyViolation)
 
 	call("query", map[string]any{"connection": "fixture", "sql": "select $1::int8,$2::jsonb", "parameters": []any{"9007199254740993", map[string]any{"ok": true}}}, "")
-	// Grant/scope checks are repeated on later calls in the same initialized session.
+	// Cursor validity is checked on later calls in the same initialized session.
 	d.Invalidate(a.Profile.ID)
 	call("list_tables", map[string]any{"connection": "fixture", "cursor": *page.NextCursor}, contracts.StaleCursor)
-	t.Log("MCP SDK metadata, hidden endpoints, cursor invalidation, query and shared read-only rejection passed")
+	t.Log("MCP SDK metadata, cross-schema endpoints, cursor invalidation, query and shared read-only rejection passed")
 }

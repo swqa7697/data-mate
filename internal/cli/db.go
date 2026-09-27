@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/transport"
 	"github.com/swqa7697/data-mate/internal/vault"
@@ -23,8 +24,8 @@ import (
 
 func newDB(override *string, factory managementFactory, build Build) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	for _, action := range []string{"add", "edit", "remove", "list", "scope"} {
-		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "scope": "Choose visible schemas and tables"}[action], Args: cobra.MaximumNArgs(1)}
+	for _, action := range []string{"add", "edit", "remove", "list", "describe"} {
+		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "describe": "Describe application schemas and catalog objects"}[action], Args: cobra.MaximumNArgs(1)}
 		if action == "add" || action == "list" {
 			cmd.Args = cobra.NoArgs
 		}
@@ -33,15 +34,19 @@ func newDB(override *string, factory managementFactory, build Build) *cobra.Comm
 		}
 		if action == "list" {
 			cmd.Aliases = []string{"ls"}
+		}
+		if action == "describe" {
+			cmd.Use = "describe [alias]"
+			cmd.Short = "Describe application enums, tables, views, and sequences"
+			cmd.Flags().Bool("no-pager", false, "Print directly without the terminal pager")
+		}
+		if action == "list" || action == "describe" {
 			cmd.Flags().Bool("json", false, "Versioned JSON output")
 		} else {
 			cmd.Flags().Bool("yes", false, "Confirm a complete operation")
 		}
 		if action == "add" || action == "edit" {
 			profileFlags(cmd)
-		}
-		if action == "scope" {
-			scopeFlags(cmd)
 		}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
 			return runDB(cmd, args, action, *override, factory, build)
@@ -110,6 +115,9 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 			if len(profiles.Connections) == 0 {
 				return invalid("no saved connections")
 			}
+			if action == "describe" && !hasTerminal(cmd) {
+				return invalid("connection alias is required without a terminal")
+			}
 			f, err := getForm()
 			if err != nil {
 				return err
@@ -139,6 +147,17 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 			return invalid("connection alias not found")
 		}
 	}
+	if action == "describe" {
+		// Restore cooked output before printing to a terminal or unlocking keys.
+		if ui != nil {
+			err := ui.restore()
+			ui = nil
+			if err != nil {
+				return failure("cannot restore terminal")
+			}
+		}
+		return describeDatabase(cmd, root, revision, profiles.Connections[index], factory)
+	}
 	var profile, original config.Profile
 	patch := secretPatch{}
 	if action == "add" {
@@ -146,25 +165,13 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		if err != nil {
 			return failure("cannot generate connection identity")
 		}
-		profile = config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"}}
+		profile = config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
 	} else {
 		profile = profiles.Connections[index]
 		original = profile
 	}
 	if action != "remove" {
-		if action == "scope" {
-			err = applyScope(cmd, &profile)
-			if err == nil && !scopeSelected(cmd) {
-				if flag(cmd, "yes") {
-					return invalid("scope selection flags are required with --yes")
-				}
-				if _, err = getForm(); err == nil {
-					profile.Scope, err = selectScope(cmd, root, revision, profile, ui, factory)
-				}
-			}
-		} else {
-			profile, patch, err = collectProfile(cmd, action, profile, original, getForm)
-		}
+		profile, patch, err = collectProfile(cmd, action, profile, original, getForm)
 		if err != nil {
 			return err
 		}
@@ -251,7 +258,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 	if len(patch) > 0 {
 		mutation.Patches = map[string]vault.Patch{profile.ID: vault.Patch(patch)}
 	}
-	request := service.ManagementRequest{Operation: "mutate", Interactive: hasTerminal(cmd), Mutation: &mutation}
+	request := service.ManagementRequest{Operation: "mutate", ProfileID: profile.ID, Interactive: hasTerminal(cmd), Mutation: &mutation}
 	if hostKey != nil {
 		request.Pin = &service.HostPin{Address: hostKey.Address, Key: hostKey.Key.Marshal()}
 	}
@@ -282,6 +289,13 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 }
 
 func storageError(err error, input bool) error {
+	var dbError *database.Error
+	if errors.As(err, &dbError) {
+		if dbError.Code == contracts.Cancelled {
+			return context.Canceled
+		}
+		return failure(dbError.Error())
+	}
 	if input && (errors.Is(err, config.ErrState) || errors.Is(err, config.ErrRecovery) || errors.Is(err, config.ErrObsolete)) {
 		return invalid(err.Error())
 	}
@@ -304,16 +318,6 @@ func storageError(err error, input bool) error {
 	}
 	return failure("cannot save connection state; existing credentials were preserved")
 }
-func scopeSummary(s config.Scope) string {
-	if s.Mode == "all" {
-		return "all accessible tables"
-	}
-	if len(s.Schemas) == 0 && len(s.Tables) == 0 {
-		return "none"
-	}
-	b, _ := json.Marshal(s)
-	return string(b)
-}
 func previewProfile(w io.Writer, action string, p config.Profile, secretsChanged, color bool) error {
 	title := "Review " + action
 	if _, disabled := os.LookupEnv("NO_COLOR"); color && !disabled {
@@ -325,7 +329,7 @@ func previewProfile(w io.Writer, action string, p config.Profile, secretsChanged
 	}
 	transport, _ := json.Marshal(p.Transport)
 	limits, _ := json.Marshal(p.Limits)
-	_, err := fmt.Fprintf(w, "%s\nAlias: %s\nDriver: %s\nHost: %q\nPort: %d\nDatabase: %q\nUsername: %q\nTransport: %s\nScope: %s\nLimits: %s\nCredentials: %s\n", title, p.Alias, p.Driver, p.Connection.Host, p.Connection.Port, p.Connection.Database, p.Connection.Username, transport, scopeSummary(p.Scope), limits, secretState)
+	_, err := fmt.Fprintf(w, "%s\nAlias: %s\nDriver: %s\nHost: %q\nPort: %d\nDatabase: %q\nUsername: %q\nTransport: %s\nLimits: %s\nCredentials: %s\n", title, p.Alias, p.Driver, p.Connection.Host, p.Connection.Port, p.Connection.Database, p.Connection.Username, transport, limits, secretState)
 	if err != nil {
 		return failure("cannot write preview")
 	}
@@ -336,11 +340,10 @@ func listProfiles(cmd *cobra.Command, p config.Profiles) error {
 		Alias      string            `json:"alias"`
 		Driver     string            `json:"driver"`
 		Connection config.Connection `json:"connection"`
-		Scope      config.Scope      `json:"scope"`
 	}
 	entries := make([]entry, 0, len(p.Connections))
 	for _, p := range p.Connections {
-		entries = append(entries, entry{p.Alias, p.Driver, p.Connection, p.Scope})
+		entries = append(entries, entry{p.Alias, p.Driver, p.Connection})
 	}
 	if flag(cmd, "json") {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
@@ -357,7 +360,7 @@ func listProfiles(cmd *cobra.Command, p config.Profiles) error {
 		}
 	}
 	for _, e := range entries {
-		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %q:%d  database=%q  scope=%s\n", e.Alias, e.Driver, e.Connection.Host, e.Connection.Port, e.Connection.Database, scopeSummary(e.Scope)); err != nil {
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %q:%d  database=%q\n", e.Alias, e.Driver, e.Connection.Host, e.Connection.Port, e.Connection.Database); err != nil {
 			return failure("cannot write output")
 		}
 	}

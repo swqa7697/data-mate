@@ -2,12 +2,13 @@
 
 <p align="center">
   <strong>Explore PostgreSQL from Codex or Claude Code.</strong><br />
-  A local CLI and <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> (MCP) service for read-only database access on macOS.
+  A local CLI and <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> (MCP) service for read-only database access on macOS and Linux.
 </p>
 
 <p align="center">
   <a href="https://github.com/swqa7697/data-mate/releases/latest"><img src="https://img.shields.io/github/v/release/swqa7697/data-mate" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/macOS-15%2B%20%C2%B7%20Apple%20Silicon-000000?logo=apple&logoColor=white" alt="macOS 15+ on Apple Silicon" />
+  <img src="https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%C2%B7%20x86__64-FCC624?logo=linux&logoColor=black" alt="Linux x86_64 on Ubuntu 24.04+" />
   <img src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white" alt="Go 1.27" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0 license" /></a>
 </p>
@@ -21,22 +22,21 @@
 
 ---
 
-Data Mate lets coding agents discover tables, inspect columns, and answer questions with SQL. You control each connection and the schemas or tables agents can see. Database passwords stay out of agent configuration and MCP responses.
+Data Mate lets coding agents discover tables, inspect columns, and answer questions with SQL. You control each connection and the schemas agents can see. Database passwords stay out of agent configuration and MCP responses.
 
 ## At a glance
 
-| Feature               | What it gives you                                                      |
-| --------------------- | ---------------------------------------------------------------------- |
-| Read-only tools       | List connections and tables, describe tables, and run bounded queries. |
-| Connection scope      | Share all accessible tables, selected schemas, or individual tables.   |
-| Protected credentials | Encrypt saved credentials with a keyset held in macOS Keychain.        |
-| Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.     |
-| Agent setup           | Register the service with installed Codex and Claude Code clients.     |
-| Shell completion      | Complete commands and saved aliases in Bash or zsh.                    |
+| Feature               | What it gives you                                                             |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Read-only tools       | List connections and tables, describe tables, and run bounded queries.        |
+| Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
+| Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
+| Agent setup           | Register the service with installed Codex and Claude Code clients.            |
+| Shell completion      | Complete commands and saved aliases in Bash or zsh.                           |
 
 ## Get started
 
-Data Mate supports **macOS 15 or later on Apple Silicon** and **PostgreSQL 16 or later**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only PostgreSQL account with access only to the data you intend to share.
+Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only PostgreSQL account with access only to the data you intend to share.
 
 Install the latest stable release:
 
@@ -52,41 +52,37 @@ data-mate db test analytics
 data-mate mcp start
 ```
 
-`db add` opens a form for the connection details and a hidden password. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only transaction access. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
+`db add` opens a form for the connection details and a hidden password. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
 
 ## Manage connections
 
-| Command                       | Purpose                                             |
-| ----------------------------- | --------------------------------------------------- |
-| `data-mate db add`            | Save a PostgreSQL connection.                       |
-| `data-mate db list`           | View aliases, nonsecret settings, and scopes.       |
-| `data-mate db test [alias]`   | Test one connection, or all connections if omitted. |
-| `data-mate db edit [alias]`   | Update settings or credentials.                     |
-| `data-mate db scope [alias]`  | Choose visible schemas and tables.                  |
-| `data-mate db remove [alias]` | Remove a connection and its saved credentials.      |
-| `data-mate mcp status`        | Check service and agent registration status.        |
-| `data-mate mcp stop`          | Stop agent access.                                  |
+| Command                         | Purpose                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| `data-mate db add`              | Save a PostgreSQL connection.                                             |
+| `data-mate db list`             | View aliases and nonsecret settings.                                      |
+| `data-mate db describe [alias]` | List application enums, tables, views, sequences, indexes, and functions. |
+| `data-mate db test [alias]`     | Test one connection, or all connections if omitted.                       |
+| `data-mate db edit [alias]`     | Update settings or credentials.                                           |
+| `data-mate db remove [alias]`   | Remove a connection and its saved credentials.                            |
+| `data-mate mcp status`          | Check service and agent registration status.                              |
+| `data-mate mcp stop`            | Stop agent access.                                                        |
 
-A new connection shares all accessible application tables by default. Narrow its scope before starting MCP if needed:
+Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively.
 
-```bash
-data-mate db scope analytics
-# Or select exact names without the interactive picker:
-data-mate db scope analytics --schema reporting --table public.orders --yes
-```
-
-`--schema` includes current and future tables in that schema. `--table` selects one exact `schema.table`; `--all` restores all accessible tables, and `--none` selects none. Scope limits direct table references and catalog results; PostgreSQL privileges still apply. Run `data-mate db add --help` for TLS, SSH, proxy, query limits, and script input options. Passwords go through the form or standard input, never command-line values.
+Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
 
 ## What agents can do
 
-| MCP tool           | Capability                                       |
-| ------------------ | ------------------------------------------------ |
-| `list_connections` | Find available aliases and scopes.               |
-| `list_tables`      | Browse visible tables.                           |
-| `describe_table`   | Inspect columns, keys, and relationships.        |
-| `query`            | Run one read statement with optional parameters. |
+| MCP tool           | Capability                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| `list_connections` | Find available aliases and database labels.                                           |
+| `list_tables`      | Browse visible tables.                                                                |
+| `describe_table`   | Inspect columns, defaults, keys, indexes, triggers, views, and row-security policies. |
+| `list_objects`     | Browse routines, types, and sequences.                                                |
+| `describe_object`  | Read routine source, enum labels, type details, and sequence configuration.           |
+| `query`            | Run one read statement with optional parameters.                                      |
 
-Queries run in read-only transactions. The default budget per query is **60 seconds, 500 rows, and 1 MiB of results**; connection settings can adjust these limits. MCP tools cannot edit connections or retrieve saved passwords.
+MCP tools cannot edit connections or retrieve saved passwords.
 
 ## Update or remove
 

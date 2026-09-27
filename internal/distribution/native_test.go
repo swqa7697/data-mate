@@ -1,9 +1,11 @@
 package distribution
 
 import (
+	"debug/elf"
 	"debug/macho"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/swqa7697/data-mate/internal/config"
@@ -14,9 +16,9 @@ import (
 func TestNativeRelease(t *testing.T) {
 	path := os.Getenv("DATA_MATE_DISTRIBUTION_CANDIDATE")
 	if os.Getenv("DATA_MATE_NATIVE_TEST") != "1" || !filepath.IsAbs(path) {
-		t.Skip("requires DATA_MATE_NATIVE_TEST=1 and an absolute DATA_MATE_DISTRIBUTION_CANDIDATE Developer ID-signed artifact")
+		t.Skip("requires DATA_MATE_NATIVE_TEST=1 and an absolute DATA_MATE_DISTRIBUTION_CANDIDATE publisher-signed artifact")
 	}
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), "release.txt"))
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), platformAssets(runtime.GOOS+"_"+runtime.GOARCH).metadata))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,19 +41,44 @@ func TestNativeRelease(t *testing.T) {
 	if err != nil || len(binary) < 4096 {
 		t.Fatal("candidate read", err)
 	}
-	image, err := macho.Open(path)
-	if err != nil {
-		t.Fatal(err)
+	var offset uint64
+	if meta.Platform == "linux_amd64" {
+		image, err := elf.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		section := image.Section(".text")
+		if section != nil {
+			offset = section.Offset
+		}
+		image.Close()
+	} else {
+		image, err := macho.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		section := image.Section("__text")
+		if section != nil {
+			offset = uint64(section.Offset)
+		}
+		image.Close()
 	}
-	text := image.Section("__text")
-	image.Close()
-	if text == nil || int(text.Offset) >= len(binary) {
+	if offset == 0 || offset >= uint64(len(binary)) {
 		t.Fatal("missing executable text section")
 	}
-	binary[text.Offset] ^= 1
+	binary[offset] ^= 1
 	altered := filepath.Join(t.TempDir(), "altered")
 	if err = os.WriteFile(altered, binary, 0700); err != nil {
 		t.Fatal(err)
+	}
+	if meta.Platform == "linux_amd64" {
+		signature, err := os.ReadFile(path + ".sig")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(altered+".sig", signature, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err = VerifyNative(t.Context(), altered, meta); err == nil {
 		t.Fatal("altered signature accepted")

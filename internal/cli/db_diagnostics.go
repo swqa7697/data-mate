@@ -12,6 +12,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/service"
+	"golang.org/x/term"
 )
 
 type diagnosticResult = service.DiagnosticResult
@@ -81,18 +82,31 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 			return failure("cannot write diagnostics")
 		}
 	} else {
+		out := cmd.OutOrStdout()
+		terminal, isFile := out.(*os.File)
+		_, noColor := os.LookupEnv("NO_COLOR")
+		color := !noColor && isFile && term.IsTerminal(int(terminal.Fd()))
 		if len(results) == 0 {
-			if _, err = fmt.Fprintln(cmd.OutOrStdout(), "No saved connections."); err != nil {
+			if _, err = fmt.Fprintln(out, "No saved connections."); err != nil {
 				return failure("cannot write diagnostics")
 			}
 		}
 		for _, r := range results {
+			status, tint := "PASS", "\x1b[32m"
+			if !r.OK {
+				status, tint = "FAIL", "\x1b[31m"
+			}
+			if color {
+				status = tint + status + "\x1b[0m"
+			}
+			if _, err = fmt.Fprintf(out, "%s  %s\n", r.Alias, status); err != nil {
+				return failure("cannot write diagnostics")
+			}
 			for _, s := range r.Stages {
-				status := "ok"
-				if !s.OK {
-					status = string(s.Error.Code) + ": " + s.Error.Message
+				if s.OK {
+					continue
 				}
-				if _, err = fmt.Fprintf(cmd.OutOrStdout(), "%s  %s: %s\n", r.Alias, s.Stage, status); err != nil {
+				if _, err = fmt.Fprintf(out, "  %s: %s: %s\n", s.Stage, s.Error.Code, s.Error.Message); err != nil {
 					return failure("cannot write diagnostics")
 				}
 			}

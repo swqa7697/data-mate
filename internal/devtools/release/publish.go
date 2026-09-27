@@ -14,7 +14,7 @@ import (
 
 const repository = "swqa7697/data-mate"
 
-var publicAssets = []string{"install.sh", "data-mate_darwin_arm64", "release.txt", "SHA256SUMS"}
+var publicAssets = []string{"install.sh", "data-mate_darwin_arm64", "release.txt", "SHA256SUMS", "data-mate_linux_amd64", "data-mate_linux_amd64.sig", "release_linux_amd64.txt", "SHA256SUMS_linux_amd64"}
 
 type asset struct {
 	Name   string `json:"name"`
@@ -57,27 +57,41 @@ func releaseAssets(dir string) (map[string]asset, error) {
 		}
 		assets[name] = asset{Name: name, Size: info.Size(), Digest: "sha256:" + hex.EncodeToString(hash.Sum(nil)), State: "uploaded"}
 	}
-	if assets["SHA256SUMS"].Size > 65536 || assets["release.txt"].Size > 4096 {
-		return nil, errors.New("oversized release manifest or metadata")
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			return nil, errors.New("invalid checksum record")
+	for _, group := range []struct {
+		sums, metadata string
+		names          []string
+	}{
+		{"SHA256SUMS", "release.txt", []string{"install.sh", "data-mate_darwin_arm64", "release.txt"}},
+		{"SHA256SUMS_linux_amd64", "release_linux_amd64.txt", []string{"install.sh", "data-mate_linux_amd64", "data-mate_linux_amd64.sig", "release_linux_amd64.txt"}},
+	} {
+		if assets[group.sums].Size > 65536 || assets[group.metadata].Size > 4096 {
+			return nil, errors.New("oversized release manifest or metadata")
 		}
-		name := fields[1]
-		if name == "SHA256SUMS" || seen[name] || assets[name].Digest != "sha256:"+fields[0] {
-			return nil, errors.New("checksum manifest does not match release assets")
+		raw, err := os.ReadFile(filepath.Join(dir, group.sums))
+		if err != nil {
+			return nil, err
 		}
-		seen[name] = true
-	}
-	if len(seen) != 3 {
-		return nil, errors.New("incomplete checksum manifest")
+		seen := map[string]bool{}
+		for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				return nil, errors.New("invalid checksum record")
+			}
+			name := fields[1]
+			allowed := false
+			for _, expected := range group.names {
+				if expected == name {
+					allowed = true
+				}
+			}
+			if !allowed || seen[name] || assets[name].Digest != "sha256:"+fields[0] {
+				return nil, errors.New("checksum manifest does not match release assets")
+			}
+			seen[name] = true
+		}
+		if len(seen) != len(group.names) {
+			return nil, errors.New("incomplete checksum manifest")
+		}
 	}
 	return assets, nil
 }

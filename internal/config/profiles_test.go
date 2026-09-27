@@ -17,18 +17,6 @@ func TestProfiles(t *testing.T) {
 	if len(rev) != 64 || *p.Connections[0].Limits != DefaultLimits() {
 		t.Fatal("revision/default limits")
 	}
-	c := p.Connections[0]
-	if !c.Scope.ContainsName("Any", "Table") {
-		t.Fatal("all")
-	}
-	c.Scope = Scope{Mode: "selected"}
-	if c.Scope.ContainsName("public", "orders") {
-		t.Fatal("empty scope broadened")
-	}
-	c.Scope = Scope{Mode: "selected", Schemas: []string{"Mixed.Case"}, Tables: []Table{{"public", "orders"}}}
-	if !c.Scope.ContainsName("Mixed.Case", "anything") || c.Scope.ContainsName("mixed.case", "anything") || !c.Scope.ContainsName("public", "orders") {
-		t.Fatal("exact scope")
-	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, original); err != nil {
 		t.Fatal(err)
@@ -78,13 +66,7 @@ func TestProfiles(t *testing.T) {
 		"port zero":           func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
 		"port high":           func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
 		"embedded secret":     func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
-		"null scope":          func(c map[string]any) { c["scope"] = nil },
-		"absent scope":        func(c map[string]any) { delete(c, "scope") },
-		"mixed all":           func(c map[string]any) { c["scope"] = map[string]any{"mode": "all", "schemas": []string{"public"}} },
-		"duplicate schema":    func(c map[string]any) { c["scope"] = map[string]any{"mode": "selected", "schemas": []string{"x", "x"}} },
-		"duplicate table": func(c map[string]any) {
-			c["scope"] = map[string]any{"mode": "selected", "tables": []any{map[string]any{"schema": "x", "name": "y"}, map[string]any{"schema": "x", "name": "y"}}}
-		},
+		"removed scope":       func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
 		"tls ca disabled": func(c map[string]any) {
 			c["transport"].(map[string]any)["tls"] = map[string]any{"mode": "disabled", "ca_file": "/tmp/test.pem"}
 		},
@@ -132,7 +114,6 @@ func TestRevisionNormalizationAndUniqueReferences(t *testing.T) {
 	if err := json.Unmarshal(profileFixture(t), &p); err != nil {
 		t.Fatal(err)
 	}
-	p.Connections[0].Scope = Scope{Mode: "selected", Schemas: []string{"z", "a"}}
 	encode := func() (Revision, error) {
 		b, _ := json.Marshal(p)
 		_, r, e := DecodeProfiles(bytes.NewReader(b))
@@ -142,20 +123,19 @@ func TestRevisionNormalizationAndUniqueReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Connections[0].Scope.Schemas = []string{"a", "z"}
 	defaults := DefaultLimits()
 	p.Connections[0].Limits = &defaults
 	second, err := encode()
 	if err != nil || first != second {
 		t.Fatal("normalization changed revision")
 	}
-	p.Connections[0].Scope = Scope{Mode: "selected"}
+	p.Connections[0].Alias = "renamed"
 	third, err := encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if third == first {
-		t.Fatal("scope change did not change revision")
+		t.Fatal("alias change did not change revision")
 	}
 	c := p.Connections[0]
 	c.ID = "AAAAAAAA-0000-0000-0000-000000000000"

@@ -36,6 +36,68 @@ type pool struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	timer       *time.Timer
+	live        map[*pgx.Conn]bool
+	approved    bool
+	generation  uint64
+	validation  *poolValidation
+}
+
+type poolValidation struct {
+	done chan struct{}
+	err  error
+}
+
+// forgetClosed runs under Driver.mu. Waiting operations never extend approval.
+func (p *pool) forgetClosed() {
+	for c := range p.live {
+		select {
+		case <-c.PgConn().CleanupDone():
+			delete(p.live, c)
+		default:
+		}
+	}
+	if len(p.live) == 0 && p.approved {
+		p.approved = false
+		p.generation++
+	}
+}
+
+func (d *Driver) approvePool(ctx context.Context, p *pool, c *pgx.Conn, a database.Access, trace *diagnosticTrace) error {
+	d.mu.Lock()
+	p.forgetClosed()
+	if p.live == nil {
+		p.live = make(map[*pgx.Conn]bool)
+	}
+	p.live[c] = true
+	if p.approved {
+		d.mu.Unlock()
+		return nil
+	}
+	if pending := p.validation; pending != nil {
+		d.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return safeError(ctx.Err())
+		case <-pending.done:
+			return pending.err
+		}
+	}
+	pending := &poolValidation{done: make(chan struct{})}
+	p.validation = pending
+	generation := p.generation
+	d.mu.Unlock()
+	err := validateAccountConnection(ctx, c, a, trace)
+	d.mu.Lock()
+	p.forgetClosed()
+	if err == nil && (d.closed || d.pools[a.Profile.ID] != p || p.ctx.Err() != nil || ctx.Err() != nil || generation != p.generation || c.IsClosed()) {
+		err = database.Fail(contracts.Cancelled, "account validation was cancelled", false)
+	}
+	p.approved = err == nil
+	pending.err = err
+	p.validation = nil
+	close(pending.done)
+	d.mu.Unlock()
+	return err
 }
 
 // Driver owns process-local admission, lazy eight-connection pools and cursor keys.
@@ -100,6 +162,8 @@ func (d *Driver) retireLocked(id string) *pool {
 	p := d.pools[id]
 	if p != nil {
 		delete(d.pools, id)
+		p.approved = false
+		p.generation++
 		p.cancel()
 		if p.timer != nil {
 			p.timer.Stop()
@@ -195,10 +259,17 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 		stop()
 		cancel()
 		if c != nil && (!healthy || c.IsClosed() || c.PgConn().TxStatus() != 'I') {
+			// A discarded connection cannot retain approval while socket cleanup
+			// finishes asynchronously and another caller opens a replacement.
+			d.mu.Lock()
+			delete(p.live, c)
+			p.forgetClosed()
+			d.mu.Unlock()
 			closeConn(c)
 			c = nil
 		}
 		d.mu.Lock()
+		p.forgetClosed()
 		if c != nil && d.pools[id] == p && !d.closed {
 			p.idle = append(p.idle, c)
 			c = nil
@@ -233,10 +304,17 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 		return nil, nil, nil, safeError(op.Err())
 	}
 	d.mu.Lock()
-	if len(p.idle) > 0 {
+	p.forgetClosed()
+	for len(p.idle) > 0 {
 		n := len(p.idle) - 1
 		c = p.idle[n]
 		p.idle = p.idle[:n]
+		if !c.IsClosed() {
+			break
+		}
+		delete(p.live, c)
+		p.forgetClosed()
+		c = nil
 	}
 	d.mu.Unlock()
 	if c == nil {
@@ -260,11 +338,15 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 			return nil, nil, nil, safeError(errDial)
 		}
 	}
+	if err := d.approvePool(op, p, c, a, trace); err != nil {
+		release(false)
+		return nil, nil, nil, err
+	}
 	return c, op, release, nil
 }
 
 // run keeps admission through rollback and bounded payload preparation. Every
-// operation rechecks readiness in its own read-only transaction; no cached grants.
+// operation rechecks transaction state; account approval belongs to the live pool.
 func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Context, pgx.Tx, int) error) error {
 	return d.runObserved(ctx, a, nil, fn)
 }

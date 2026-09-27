@@ -168,70 +168,6 @@
               ]
             }
           },
-          "scope": {
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "mode": {
-                    "const": "all"
-                  }
-                },
-                "required": [
-                  "mode"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "mode": {
-                    "const": "selected"
-                  },
-                  "schemas": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "pattern": "^[^\\x00]+$",
-                      "maxLength": 63
-                    },
-                    "uniqueItems": true
-                  },
-                  "tables": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "schema": {
-                          "type": "string",
-                          "minLength": 1,
-                          "pattern": "^[^\\x00]+$",
-                          "maxLength": 63
-                        },
-                        "name": {
-                          "type": "string",
-                          "minLength": 1,
-                          "pattern": "^[^\\x00]+$",
-                          "maxLength": 63
-                        }
-                      },
-                      "required": [
-                        "schema",
-                        "name"
-                      ],
-                      "additionalProperties": false
-                    },
-                    "uniqueItems": true
-                  }
-                },
-                "required": [
-                  "mode"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
           "limits": {
             "type": "object",
             "properties": {
@@ -260,8 +196,7 @@
           "alias",
           "driver",
           "connection",
-          "transport",
-          "scope"
+          "transport"
         ],
         "additionalProperties": false
       },

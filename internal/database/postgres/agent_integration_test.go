@@ -99,7 +99,7 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 			clean = false
 			t.Error("native agent registration cleanup", e)
 		}
-		if e = (vault.Keychain{}).Delete(cleanup, account); e != nil {
+		if e = vault.NewKeyProvider().Delete(cleanup, account); e != nil {
 			clean = false
 			t.Error("native agent key cleanup", e)
 		}
@@ -112,7 +112,7 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 			t.Log("native retry root retained", root.Path)
 		}
 	}()
-	args := []string{"db", "add", "--alias", "fixture", "--host", p.Connection.Host, "--port", fmt.Sprint(p.Connection.Port), "--database", p.Connection.Database, "--username", p.Connection.Username, "--password-stdin", "--schema", "app", "--yes"}
+	args := []string{"db", "add", "--alias", "fixture", "--host", p.Connection.Host, "--port", fmt.Sprint(p.Connection.Port), "--database", p.Connection.Database, "--username", p.Connection.Username, "--password-stdin", "--yes"}
 	if out, e := run(password+"\n", args...); e != nil {
 		t.Fatalf("native profile: %v %s", e, out)
 	}
@@ -126,9 +126,9 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 			t.Fatal(e)
 		}
 		t.Logf("native client %s", strings.TrimSpace(string(version)))
-		prompt := fmt.Sprintf("Use only the MCP server %s. Call list_connections, list_tables with connection fixture and schema app, describe_table for fixture/app/native_agent_items, and query with connection fixture, sql SELECT id FROM app.native_agent_items ORDER BY id and row_limit 1. Then call query with sql SELECT app.policy_probe() and verify it returns QUERY_UNSUPPORTED. Do not use shell, files, network, or other servers. Report the actual results, including errors. Do not claim success unless these five calls ran.", name)
+		prompt := fmt.Sprintf("Use only the MCP server %s. Call list_connections, list_tables with connection fixture and schema app, describe_table for fixture/app/native_agent_items, list_objects with connection fixture and schema app and kind type, describe_object with connection fixture and kind type and schema app and name custom, and query with connection fixture, sql SELECT id FROM app.native_agent_items ORDER BY id and row_limit 1. Then call query with sql SELECT app.policy_probe() and verify it returns READ_ONLY_VIOLATION. Do not use shell, files, network, or other servers. Report the actual results, including errors. Do not claim success unless these seven calls ran.", name)
 		raw := runNativeAgent(t, ctx, dir, client, name, prompt, false)
-		for _, tool := range []string{"list_connections", "list_tables", "describe_table", "query"} {
+		for _, tool := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query"} {
 			if !hasNativeTool(raw, client, name, tool) {
 				t.Fatalf("%s did not execute %s; %s", client, tool, nativeSummary(raw))
 			}
@@ -136,21 +136,20 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 		if !nativeBoundedQuery(nativeResults(raw, client, name, "query")) {
 			t.Fatalf("%s did not return one truncated row", client)
 		}
-		if !bytes.Contains(nativeResults(raw, client, name, "query"), []byte("QUERY_UNSUPPORTED")) {
+		if !bytes.Contains(nativeResults(raw, client, name, "query"), []byte("READ_ONLY_VIOLATION")) {
 			t.Fatalf("%s omitted shared policy rejection: %s", client, nativeSummary(raw))
 		}
-		t.Logf("%s all four tools and shared policy rejection passed", client)
+		t.Logf("%s all six tools and shared policy rejection passed", client)
 	}
-	if out, e := run("", "db", "scope", "fixture", "--none", "--yes"); e != nil {
-		t.Fatalf("native narrow scope: %v %s", e, out)
-	}
+	sql("REVOKE SELECT ON app.native_agent_items FROM reader")
+	defer sql("GRANT SELECT ON app.native_agent_items TO reader")
 	for _, client := range []string{"codex", "claude"} {
 		prompt := fmt.Sprintf("Use only MCP server %s. Call query with connection fixture and sql SELECT id FROM app.native_agent_items. Report the error code. Do not use any other tools or modify settings.", name)
 		raw := runNativeAgent(t, ctx, dir, client, name, prompt, false)
-		if !hasNativeTool(raw, client, name, "query") || !bytes.Contains(nativeResults(raw, client, name, "query"), []byte("SCOPE_DENIED")) {
-			t.Fatalf("%s scope denial missing: %s", client, nativeSummary(raw))
+		if !hasNativeTool(raw, client, name, "query") || !bytes.Contains(nativeResults(raw, client, name, "query"), []byte("PERMISSION_DENIED")) {
+			t.Fatalf("%s privilege denial missing: %s", client, nativeSummary(raw))
 		}
-		t.Logf("%s scope narrowing denied query", client)
+		t.Logf("%s revoked privileges denied query", client)
 	}
 	// A native explicit deny overrides the otherwise allowed read-only tool.
 	prompt := fmt.Sprintf("Try calling the query tool on server %s with connection fixture and sql SELECT 1. Report if permission prevents the call. Do not use other tools or modify settings.", name)
@@ -201,7 +200,7 @@ func runNativeAgent(t *testing.T, parent context.Context, dir, client, name, pro
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("native %s session failed (%v): %s", client, err, nativeSummary(out.Bytes()))
 	}
-	for _, tool := range []string{"list_connections", "list_tables", "describe_table", "query"} {
+	for _, tool := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query"} {
 		if result := nativeResults(out.Bytes(), client, name, tool); len(result) > 0 {
 			t.Logf("native %s %s result: %s", client, tool, result)
 		}

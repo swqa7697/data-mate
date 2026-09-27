@@ -29,7 +29,7 @@ func (e *OwnerConflict) Unwrap() error { return ErrConflict }
 func shellQuote(s string) string       { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
 func (c *Controller) owner(ctx context.Context, j job) (*Owner, error) {
-	if !j.Present || filepath.Base(j.Path) != "service.plist" || len(j.Path) > 4096 {
+	if !j.Present || filepath.Base(j.Path) != config.ServiceFile() || len(j.Path) > 4096 {
 		return nil, ErrConflict
 	}
 	root, err := config.ResolveRoot(filepath.Dir(j.Path), "")
@@ -56,8 +56,8 @@ func (c *Controller) owner(ctx context.Context, j job) (*Owner, error) {
 	if err != nil || !matching(j, r) {
 		return nil, ErrConflict
 	}
-	raw, err := l.Read("service.plist", 16384)
-	if err != nil || !bytes.Equal(raw, plist(root, r)) {
+	raw, err := l.Read(config.ServiceFile(), 16384)
+	if err != nil || !bytes.Equal(raw, serviceDefinition(root, r)) {
 		return nil, ErrConflict
 	}
 	hash, err := binaryHash(r.Executable)
@@ -76,7 +76,7 @@ func (c *Controller) blocker(ctx context.Context) (*Owner, error) {
 	if err != nil || !j.Present {
 		return nil, err
 	}
-	if j.Path == filepath.Join(c.Root.Path, "service.plist") {
+	if j.Path == filepath.Join(c.Root.Path, config.ServiceFile()) {
 		return nil, nil
 	}
 	return c.owner(ctx, j)
@@ -84,7 +84,7 @@ func (c *Controller) blocker(ctx context.Context) (*Owner, error) {
 
 func (c *Controller) inspectSelected(ctx context.Context) (job, error) {
 	j, err := c.launcher.Inspect(ctx, c.Root)
-	if err != nil || !j.Present || j.Path == filepath.Join(c.Root.Path, "service.plist") {
+	if err != nil || !j.Present || j.Path == filepath.Join(c.Root.Path, config.ServiceFile()) {
 		return j, err
 	}
 	if _, err = c.owner(ctx, j); err != nil {

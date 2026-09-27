@@ -16,7 +16,7 @@ import (
 // Only the executor can signal successful truncation after terminating a socket.
 var errResultDiscarded = errors.New("bounded result completed; connection discarded")
 
-// Query executes one scoped read query in a fresh read-only transaction.
+// Query executes one read query in a fresh read-only transaction.
 func (d *Driver) Query(ctx context.Context, a database.Access, req database.QueryRequest) (database.QueryResult, error) {
 	started := time.Now()
 	a, rev, err := normalized(a)
@@ -39,7 +39,7 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 	if err != nil {
 		return database.QueryResult{}, err
 	}
-	if err := sqlguard.Check(req.SQL, a.Profile.Scope); err != nil {
+	if err := sqlguard.Check(req.SQL); err != nil {
 		return database.QueryResult{}, err
 	}
 	var out database.QueryResult

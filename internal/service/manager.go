@@ -196,7 +196,7 @@ func (m *Manager) Connections(parent context.Context, prepare func([]mcp.Connect
 	}
 	items := make([]mcp.Connection, 0, len(p.Connections))
 	for _, p := range p.Connections {
-		items = append(items, mcp.Connection{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database, Scope: p.Scope})
+		items = append(items, mcp.Connection{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database})
 	}
 	return prepare(items)
 }

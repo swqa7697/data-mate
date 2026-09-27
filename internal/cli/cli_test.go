@@ -51,13 +51,17 @@ func TestCLI(t *testing.T) {
 		code          int
 		cancelled     bool
 		outputFailure bool
+		dirty         string
+		wantOutput    string
 	}{
 		{name: "help writes stdout", args: []string{"help"}},
 		{name: "nested help writes stdout", args: []string{"help", "db"}},
 		{name: "invalid help redacts topic", args: []string{"help", "secret-sentinel"}, code: 2},
 		{name: "db rejects unknown command", args: []string{"db", "secret-sentinel"}, code: 2},
 		{name: "mcp rejects unknown command", args: []string{"mcp", "secret-sentinel"}, code: 2},
-		{name: "version writes stdout", args: []string{"version"}},
+		{name: "clean version omits build metadata", args: []string{"version"}, dirty: "false", wantOutput: "data-mate test-version\n"},
+		{name: "dirty version shows label only", args: []string{"version"}, dirty: "true", wantOutput: "data-mate test-version (dirty)\n"},
+		{name: "unknown dirty state omits label", args: []string{"version"}, dirty: "unknown", wantOutput: "data-mate test-version\n"},
 		{name: "development upgrade requires make", args: []string{"upgrade"}, code: 2},
 		{name: "development update requires make", args: []string{"update"}, code: 2},
 		{name: "development purge requires make", args: []string{"uninstall", "--purge", "--yes"}, code: 2},
@@ -88,9 +92,12 @@ func TestCLI(t *testing.T) {
 			if tc.outputFailure {
 				stdout = failingWriter{}
 			}
-			code := Run(ctx, args, stdout, &stderr, Build{Version: "test-version", Revision: "test", Dirty: "false"})
+			code := Run(ctx, args, stdout, &stderr, Build{Version: "test-version", Revision: "test", Dirty: tc.dirty})
 			if code != tc.code {
 				t.Fatalf("code=%d want=%d stdout=%q stderr=%q", code, tc.code, out.String(), stderr.String())
+			}
+			if tc.wantOutput != "" && out.String() != tc.wantOutput {
+				t.Fatalf("stdout=%q want=%q", out.String(), tc.wantOutput)
 			}
 			if strings.Contains(out.String()+stderr.String(), "secret-sentinel") {
 				t.Fatal("input leaked")

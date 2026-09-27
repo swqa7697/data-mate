@@ -11,15 +11,15 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
   - More Supports: Be able to add more agents to be compatible in the future
 - Broad DB Supports: Supports all mainstream DB types, such as PG, MySQL, MongoDB, etc.
   - First Implementation: Add PG supports in the first version (min 16), and should be able to add more later without pain because of abstraction design
-- OS Supports: Test and run only on macOS (Apple Silicon) for now, and may add Linux in the future (never supports Windows or Intel x86 macOS)
+- OS Supports: macOS 15+ (Apple Silicon) and Linux x86_64 (Windows, Intel macOS, Linux arm64 are unsupported)
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
-- Read Only: The MCP service provides only read-only tools and permissions to agents
-- Query Capacity: Support 20–40-second analytical queries with a 60-second default budget, configurable up to five minutes; allow eight database connections per profile, 16 concurrent requests per MCP session, and 32 active database operations across sessions.
-- Flexible Scope: Users are able to configure the visible schemas or tables for a on file DB connection
-- Simple Management: Users can conveniently and simply add/remove/modify a DB connection without pain
-- Security: Keep nonsecret connection profiles in files, never leak credentials in plain text, and never expose credentials to agents.
+- Read Only: The MCP service provides only read-only tools and permissions to agents, and also enforces read-only DB accounts
+- Database Access: PostgreSQL privileges determine data access, including newly created objects and system schemas
+- Database Context: Agents can inspect catalog-visible routines and their source, enum and other type details (including arrays and table-row types), sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
+- Simple Management: Users can simply add/remove/modify a DB connection
+- Security: Keep nonsecret connection profiles in files, never leak credentials in plain text, and never expose credentials to agents
 - Full CLI integration: standard + interactive CLI user experience
 
 ## Implementation Decisions
@@ -50,10 +50,9 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Distribution Installer: A installation bash script (also in `scripts`) for users to install latest stable standalone binary through terminal
 - Self-Contained: Not requiring user to have Go installed
 - Standalone Upgrades: Run `data-mate upgrade` (or its alias `data-mate update`) to upgrade to the latest stable release, reusing the same upgrade path as the distribution installer
-- Complete Terminal Uninstall: `data-mate uninstall` stops Data Mate and removes its executable, MCP registrations, runtime files, logs, caches, preferences, and other installation artifacts; retain only configured DB connections and their reusable encrypted credential store, required store metadata, and Keychain encryption keys.
-  - Explicit Full Removal: `data-mate uninstall --purge` removes anything, including saved connections, encrypted credential store and associated Keychain keys, leaving literally **no residue**.
-  - Cleanup Reliability: Include previously recorded custom config roots, if any, and recorded agent config locations; legacy cleanup does not enable custom production roots. Preserve unrelated user/client files and remote databases. Report incomplete cleanup with a nonzero exit and actionable retry instructions; never report success while known targeted artifacts remain. Reinstall after default uninstall must reuse saved connections and credentials.
-  - Scope: No-residue cleanup covers Data Mate managed artifacts, not OS snapshots, user managed backups, external agent transcripts, or independent manual copies.
+- Complete Terminal Uninstall: `data-mate uninstall` stops Data Mate and removes its executable, MCP registrations, runtime files, logs, caches, preferences, and other installation artifacts; retain only configured DB connections and their reusable encrypted credential store, required store metadata, and OS credential-store encryption keys.
+  - Explicit Full Removal: `data-mate uninstall --purge` removes anything, including saved connections, encrypted credential store and associated OS credential-store keys, leaving literally **no residue**
+  - Scope: No-residue cleanup covers Data Mate managed artifacts, not OS snapshots, user managed backups, external agent transcripts, or independent manual copies
 
 #### Development
 
@@ -68,14 +67,14 @@ Pretty and colored CLI experience. Scrathed commands design below.
 - DB - Interactive | preivew & confirm (Y/N)
   - `db add`: Config "driver (PG only this version), connection alias ("c-alias" below), host, port, DB name, username, password" only -- all advanced options are disabled by default
   - `db add [add-on-options]`: Add optional flags to add connection with advanced options like SSL/TLS, SSH tunnel and proxy
-  - `db scope [c-alias]`: Select visible schemas and tables from available list; Use "space" to select and "enter" to confirm -- similar experience with the `pnpm dlx taze -I` provides; A newly added connection has all schemas and tables exposed by default
   - `db edit [c-alias(optional)]`: Modify a DB connection
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
 - DB - One shot
-  - `db list` / `db ls`: List all available DB connections with their visible scopes
+  - `db list` / `db ls`: List all available DB connections
+  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a DB connection
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
 - MCP - One shot
-  - `mcp start`: Start the MCP service to expose all available DB connections with configured visible scope, to all supported agents
+  - `mcp start`: Start the MCP service to expose all available DB connections to all supported agents
   - `mcp stop`: Stop the MCP service
   - `mcp status`: Print status of the MCP service
 - General - One Shot
@@ -84,9 +83,9 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `help`: Print help messages
   - `version`: Print version
 
-**No Start-Agent Commands**: All agents are decoupled from Data Mate -- any session can find and use an active Data Mate MCP service to get information requested by users. Don't require users to do anything other than running `data-mate mcp start` before starting an agent session to analysis data. Configuring the visible scopes is optional, based on users needs.
+**No Start-Agent Commands**: All agents are decoupled from Data Mate -- any session can find and use an active Data Mate MCP service to get information requested by users. Don't require users to do anything other than running `data-mate mcp start` before starting an agent session to analysis data.
 
 ### Singleton & ENV Exclusive
 
-- Singleton: The MCP service (`data-mate mcp start`) is singleton per environment.
-- First Wins: When development and production envrionments are installed to the same machine, they can only start one service (with their own managed DB connections), but not two.
+- Singleton: The MCP service (`data-mate mcp start`) is singleton per environment
+- First Wins: When development and production envrionments are installed to the same machine, they can only start one service (with their own managed DB connections), but not two

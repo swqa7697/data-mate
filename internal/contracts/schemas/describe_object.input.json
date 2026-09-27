@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "routine",
+        "type",
+        "sequence"
+      ]
+    },
+    "schema": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00]+$",
+      "maxLength": 63
+    },
+    "identity_arguments": {
+      "type": "string",
+      "maxLength": 65536,
+      "pattern": "^[^\\x00]*$"
+    }
+  },
+  "required": [
+    "connection",
+    "kind",
+    "schema",
+    "name"
+  ],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "routine"
+        }
+      },
+      "required": [
+        "identity_arguments"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "enum": [
+            "type",
+            "sequence"
+          ]
+        }
+      },
+      "not": {
+        "required": [
+          "identity_arguments"
+        ]
+      }
+    }
+  ]
+}

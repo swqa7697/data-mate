@@ -41,7 +41,7 @@ type Controller struct {
 
 // New constructs a native lifecycle controller without accessing state.
 func New(root config.Root, build Build) *Controller {
-	return &Controller{Root: root, Build: build, launcher: launchd{}, readiness: 30 * time.Second}
+	return &Controller{Root: root, Build: build, launcher: nativeLauncher(), readiness: 30 * time.Second}
 }
 func (c *Controller) inspect(ctx context.Context, r record, l *config.LifecycleLease) (job, error) {
 	j, err := c.launcher.Inspect(ctx, c.Root)
@@ -55,8 +55,8 @@ func (c *Controller) inspect(ctx context.Context, r record, l *config.LifecycleL
 			}
 			return j, ErrConflict
 		}
-		b, err := l.Read("service.plist", 16384)
-		if err != nil || !bytes.Equal(b, plist(c.Root, r)) {
+		b, err := l.Read(config.ServiceFile(), 16384)
+		if err != nil || !bytes.Equal(b, serviceDefinition(c.Root, r)) {
 			return j, ErrConflict
 		}
 	}
@@ -115,7 +115,7 @@ func (c *Controller) stopLocked(ctx context.Context, l *config.LifecycleLease, r
 	if err = c.clearRuntime(r); err != nil {
 		return err
 	}
-	for _, path := range []string{"service.plist.tmp", "service.plist", "service.json.tmp", "service.json"} {
+	for _, path := range []string{config.ServiceFile() + ".tmp", config.ServiceFile(), "service.json.tmp", "service.json"} {
 		if err = l.Remove(path); err != nil {
 			return err
 		}
@@ -226,7 +226,7 @@ func (c *Controller) EnsureManagement(parent context.Context) (result Status, re
 	if err = saveRecord(l, r); err != nil {
 		return status("stopped"), err
 	}
-	if err = l.Replace("service.plist", plist(c.Root, r)); err != nil {
+	if err = l.Replace(config.ServiceFile(), serviceDefinition(c.Root, r)); err != nil {
 		return status("stopped"), err
 	}
 	bootErr := c.launcher.Bootstrap(ctx, c.Root)

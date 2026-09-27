@@ -190,6 +190,48 @@ func removeExact(path string, expected File) error {
 	}
 	return p.last().Sync()
 }
+
+// removalParent pins the safe parent of an inventoried file. It never reads or
+// follows the leaf, so edited, unreadable, hard-linked and retargeted files can
+// be unlinked without touching another path. Directories are not file artifacts.
+func removalParent(path string) (*pinnedDirectory, error) {
+	p, err := pinParent(path)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	err = unix.Fstatat(int(p.last().Fd()), filepath.Base(path), &st, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, unix.ENOENT) {
+		p.close()
+		return nil, nil
+	}
+	if err != nil || st.Uid != uint32(os.Geteuid()) || (st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFLNK) {
+		p.close()
+		return nil, ErrConflict
+	}
+	return p, nil
+}
+
+func removeRecorded(path string) error {
+	p, err := removalParent(path)
+	if err != nil {
+		return &ArtifactError{Path: path, Cause: err}
+	}
+	if p == nil {
+		return nil
+	}
+	defer p.close()
+	if err = p.check(); err == nil {
+		err = unix.Unlinkat(int(p.last().Fd()), filepath.Base(path), 0)
+	}
+	if err != nil && !errors.Is(err, unix.ENOENT) {
+		return &ArtifactError{Path: path, Cause: err}
+	}
+	return p.last().Sync()
+}
 func renameExact(from, to string, expected File) error {
 	src, err := pinParent(from)
 	if err != nil {
@@ -204,7 +246,7 @@ func renameExact(from, to string, expected File) error {
 	if exact(from, expected) != nil || src.check() != nil || dst.check() != nil {
 		return ErrConflict
 	}
-	if err = unix.RenameatxNp(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to), unix.RENAME_EXCL); err != nil {
+	if err = renameExclusive(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to)); err != nil {
 		return err
 	}
 	return dst.last().Sync()
@@ -224,7 +266,7 @@ func replaceExact(from, to string, before *File) error {
 		return ErrConflict
 	}
 	if before == nil {
-		return unix.RenameatxNp(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to), unix.RENAME_EXCL)
+		return renameExclusive(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to))
 	}
 	if exact(to, *before) != nil {
 		return ErrConflict

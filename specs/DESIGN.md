@@ -4,20 +4,20 @@
 
 Data Mate makes saved database connections available to independently launched terminal agents through a local, read-only MCP service. Users manage connections and visibility in the terminal; agents discover database structure and query permitted data without receiving connection credentials.
 
-This document defines the implemented architecture and technical contracts for Tink, SQLite, and centralized service-owned credential access, plus the proposed distribution contracts in section 13. The [PRD](PRD.md) defines product requirements, the [README](../README.md) documents implemented setup and usage, and the [changelog](../CHANGELOG.md) records user-visible changes. Implementation plans and validation evidence belong in ignored `.misc`, not in this design. Data Mate has never been released, so compatibility with the development-only vault format is not required; implementation must report obsolete state without silently deleting it.
+This document defines the implemented architecture and technical contracts for Tink, SQLite, and centralized service-owned credential access, plus the distribution contracts in section 13. The [PRD](PRD.md) defines product requirements, the [README](../README.md) documents implemented setup and usage, and the [changelog](../CHANGELOG.md) records user-visible changes. Implementation plans and validation evidence belong in ignored `.misc`, not in this design. Compatibility with published distribution contracts is required; obsolete development-only vault state must be reported without silently deleting it.
 
-The supported platform is macOS on Apple Silicon, with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax is bounded by the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
+The supported platforms are macOS 15+ on Apple Silicon and Linux x86_64 with glibc 2.39+ (Ubuntu 24.04+), with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax is bounded by the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
 
-Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are implemented under section 13. Public installation remains unavailable until a stable release is published and its native acceptance gates pass. Other database drivers, Linux, unattended updates, credential export, and key rotation remain deferred. The key-provider boundary accommodates a future Linux Secret Service implementation without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, PostgreSQL migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
+Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are implemented under section 13. macOS distribution is published. Linux distribution becomes publicly available when a release containing its signed artifacts passes the existing acceptance gates. Other database drivers, unattended updates, credential export, and key rotation remain deferred. Linux uses Secret Service without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, PostgreSQL migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
 
 The design follows these principles:
 
 - One background service per installation owns credential access, profile mutations, and shared database operations; MCP exposure is explicitly enabled.
 - SQLite stores nonsecret profiles and encrypted credential bundles in separate records; one Tink keyset lives in OS secure storage.
 - Tink owns encryption, nonce generation, authentication, and ciphertext/keyset formats. Data Mate owns input validation, context binding, persistence, and lifecycle policy.
-- Query and metadata tools enforce saved direct-relation scope; PostgreSQL owns grants and query semantics.
+- Query and metadata tools use PostgreSQL privileges for application-data access; the query guard enforces statement, relation-reference and explicit-routine restrictions.
 - Resources, cancellation, ownership, and partial failures have explicit bounds and outcomes.
-- The normal workflow is add a connection, optionally narrow scope, start MCP, and launch an agent normally.
+- The normal workflow is add a connection, start MCP, and launch an agent normally.
 
 ## 2. Architecture
 
@@ -45,7 +45,7 @@ The binary has three process roles:
 | Internal service | Profile mutations, OS keyset access, Tink encryption, CLI database operations, and enabled MCP sessions  |
 | Internal bridge  | Relay bounded MCP messages between agent stdio and the service socket                                    |
 
-Development agent registration invokes `data-mate mcp bridge --root <absolute-root>`. Planned production registration omits `--root` and uses the fixed installation described in section 13.2. A private service entry point runs under launchd, initially in management-only mode unless started through `mcp start`. These internal commands require no separate user setup. The bridge has no database connection, keyset, or management API. Each bridge creates one socket connection and an independent MCP session. Stdout carries protocol messages only; diagnostics use stderr.
+Development agent registration invokes `data-mate mcp bridge --root <absolute-root>`. Production registration omits `--root` and uses the fixed installation described in section 13.2. A private service entry point runs under launchd on macOS or systemd on Linux, initially in management-only mode unless started through `mcp start`. These internal commands require no separate user setup. The bridge has no database connection, keyset, or management API. Each bridge creates one socket connection and an independent MCP session. Stdout carries protocol messages only; diagnostics use stderr.
 
 The service listens on a Unix domain socket in an owner-checked private directory. Directory/socket permissions and native peer UID/PID checks authenticate local peers before MCP begins. A bounded identity preamble precedes the SDK transport; agents see only MCP messages. The service uses the pinned Go MCP SDK for initialized protocol handling, tool dispatch, cancellation, and session shutdown.
 
@@ -59,16 +59,16 @@ The service listens on a Unix domain socket in an owner-checked private director
 | `internal/vault`                                    | Tink credential encryption, authenticated context, keyset lifecycle, and OS key providers           |
 | `internal/database`                                 | Shared driver operations and result/access types                                                    |
 | `internal/database/postgres`                        | Connections, pools, catalogs, read-only transactions, execution, and codecs                         |
-| `internal/database/postgres/sqlguard`               | Bounded statement-kind and direct-relation scope checks                                             |
+| `internal/database/postgres/sqlguard`               | Bounded statement-kind, relation-reference and explicit-routine checks                              |
 | `internal/transport`                                | Direct, TLS, SSH, and SOCKS5 connection paths and owned SSH host pins                               |
 | `internal/service`                                  | Lifecycle, identity, separate management/MCP listeners, profile mutations, and request coordination |
 | `internal/mcp`                                      | Tool handlers, session framing/admission, and stdio bridge                                          |
 | `internal/agent`                                    | Client detection, registration inspection, and ownership-safe mutation                              |
 | `internal/devtools`, `scripts`, `.github/workflows` | Developer commands, regression harnesses, and CI                                                    |
 
-Concrete packages implement most behavior. Interfaces represent external seams: the database driver, key provider, lifecycle/client operations, and dialing. `database.Driver` supplies validation, diagnostics, table listing, description, query execution, invalidation, and close. PostgreSQL also supplies the CLI catalog-browsing operation. Callers hold the profile state lease until driver cleanup and result preparation finish. Credentials travel only through private in-memory access snapshots.
+Concrete packages implement most behavior. Interfaces represent external seams: the database driver, key provider, lifecycle/client operations, and dialing. `database.Driver` supplies validation, diagnostics, table/object listing, description, query execution, invalidation, and close. PostgreSQL also supplies the CLI database-description operation. Callers hold the profile state lease until driver cleanup and result preparation finish. Credentials travel only through private in-memory access snapshots.
 
-Agent adapters own compatibility and registration, not database policy. Scope and query semantics remain driver-aware. Additional drivers must satisfy the credential, visibility, cancellation, and read-only contracts; there is no universal query language or dynamic plugin framework.
+Agent adapters own compatibility and registration, not database policy. Catalog visibility and query semantics remain driver-aware. Additional drivers must satisfy the credential, visibility, cancellation, and read-only contracts; there is no universal query language or dynamic plugin framework.
 
 Implementation dependencies are pinned in [go.mod](../go.mod) and `go.sum`. The implementation uses pinned `github.com/tink-crypto/tink-go/v2` and `github.com/mattn/go-sqlite3` alongside the CLI, MCP, PostgreSQL, and transport dependencies. Tink provides credential cryptography; the standard library handles JSON, filesystem/process primitives, and non-credential hashing where suitable. Native Keychain access and the PostgreSQL parser require cgo and the macOS SDK. OS adapter selection and native validation are specified in section 6.3.
 
@@ -78,21 +78,21 @@ During development, `make dev ARGS="..."` invokes the installed binary with the 
 
 The table below describes implemented commands. Section 13.1 defines production command availability and completion.
 
-| Command                              | Behavior                                                                            |
-| ------------------------------------ | ----------------------------------------------------------------------------------- |
-| `db add [options]`                   | Collect a connection, preview nonsecret settings, confirm, and save                 |
-| `db edit [alias]`                    | Select a connection when omitted; edit, preview, confirm, and save                  |
-| `db scope [alias]`                   | Select a connection when omitted; replace visible schemas/tables after confirmation |
-| `db remove [alias]`, `db rm [alias]` | Confirm removal of a profile and its credentials                                    |
-| `db list`, `db ls`                   | Show aliases, driver, endpoint, database, and scope                                 |
-| `db test [alias]`                    | Diagnose one connection, or all in alias order when omitted                         |
-| `mcp start`                          | Start or reuse the service, then ensure supported-agent registrations               |
-| `mcp stop`                           | Stop the service and sessions; preserve profiles and registrations                  |
-| `mcp status`                         | Passively report service and supported-agent registration states                    |
-| `upgrade`, `update`                  | Install the latest verified stable release in production; development uses Make     |
-| `help`, `version`                    | Show usage or build version                                                         |
+| Command                              | Behavior                                                                        |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| `db add [options]`                   | Collect a connection, preview nonsecret settings, confirm, and save             |
+| `db edit [alias]`                    | Select a connection when omitted; edit, preview, confirm, and save              |
+| `db remove [alias]`, `db rm [alias]` | Confirm removal of a profile and its credentials                                |
+| `db list`, `db ls`                   | Show aliases, driver, endpoint, and database                                    |
+| `db describe [alias]`                | Describe one database catalog; select a profile when omitted                    |
+| `db test [alias]`                    | Diagnose one connection, or all in alias order when omitted                     |
+| `mcp start`                          | Start or reuse the service, then ensure supported-agent registrations           |
+| `mcp stop`                           | Stop the service and sessions; preserve profiles and registrations              |
+| `mcp status`                         | Passively report service and supported-agent registration states                |
+| `upgrade`, `update`                  | Install the latest verified stable release in production; development uses Make |
+| `help`, `version`                    | Show usage or build version                                                     |
 
-Confirmed profile changes start or reuse the management-only service without exposing MCP or registering agents. `db test` and interactive catalog browsing also use that service. Listing and previews remain passive nonsecret reads. `mcp start` explicitly enables agent access. There is no activation command, login, or per-agent grant workflow.
+Confirmed profile changes start or reuse the management-only service without exposing MCP or registering agents. `db test` and `db describe` also use that service. Listing and previews remain passive nonsecret reads. `mcp start` explicitly enables agent access. There is no activation command, login, or per-agent grant workflow.
 
 ### 3.1 Forms and credential input
 
@@ -100,7 +100,7 @@ The basic add form asks for driver, alias, host, port, database, username, and p
 
 Previews show only nonsecret settings and whether a secret is configured or changing. Blank edit fields preserve existing values; keeping and clearing a secret are separate actions. Confirmations default to No. Ctrl-C during the form or negative confirmation exits 130 without publishing a connection change. Cancellation after submission follows the transaction-outcome rules below. Omitted edit/remove aliases use selection by number or exact alias.
 
-Listing and previews use ownership-checked read-only SQLite access without initializing state or accessing Keychain. After confirmation, terminal modes are restored before the CLI starts/reuses the service and submits the mutation. The service compares the preview revision with the current revision, including a change generation covering credential edits; a stale preview requires a fresh review. Invalid configuration remains untouched. Normal saves do not test a connection; explicit SSH enrollment is the only save-time network probe.
+Listing and previews use ownership-checked read-only SQLite access without initializing state or accessing Keychain. After confirmation, terminal modes are restored before the CLI starts/reuses the service and submits the mutation. The service compares the preview revision with the current revision, including a change generation covering credential edits; a stale preview requires a fresh review. Invalid configuration remains untouched. Every confirmed add/edit validates the candidate account through a fresh connection before publication; SSH enrollment additionally probes and confirms the host fingerprint.
 
 Scripts supply complete required fields and `--yes`. Non-TTY commands report missing input rather than prompt. Add requires explicit password input or `--passwordless`. Secret input modes are mutually exclusive and cannot also drive a form:
 
@@ -117,23 +117,27 @@ Advanced options include `--tls`, `--tls-ca`, `--ssh-host`, `--ssh-port`, `--ssh
 
 A profile and its encrypted bundle are removed in the same SQLite transaction. They are either both removed or both preserved. If a reply is lost after commit, report that the outcome is unknown and require a fresh state read before retrying; do not imply rollback or automatically replay the mutation.
 
-### 3.2 Scope selection
+### 3.2 Diagnostics and output
 
-Add, edit, and scope commands accept `--all`, `--none`, repeated `--schema`, repeated `--table schema.table`, or `--scope-json`. Schema and table selections can be combined; all/none/JSON are mutually exclusive with those selections. Structured JSON preserves identifiers containing dots or other ambiguous characters. Scripted replacement performs no catalog fetch or credential access for the scope operation.
+`db describe [alias] [--json] [--no-pager]` selects one saved profile, using the existing terminal picker when the alias is omitted; noninteractive callers must supply an alias. It starts or reuses management-only service access without enabling MCP. The private `describe` request binds profile ID, alias and expected store revision; check the revision again under the database-work lease. The PostgreSQL `DescribeDatabase` capability prepares the catalog under that same snapshot, and finishes driver cleanup before releasing the lease or writing output.
 
-Interactive `db scope` browses the role's accessible application catalog independently of saved scope. Up/Down navigates, Right expands a schema, Left returns to schemas, Space toggles, `/` searches, `n` advances, and `b` restarts pagination. `a` selects all and `0` clears the selection. Enter previews the result before a final default-No confirmation. Whole-schema selection includes current and future tables. To narrow an all/schema selection, clear that broad selection before choosing individual tables.
+Descriptions show catalog-visible application schemas, including empty schemas, enums, sequences, relations of the supported kinds, ordinary and partitioned indexes (including constraint-backed indexes), and ordinary and window functions. Exclude procedures and aggregates; deduplicate functions by name within each schema before applying result limits. Exclude `information_schema` and every schema prefixed `pg_` within the catalog SQL before fetching results or applying limits; retain extension objects in application schemas. Share relation-kind selection with existing tools; do not impose schema USAGE or object privilege filters on metadata. One ordered catalog statement preserves empty schemas with a left join and C-collated schema/name/kind ordering. This application-only presentation does not change MCP catalog access.
 
-Each fetch retains at most 50 schemas or tables and performs literal case-insensitive search at the current level. Selections absent from the current page remain intact. Search is bounded to 256 bytes; interactive selections are bounded to 4096 schemas/tables and half the profile byte budget. Catalog browsing never authorizes a query.
+Human output shows unquoted database/schema/object names, escaping control and nonprinting characters without losing printable Unicode or punctuation. Under each schema, group names into enums, tables (including partitioned/foreign), views (including materialized), sequences, indexes, and functions, in that order; omit empty groups and show empty catalogs/schemas explicitly. Each group uses an alphabetically ordered row-major grid with per-column display-cell widths, two-space gutters and indentation, and as many columns as fit stdout's terminal width (80 columns when unavailable). Preserve long names in a single column rather than truncating. Terminal stdout uses magenta, green, cyan, yellow, blue, and red respectively. Schema headings use bold default foreground. One compact legend uses matching styles and singular labels: Schema, Enum, Table, View, Sequence, Index, Function; plain output uses a heading per group. Any present `NO_COLOR` value disables color, independently of stdin.
 
-Each service-side fetch opens a fresh shared state lease, verifies the preview revision, and reads credentials and host pins under that lease. Database cleanup finishes before lease release; human input holds no lease. Final scope publication uses an exclusive lease and SQLite transaction with revision comparison, without decrypting credentials. Browsing starts/reuses the management service but never creates or repairs credentials; scripted scope replacement needs no catalog access or keyset unlock.
+After driver cleanup, lease release, and management-client closure, interactive human output uses `/usr/bin/less -R -F -X` with controlled options, disabled personal key bindings/history, and no shell execution. Short output returns immediately; longer output supports scrolling, searching and normal successful quit. `--no-pager`, JSON, or redirected stdin/stdout bypass paging. Failure to start the pager falls back to direct output; cancellation reaps the child, restores terminal state, and exits 130. Successful early quit tolerates a closed input pipe.
 
-### 3.3 Diagnostics and output
+The version-1 JSON envelope contains `version`, `alias`, `database`, and `schemas`; each schema contains `name`, `tables` (entries with `name` and exact relation `kind`, including views), plus `enums`, `sequences`, `indexes`, and `functions` (entries with `name`, without function signatures). Catalog collections are arrays even when empty. This unreleased contract remains version 1; the exact contract is `db-describe.output.json`.
 
-`db test` runs selected profiles sequentially in alias order with a per-profile deadline that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `read_only` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange distinguishes authentication failures. The final stage verifies the actual read-only transaction and authenticated identity, without reading application rows or auditing grants. Success does not certify that the operator has provisioned a restricted account or authorize later queries.
+Bound descriptions to 4,096 combined schema/object entries (counting each distinct function name once per schema) and the profile's encoded-result-byte cap and query timeout. The byte cap measures the JSON description, without an MCP compatibility envelope. Exceeding either size limit returns `RESOURCE_LIMIT`, never successful truncation; terminal paging does not extend these limits. Connection, credential, timeout, cancellation, stale-selection and configuration failures follow existing safe error/exit contracts and print no partial description to stdout. No application rows, columns, enum values, definitions, counts, or diagnostic-stage output are included.
+
+`db test` runs selected profiles sequentially in alias order with a per-profile deadline that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `read_only` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange distinguishes authentication failures. The final stage verifies the actual read-only transaction and authenticated identity and performs a fresh account audit through a dedicated short-lived connection. It reads catalogs, never application rows, and never reuses a live pool approval. Success is a point-in-time privilege check, not a permanent authorization.
 
 The terminal `stage` and `ok` fields summarize each result. A failed stage includes a safe error object; later stages are omitted. Ordinary per-profile failures continue the batch. Invalid profile state and unknown aliases fail before output because no validated selection exists. Cancellation stops the command. Output occurs after releasing state leases. Diagnostics run through the management service and may unlock an existing keyset, but do not create or repair secrets, keysets, or database grants.
 
-Human previews honor `NO_COLOR`; machine output has no color. `db list`, `db test`, and all three public MCP lifecycle commands support `--json`. Their version-1 envelopes contain `connections`, `results`, or service `state`/`agents`/`mcp_enabled`/`keyset_state`; exact contracts live in [schemas](../internal/contracts/schemas). Diagnostics use stderr. Exit codes are 0 for success, 1 for operational failure, 2 for invalid usage/configuration, and 130 for cancellation. A test batch exits nonzero if any profile fails.
+Human `db test` output prints one `alias  PASS` or `alias  FAIL` summary per connection, followed only by failed checks as indented `stage: CODE: message` lines. Successful check details are omitted. Only the status labels are colored: green for `PASS`, red for `FAIL`, when stdout is a terminal and `NO_COLOR` is absent. Color detection is independent of stdin; any present `NO_COLOR` value, including an empty value, disables color. Redirected output remains plain text. JSON retains all reached stages.
+
+Human previews honor `NO_COLOR`; machine output has no color. `db list`, `db test`, `db describe`, and all three public MCP lifecycle commands support `--json`. Their version-1 envelopes contain `connections`, `results`, the database description fields above, or service `state`/`agents`/`mcp_enabled`/`keyset_state`; exact contracts live in [schemas](../internal/contracts/schemas). Diagnostics use stderr. Exit codes are 0 for success, 1 for operational failure, 2 for invalid usage/configuration, and 130 for cancellation. A test batch exits nonzero if any profile fails.
 
 ## 4. Agent integration and service lifecycle
 
@@ -185,13 +189,13 @@ Daemon streams go to `/dev/null`; the service creates no persistent log. Callers
 
 ### 4.4 Private management protocol
 
-Only the CLI management path can submit profile mutations, credential patches, scope browsing, and diagnostic requests. MCP sessions and bridges have no dispatch path to these operations. Management peers verify the installation, protocol version, instance nonce, UID/PID, and expected executable identity before sending secrets. This separates interfaces within the application; it is not a sandbox against arbitrary code running as the same OS user.
+Only the CLI management path can submit profile mutations, credential patches, database descriptions, and diagnostic requests. MCP sessions and bridges have no dispatch path to these operations. Management peers verify the installation, protocol version, instance nonce, UID/PID, and expected executable identity before sending secrets. This separates interfaces within the application; it is not a sandbox against arbitrary code running as the same OS user.
 
 Requests carry an operation, expected revision, and bounded typed input. There is no generic SQL, arbitrary-path, keyset-export, or saved-password retrieval endpoint. The CLI submits only newly entered secret values and explicit keep/clear actions; merging with saved secrets happens inside the service. Responses contain nonsecret state or safe operation results. The service revalidates all requests independently of CLI validation.
 
 Management frames use length-prefixed strict JSON with an 8 MiB request cap checked before allocation; decoded profiles, individual secrets, and replies retain their smaller owning-contract bounds. Allow at most four active management requests and reject excess requests without an unbounded queue. Handshakes and blocked output retain the ten-second and five-second bounds. Propagate caller cancellation and operation deadlines; mutations have a 30-second budget, while diagnostics/catalog work retain profile deadlines. OS prompting may not be interruptible: a timed-out request cannot publish later, and late provider results must be discarded safely. Native validation must establish bounded shutdown behavior.
 
-Only an explicit interactive management operation or `mcp start` can authorize an OS unlock prompt. Noninteractive callers may use an already-loaded or noninteractively accessible keyset; otherwise they receive a safe unlock-required failure. MCP requests, passive listing, and status never trigger unlock. Declining confirmation sends no mutation. Passive add/edit/remove previews never start the service; interactive scope browsing may already have started it for its explicit catalog reads. The CLI releases bootstrap lifecycle ownership before submitting a management mutation, allowing service-side keyset initialization to acquire that ownership without deadlock.
+Only an explicit interactive management operation or `mcp start` can authorize an OS unlock prompt. Noninteractive callers may use an already-loaded or noninteractively accessible keyset; otherwise they receive a safe unlock-required failure. MCP requests, passive listing, and status never trigger unlock. Declining confirmation sends no mutation. Passive add/edit/remove previews never start the service. The CLI releases bootstrap lifecycle ownership before submitting a management mutation, allowing service-side keyset initialization to acquire that ownership without deadlock.
 
 ## 5. Persistent data and configuration
 
@@ -224,7 +228,9 @@ The installation identity records its UUID, full root digest, established-profil
 
 SQLite schema version 1 and installation inventory version 2 identify this storage format; the private service protocol is version 2. Public CLI envelopes remain version 1.
 
-The logical profile representation retains the nonsecret fields described in [profiles.json](../internal/contracts/schemas/profiles.json). It is validated in memory and persisted in SQLite; the JSON example below describes a logical snapshot, not an editable authoritative file. A profile contains only nonsecret connection, transport, visibility, and limit settings:
+The removal of configurable scope is a breaking profile and output contract change. Strict decoding rejects the obsolete `scope` field, with no compatibility decoder, migration or automatic reset; invalid state remains untouched. SQLite layout and profile/CLI envelope versions stay unchanged. Before upgrading, use the previous executable to list and record nonsecret settings and remove each connection; recreate connections and re-enter credentials after upgrading. Apply the same procedure to development builds that saved scope settings. See README for commands.
+
+The logical profile representation retains the nonsecret fields described in [profiles.json](../internal/contracts/schemas/profiles.json). It is validated in memory and persisted in SQLite; the JSON example below describes a logical snapshot, not an editable authoritative file. A profile contains only nonsecret connection, transport, and limit settings:
 
 ```json
 {
@@ -241,8 +247,7 @@ The logical profile representation retains the nonsecret fields described in [pr
         "username": "analytics_reader"
       },
       "credential_ref": "4a43b349-904a-49b7-8395-7af73d613165",
-      "transport": { "tls": { "mode": "disabled" } },
-      "scope": { "mode": "all" }
+      "transport": { "tls": { "mode": "disabled" } }
     }
   ]
 }
@@ -250,9 +255,9 @@ The logical profile representation retains the nonsecret fields described in [pr
 
 `credential_ref` addresses an encrypted SQLite bundle, never an OS credential-store item. It may be omitted when the connection needs no managed credentials. A nonexistent bundle returns `CREDENTIAL_MISSING`; `db edit` can attach credentials. The CLI management protocol is the supported mutation path. Direct editing of SQLite or a legacy `connections.json` file is unsupported; no parallel JSON file overrides or synchronizes with SQLite. Credential import/export and a replacement manual-profile import command are deferred.
 
-Strict decoding rejects unknown fields/versions, recursive duplicate keys, trailing values, invalid UTF-8, duplicate IDs/aliases/credential references, invalid ports, and embedded secret fields. Profiles are bounded to 1 MiB and 128 connections. Aliases match `^[a-z][a-z0-9_-]{0,62}$`. UUID comparisons normalize case; scope names preserve it. The PostgreSQL connection object accepts explicit fields, with no DSN or unrestricted option-string passthrough.
+Strict decoding rejects unknown fields/versions, recursive duplicate keys, trailing values, invalid UTF-8, duplicate IDs/aliases/credential references, invalid ports, and embedded secret fields. Profiles are bounded to 1 MiB and 128 connections. Aliases match `^[a-z][a-z0-9_-]{0,62}$`. UUID comparisons normalize case. The PostgreSQL connection object accepts explicit fields, with no DSN or unrestricted option-string passthrough.
 
-Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-path}`, optional SSH `{host,port,user,auth:"password"|"key"}`, or optional SOCKS5 `{kind:"socks5",host,port,username?}`. Authentication material stays in the vault. CA files require verified TLS; SSH and SOCKS5 are mutually exclusive. Missing scope is invalid; profile creation explicitly chooses all.
+Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-path}`, optional SSH `{host,port,user,auth:"password"|"key"}`, or optional SOCKS5 `{kind:"socks5",host,port,username?}`. Authentication material stays in the vault. CA files require verified TLS; SSH and SOCKS5 are mutually exclusive.
 
 | Optional limit     | Default | Accepted range |
 | ------------------ | ------- | -------------- |
@@ -260,7 +265,7 @@ Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-
 | `max_rows`         | 500     | 1–5000         |
 | `max_result_bytes` | 1048576 | 1024–1048576   |
 
-Omitted members take individual defaults; zero is not omission. Profile digests are SHA-256 over validated canonical JSON with normalized UUIDs, explicit defaults, and sorted profiles/scope selections. Formatting and selection order do not change the digest; settings and limits do. A revision also carries a database generation incremented in the same transaction for every profile or credential change, so credential-only edits invalidate stale previews and service resources.
+Omitted members take individual defaults; zero is not omission. Profile digests are SHA-256 over validated canonical JSON with normalized UUIDs, explicit defaults, and sorted profiles. Formatting and profile order do not change the digest; settings and limits do. A revision also carries a database generation incremented in the same transaction for every profile or credential change, so credential-only edits invalidate stale previews and service resources.
 
 SQLite owns one authoritative set of records:
 
@@ -283,7 +288,7 @@ All input validates before publication. Resolve any needed keyset access before 
 
 Remaining non-SQLite metadata and host-pin files use same-directory atomic replacement, file sync, and parent-directory sync. An explicitly enrolled SSH pin is published before the profile transaction; a failed profile save may leave an unused nonsecret pin. The OS keyset and SQLite cannot share a transaction; section 6.2 defines initialization and purge recovery.
 
-The service admits work before reading its profile snapshot, so queued callers hold no old configuration. Each operation reads and validates the current generation and relevant records. Changed profiles or credentials invalidate their pools, transports, and cursors; private pool fingerprints also include credentials and host pins. Invalid configuration blocks operations instead of retaining a broader last-known-good scope. Live catalog and grant results are never cached. Passive SQLite readers hold shared state leases; if a hot journal requires recovery they report recovery required instead of opening a writer or starting the service implicitly.
+The service admits work before reading its profile snapshot, so queued callers hold no old configuration. Each operation reads and validates the current generation and relevant records. Changed profiles or credentials invalidate their pools, transports, and cursors; private pool fingerprints also include credentials and host pins. Invalid configuration blocks operations instead of retaining last-known-good settings. Live catalog and grant results are never cached. Passive SQLite readers hold shared state leases; if a hot journal requires recovery they report recovery required instead of opening a writer or starting the service implicitly.
 
 ## 6. Centralized credential vault
 
@@ -315,7 +320,7 @@ Once loaded, the service retains the Tink handle for its lifetime. New CLI invoc
 
 Initial authorization and access after binary changes may still prompt. Stable code signing is necessary for predictable executable identity across updates; unsigned/ad-hoc development rebuilds cannot promise prompt-free restarts. Do not broaden OS access controls to suppress prompts. Even [Electron documents this Keychain limitation](https://www.electronjs.org/docs/latest/api/safe-storage#platform-specific-key-providers). OS locking does not revoke a keyset already loaded into this service; `mcp stop` ends the process and its access. An automatic lock-on-screen-lock policy is outside this design.
 
-Locked/unavailable OS storage, denied access, authentication failure, corrupt accounting, or unknown formats produce safe errors and preserve data. A failed decryption never deletes its ciphertext. No plaintext, hardcoded-password, or ambient key-source fallback is allowed. Nonsecret listing, passive status, scope-only changes, and connection deletion need no unlock. SQLite deletion does not guarantee physical erasure of journals, freed pages, or backups.
+Locked/unavailable OS storage, denied access, authentication failure, corrupt accounting, or unknown formats produce safe errors and preserve data. A failed decryption never deletes its ciphertext. No plaintext, hardcoded-password, or ambient key-source fallback is allowed. Nonsecret listing, passive status, and connection deletion need no unlock. Profile edits need existing credentials for mandatory live validation, even when only nonsecret settings change. SQLite deletion does not guarantee physical erasure of journals, freed pages, or backups.
 
 Bundles decrypt at use; active connections retain only the credentials they require. Profile changes and shutdown retire affected resources. Mutable temporary buffers are cleared where practical, but Go and library-managed memory cannot guarantee complete secret erasure. Copying SQLite does not provision the keyset or destination namespace; moving installations or exporting credentials is not supported by this change. Users can recreate profiles and re-enter credentials.
 
@@ -325,27 +330,21 @@ Credentials and keysets never appear in agent settings, MCP results, previews, d
 
 Keep a narrow native provider boundary for exact lookup, create-if-absent, and idempotent deletion, with explicit interaction policy and safe errors. Preserve file-based Keychain compatibility for the checkout-local executable, non-synchronizing ownership, and deletion after executable changes. [Keybase's Go bindings](https://github.com/keybase/go-keychain) are the preferred library candidate for native macOS calls, subject to those contracts. The implementation retains the native shim because the reviewed binding does not cover file-based interaction policy and exact-reference deletion after executable changes. Retain a small native shim wherever the binding cannot express required ownership or interaction behavior. OS integration code is distinct from implementing credential cryptography.
 
-Linux support remains deferred. Its provider would store the same serialized keyset through the desktop Secret Service API with explicitly selected secure storage and no fallback file key. Keybase also supplies a Secret Service package, but its blocking calls, cancellation, duplicate matching, and non-thread-safe prompt handling require review before adoption. Desktop keyrings and headless environments require separate lifecycle validation; this design does not imply unattended server/container support or macOS-equivalent per-application access control. See the [Secret Service implementation](https://github.com/keybase/go-keychain/blob/master/secretservice/secretservice.go) and [API access-control limitations](https://specifications.freedesktop.org/secret-service/latest/ch10.html).
+Linux stores the same serialized Tink keyset through a pinned Go D-Bus client in the persistent default Secret Service collection. The adapter connects only to `/run/user/<uid>/bus`, checks Unix peer identity, pins the Secret Service owner for each operation, and uses the standard plain session over local IPC. It does not use ambient bus addresses, subprocess key material, file-key fallbacks, or the ephemeral session collection. Collection unlocking respects explicit interaction policy and bounded cancellation; ambiguous item matches fail closed. A per-account bus-name reservation serializes lookup/create/delete across Data Mate processes without replacing an existing item. Item content-type labels are not cryptographic authority; Tink validates the returned serialized keyset.
+
+Linux requires an existing systemd user session and persistent secure keyring. It does not imply unattended headless/container support or macOS-equivalent per-application access control; the [Secret Service specification](https://specifications.freedesktop.org/secret-service/latest/ch10.html) does not mandate such access controls. Locked/unavailable storage preserves saved ciphertext and reports the same safe provider errors.
 
 Pin Tink, the SQLite driver, and any OS binding when implementing; do not assume a keyring package provides encryption or a turnkey secure-storage service. Native acceptance must demonstrate one initialization/unlock followed by multiple independent CLI saves with zero additional OS key reads/writes, then restart, denied access, locked storage, and changed-executable behavior. Also validate cancellation without late publication, exact cleanup, and keyset/SQLite interruption recovery. These are required acceptance boundaries, not claims of completed implementation or native validation.
 
-## 7. Visibility policy
+## 7. Catalog visibility
 
-Each profile addresses one database. Direct relation visibility intersects configured application scope and the database role's privileges. All scope does not grant missing privileges or bypass query validation.
+Each profile addresses one database. PostgreSQL enforces row privileges, including newly created or renamed objects. Metadata tools use PostgreSQL catalog access without additional schema, relation, type-USAGE, or sequence-grant filters. System schemas, automatic arrays and table-row types are discoverable. Metadata access does not confer permission to query the described data.
 
-| Scope                                                                                        | Meaning                                                                                |
-| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `{"mode":"all"}`                                                                             | All accessible application schemas/tables, including future ones; the creation default |
-| `{"mode":"selected","schemas":["reporting"],"tables":[{"schema":"public","name":"orders"}]}` | All tables in `reporting` plus `public.orders`                                         |
-| `{"mode":"selected","schemas":[],"tables":[]}`                                               | No visible objects                                                                     |
+Catalog tools use parameterized SQL and C-collated keyset pagination. Table descriptions expose actual type names, columns, defaults/generated expressions, keys, foreign-key endpoints, constraints, indexes, triggers, views and row-security policies. Stored expressions are deparsed, never evaluated. There are no `supported` or `reason` fields. Missing description targets return the existing safe `PERMISSION_DENIED` result.
 
-Selected schemas and tables form a union of exact, case-preserving names. There are no patterns or exclusions. Future tables enter through all or whole-schema selection. Renamed/missing explicit names remain unavailable; recreating a selected name selects the replacement object. Scope is name-based.
+Routine descriptions include exact identity arguments, source, language, volatility and security mode; aggregates include their transition/state and combination metadata. Extension membership is descriptive. Types include enums, domains, composites, ranges, multiranges, arrays, table-row types and pseudo-types. Sequences expose configuration and owner-table/column metadata; ordinary qualified queries may read sequence state, but must not advance it. Definitions and foreign-key endpoints are returned without requiring row access or recursively fetching dependencies.
 
-Agent catalog tools apply saved scope and role privileges in parameterized SQL before C-collated keyset pagination. The user's scope picker can inspect the role's full accessible application catalog. Relations readable through table-level or column-level SELECT grants are discoverable. Each page uses one relation query, with no per-relation inspection. Descriptions expose actual type names, columns, keys and visible foreign-key endpoints; they omit expressions and defaults. There are no `supported` or `reason` fields.
-
-Scope applies to direct schema-qualified relation references, including views, materialized views and foreign tables. PostgreSQL owns indirect dependencies, partitions, ordinary inheritance, RLS and functions; these are not recursively restricted by saved scope. This is a convenience boundary on direct references, not database-enforced isolation against routines or views. `pg_*` schemas and `information_schema` remain excluded even in `all` scope. An empty selection permits no direct relations but still permits relation-free queries and trusted functions.
-
-Authenticated cursors bind version, profile ID/revision, schema filter, position, and process invalidation epoch. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600 and constraints at 4096 entries, with deadlines and encoded-size accounting. Metadata shares the profile result-byte cap.
+Authenticated cursors bind version, tool, profile ID/revision, schema/kind filters, position, and process invalidation epoch. Object ordering uses C-collated schema/name/kind followed by OID to distinguish overloads without embedding unbounded signatures in cursors. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600, existing key/relationship collections at 4096 and combined new metadata collections at 4096 entries, with incremental byte accounting, deadlines and final encoded-size accounting. Oversized definitions fail with RESOURCE_LIMIT without partial output. Metadata shares the profile result-byte cap.
 
 ## 8. Database transport and connection management
 
@@ -379,7 +378,7 @@ win. Sixteen pools of eight connections permit at most 128 pooled connections;
 only 32 operations are admitted at once. PostgreSQL statement timeout uses the
 profile budget, while lock timeout remains one second.
 
-Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache connections, never authorization. PostgreSQL statement and description caches are disabled. Successful operations roll back and run `DISCARD ALL` before pool reuse; cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
+Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache account approval only while physical connections remain. PostgreSQL still enforces privileges on each executed operation. PostgreSQL statement and description caches are disabled. Successful operations roll back and run `DISCARD ALL` before pool reuse; cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
 
 Rollback has an independent two-second budget. Uncertain connections are discarded; cleanup failure cannot return success. Deliberate byte truncation closes the connection before returning a complete bounded result instead of draining unread rows. No executing query is automatically retried. Driver cleanup finishes before the caller releases its state lease.
 
@@ -387,24 +386,28 @@ Every PostgreSQL connection, including readiness and catalog connections, caps m
 
 ## 9. Read-only PostgreSQL execution
 
-Data Mate is a bounded PostgreSQL reader. It checks one read statement and direct relation scope, executes the original SQL with bound values, and leaves SQL semantics to PostgreSQL.
+Data Mate is a bounded PostgreSQL reader. The guard checks read statement kinds and explicit relation schemas; PostgreSQL owns expression semantics and privilege enforcement.
 
-### 9.1 Account and server trust
+### 9.1 Account admission and server trust
 
-Operators provision a dedicated non-owner read-only account with CONNECT, schema USAGE and SELECT on intended relations/columns. Data Mate never grants privileges and does not audit ownership, role memberships, PUBLIC grants or function implementations. Diagnostics verify transaction read-only state, not account safety. Every operation explicitly starts READ ONLY regardless of account defaults.
+Every confirmed add/edit, including unchanged and alias-only edits, requires a live account audit before publication. The service resolves candidate credentials and confirmed SSH pins in memory, releases state leases before network work, and uses the existing bounded mutation deadline plus the profile deadline. Failed validation preserves profiles, ciphertext and known hosts. Publication rechecks revision and cancellation. Removal and passive listing need no database access. Validation failures use safe database error codes through the private management reply.
 
-Database-installed routines, extensions, views, types, operators, indexes and RLS policies are trusted configuration. PostgreSQL applies normal grants, view-owner rules and RLS, including partitioned tables. Functions can access data indirectly beyond saved scope. Read-only transactions prevent ordinary database mutations but are not a sandbox for arbitrary server-side code or external side effects; see [PostgreSQL transaction semantics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
+The shared auditor inspects the authenticated role, inherited privileges, PUBLIC grants, and roles reachable through SET ROLE. It rejects superuser/CREATEROLE/CREATEDB/replication capabilities, membership administration, persistent ownership, database/schema CREATE, table and column write privileges (including version-supported MAINTAIN), sequence USAGE/UPDATE, large-object UPDATE, ALTER SYSTEM grants, and predefined write/file-write/program-execution capabilities. Persistent object inspection covers the connected database; role capabilities are cluster-wide. It never attempts mutations or connects to other databases. TEMP and the default PUBLIC UPDATE on pg_settings are permitted because the latter implements session settings, not persistent relation writes. Account defaults and routine volatility are not safety certificates.
+
+New pools remain lazy. Their first physical connection is audited before use; concurrent openers share that validation. Approval is published only after rollback/reset and remains valid while any physical connection survives, including idle connections. Waiting requests and in-progress dials do not retain approval. Observing the final disconnection clears approval even if the pool object survives. Invalidation, retirement, idle eviction and shutdown also clear it; stale completions cannot approve replacement pools. Failure wakes waiters and permits a fresh retry. Explicit db test and add/edit validation always use independent short-lived connections, never pool approval. No approval is persisted and no privilege audit occurs per query.
+
+Administrators can change grants while a pool remains connected; fresh validation detects those changes. Every operation explicitly begins READ ONLY and verifies transaction state and identity regardless of cached approval or account defaults. PostgreSQL prevents ordinary persistent writes. The server, administrator, installed code and external capabilities remain trusted: read-only transactions are not a sandbox for arbitrary routines or external connections. See [PostgreSQL transaction semantics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
 
 ### 9.2 Query guard
 
-The pinned native scanner bounds tokens and delimiter nesting before parsing. The AST walk bounds messages/depth, permits one SELECT-family statement (`SELECT`, `VALUES`, `TABLE`), rejects modifying CTEs, SELECT INTO and locking clauses, and checks all direct relation references. Transaction/session/utility commands and multi-statements are rejected. CTE visibility follows lexical scopes, including recursion and nested shadowing. Physical relations require explicit schema names; cross-database and system-schema references are rejected.
+The pinned native scanner bounds tokens and delimiter nesting before parsing; the AST walk bounds messages/depth. Permit one SELECT-family statement (`SELECT`, `VALUES`, `TABLE`), SHOW, or EXPLAIN (including ANALYZE) of a permitted SELECT-family statement. Reject modifying CTEs, SELECT INTO, locking clauses, multiple statements, transaction control, CALL, DO and COPY. CTE names follow lexical scopes; physical relations require schema qualification. PostgreSQL validates database qualifiers. System schemas are allowed.
 
-There is no expression/type/function/index allowlist or SQL emitter. Normal PostgreSQL joins, windows, recursive CTEs, correlated/lateral queries, set operations, arrays, casts, custom operators and functions pass through to PostgreSQL. Session `search_path` starts as `pg_catalog`, with `standard_conforming_strings=on` to align server string parsing with the native guard. There are no semantic manifests, catalog fingerprints, hierarchy snapshots or explicit authorization locks.
+Direct and indirect application/extension routines, aggregates, windows, sampling methods, casts and operators follow PostgreSQL resolution and privileges. There are no routine-origin/OID checks, overload blacklists, semantic manifests, SQL rewriting or routine-body audits. Session search_path remains pg_catalog; qualify application routine names explicitly. Keep standard_conforming_strings=on so the native parser and server agree on string syntax.
 
 ### 9.3 Execution
 
 1. Validate the current profile, JSON parameters and bounded query guard under the existing state lease.
-2. Admit work, acquire a connection, begin READ ONLY READ COMMITTED, set local timeouts and verify transaction state/identity.
+2. Admit work, acquire an approved pool connection (auditing a new pool generation), begin READ ONLY READ COMMITTED, set local timeouts and verify transaction state/identity.
 3. Parse/describe the original SQL through PostgreSQL's extended protocol with unspecified parameter OIDs. Check the server's parameter count.
 4. Fetch only result type names and array/domain dependencies in one bounded recursive catalog query. This is decoding metadata, not a semantic audit.
 5. Bind values separately and execute the same prepared statement with text-format results. Preserve labels, including duplicates, and PostgreSQL's query semantics; do not rewrite SQL or LIMIT.
@@ -415,7 +418,7 @@ There is no expression/type/function/index allowlist or SQL emitter. Normal Post
 
 | Resource              | Bound                                               |
 | --------------------- | --------------------------------------------------- |
-| Query deadline        | Profile default 10 seconds, maximum 30 seconds      |
+| Query deadline        | Profile default 60 seconds, maximum five minutes    |
 | Lock wait             | 1 second                                            |
 | Returned rows         | Profile default 500, maximum 5000; caller may lower |
 | Result envelope       | Profile cap, at most 1 MiB                          |
@@ -437,16 +440,18 @@ PostgreSQL arrays become nested JSON arrays, retaining null elements, multidimen
 
 ### 10.1 Tools and results
 
-Four tools expose strict embedded [input/output schemas](../internal/contracts/schemas):
+Six tools expose strict embedded [input/output schemas](../internal/contracts/schemas):
 
-| Tool               | Input                                                              | Output                                                              |
-| ------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `list_connections` | Empty object                                                       | Aliases, drivers, database labels, and configured scope             |
-| `list_tables`      | `connection`; optional `schema`, `cursor`, `page_size`             | Visible table names, kinds, support labels, and next cursor         |
-| `describe_table`   | `connection`, `schema`, `table`                                    | Columns, actual types, nullability, keys, and visible relationships |
-| `query`            | `connection`, `sql`; optional JSON-value `parameters`, `row_limit` | Columns, rows, row count, truncation, and elapsed time              |
+| Tool               | Input                                                                                   | Output                                                                      |
+| ------------------ | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `list_connections` | Empty object                                                                            | Aliases, drivers, and database labels                                       |
+| `list_tables`      | `connection`; optional `schema`, `cursor`, `page_size`                                  | Visible table names, kinds, and next cursor                                 |
+| `describe_table`   | `connection`, `schema`, `table`                                                         | Columns, expressions, keys, relationships, indexes, triggers, views and RLS |
+| `list_objects`     | `connection`; optional `kind`, `schema`, `cursor`, `page_size`                          | Routine/type/sequence identities, extension membership and next cursor      |
+| `describe_object`  | `connection`, `kind`, `schema`, `name`; `identity_arguments` required only for routines | Identity plus kind-specific routine/type/sequence metadata                  |
+| `query`            | `connection`, `sql`; optional JSON-value `parameters`, `row_limit`                      | Columns, rows, row count, truncation, and elapsed time                      |
 
-All tools declare read-only intent, enforced server-side. Inputs reject additional fields. No tool accepts connection overrides, credentials, DSNs, hosts, or arbitrary file paths; no tool modifies profiles or broadens scope. Schema validation alone does not authorize execution. Connection listing reads only the public profile snapshot and never loads credentials.
+All tools declare read-only intent, enforced server-side. Inputs reject additional fields. No tool accepts connection overrides, credentials, DSNs, hosts, or arbitrary file paths; no tool modifies profiles or grants privileges. Schema validation alone does not authorize execution. Connection listing reads only the public profile snapshot and never loads credentials.
 
 Each handler calls the shared service manager and prepares both `structuredContent` and identical compact JSON text under the state lease. The combined envelope must fit one MiB and the lower profile cap for database tools. Serialization/output after preparation holds no state lease. A session never caches successful live authorization.
 
@@ -463,9 +468,9 @@ Example structured query result:
 }
 ```
 
-Tool failures use `isError` and a safe `{code,message,retryable,sqlstate?}` object. Codes include `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `SCOPE_DENIED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, `RESOURCE_LIMIT`, `READ_ONLY_VIOLATION`, `PERMISSION_DENIED`, `QUERY_FAILED`, `STALE_CURSOR`, `INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`. Unexpected internal failures become `SERVICE_UNAVAILABLE`; invalid tool arguments and protocol errors remain JSON-RPC errors. Raw DSNs, parameters, upstream PostgreSQL details/hints, and decrypted secrets never enter diagnostics.
+Tool failures use `isError` and a safe `{code,message,retryable,sqlstate?}` object. Codes include `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, `RESOURCE_LIMIT`, `READ_ONLY_VIOLATION`, `PERMISSION_DENIED`, `QUERY_FAILED`, `STALE_CURSOR`, `INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`. Unexpected internal failures become `SERVICE_UNAVAILABLE`; invalid tool arguments and protocol errors remain JSON-RPC errors. Raw DSNs, parameters, upstream PostgreSQL details/hints, and decrypted secrets never enter diagnostics.
 
-Database text is untrusted data, not operational instruction. Scope controls retrieval; it cannot make permitted text immune to prompt injection in the consuming agent.
+Database text is untrusted data, not operational instruction. Database privileges control retrieval; permitted text can still contain prompt injection aimed at the consuming agent.
 
 ### 10.2 Sessions, framing, and cancellation
 
@@ -481,7 +486,7 @@ The bridge owns and closes its streams. Cancellable file reads allow service dis
 
 ### 11.1 Build and validation commands
 
-`VERSION` is the sole checked-in application version. Build metadata may add revision and dirty-state information. The pinned toolchain in `go.mod` and `scripts/common.sh`, native cgo, and the macOS SDK are required. Dependency checks provide guidance rather than installing system software. Docker is needed only for explicit integration tests.
+`VERSION` is the sole checked-in application version. Build metadata may add revision and dirty-state information. The public `version` command omits the revision and appends ` (dirty)` only when the build dirty state is true. The pinned toolchain in `go.mod` and `scripts/common.sh`, native cgo, and the macOS SDK or Linux C compiler/libc development headers are required. Dependency checks provide guidance rather than installing system software. Docker is needed only for explicit integration tests.
 
 | Target                     | Contract                                                                                                       |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -524,20 +529,20 @@ Tests live beside the owning Go packages; reusable fixtures and public examples 
 | Area                    | Contract coverage                                                                                                                                                              |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Configuration and vault | Strict decoding, SQLite constraints/recovery, atomic profile/bundle changes, revisions, preview races, Tink tamper/context rejection, use limits, and one-keyset ownership     |
-| CLI                     | Hidden input, cancellation, non-TTY behavior, scope selection, JSON/exit contracts, and multi-profile diagnostics                                                              |
+| CLI                     | Hidden input, cancellation, non-TTY behavior, JSON/exit contracts, and multi-profile diagnostics                                                                               |
 | Lifecycle and agents    | Independent checkouts, management-only start, explicit MCP enablement, registration ownership, start/stop, locked/ready keysets, stale/rebuilt identities, and cleanup retries |
 | MCP and resources       | Initialization, schemas, independent sessions, frame/queue limits, disconnect/cancellation, bounded output, and redaction                                                      |
 | Management and secrets  | Interface separation, peer identity, credential patch semantics, no secret-return endpoint, cancellation without late publication, and no OS access after unlock               |
-| PostgreSQL              | Broad read SQL, direct scope, server write/permission rejection, codecs, truncation, rollback/reset and connection disposal                                                    |
+| PostgreSQL              | Broad read SQL, schema qualification, cached account admission, server write/permission rejection, codecs, truncation, rollback/reset and connection disposal                  |
 | Ownership and purge     | Symlink/identity protection, state-reader draining, tombstones/receipts, exact-key deletion, and preservation of unrelated files                                               |
 
-Bounded fuzz seeds exercise decoding and query guard. Race tests cover concurrent behavior. CI uses `macos-15` jobs for Format and lint, Test and build, and Race tests, each with `make setup`; Docker integration is excluded.
+Bounded fuzz seeds exercise decoding and query guard. Race tests cover concurrent behavior. CI uses `ubuntu-latest` and `macos-15` jobs for Format and lint, Test and build, and Race tests, each with `make setup`; Docker integration is excluded.
 
 `make test-integration DB_DRIVER=postgres` owns its Docker containers, networks, credentials, and synthetic data for both PostgreSQL 16 and 18. `DB_IMAGE=postgres:16` or `DB_IMAGE=postgres:18` selects one entry. Image overrides still face version and semantic-readiness checks. The harness never accepts an arbitrary existing database URL and tears down on success, failure, and interruption. Owned local SSH/SOCKS5 fixtures exercise transport paths.
 
 Native Keychain, launchd, registration, and agent round-trip checks have explicit opt-in commands in the README. Those fixtures exercise the centralized storage design; their presence alone does not establish a successful run. Native service fixtures isolate client configuration; actual agent workflows use authenticated clients and unique owned registrations in their current user configuration, with an owned Docker database and temporary installation. These checks cover boundaries that fakes cannot prove. Test availability or a documented acceptance scenario is not a claim of a completed native/integration run; results and environment-dependent skips belong in validation reports.
 
-The end-to-end acceptance workflow is local installation, profile creation through the management-only service, optional scope narrowing, `mcp start`, and independently launched Codex/Claude Code sessions using the four tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, fresh scope enforcement, bounded read-only execution, and ownership-safe default uninstall/purge across the supported PostgreSQL matrix.
+The end-to-end acceptance workflow is local installation, profile creation through the management-only service, `mcp start`, and independently launched Codex/Claude Code sessions using the six tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, pool-lifetime account validation, bounded read-only execution, and ownership-safe default uninstall/purge across the supported PostgreSQL matrix.
 
 ## 13. Production distribution and terminal integration
 
@@ -597,9 +602,9 @@ The bootstrap is trusted through the documented HTTPS repository URL. Release do
 
 Release-author tooling is development-only Go/Bash under `internal/devtools` and `scripts`. The `bump-major/minor/patch` Make targets update only `VERSION` and the dated changelog; `release-commit` previews and confirms staging, committing and pushing those files from a non-main/master branch, using `release data-mate: X.Y.Z`. The shared `release-pr` instructions live in `.agents/skills/release-pr`, with `.claude/skills/release-pr` symlinked there. `release-pr` operates on remote refs and opens or locates a PR into `main` without Git mutations. `make tag` requires clean current `main`, matching release notes, no conflicting release tag, and an interactive CAPTCHA before creating and pushing an annotated stable tag. Failed pushes preserve the local commit/tag for explicit recovery.
 
-The release workflow triggers on version-shaped tag pushes, then enforces strict stable version syntax, agreement with `VERSION`, nonempty matching changelog notes, and membership in `main` history. Tag pushes are the only trigger; failed runs can be retried without manual dispatch. Subsequent jobs check out the validated commit SHA. Ordered format/lint/unit/race/build checks precede signing; signing uses the tag-restricted `release` environment and ephemeral Keychain. Native candidate trust/tamper regression and separate fresh macOS 15 arm64 acceptance precede automatic publication. Per-tag workflow concurrency prevents competing runs for the same release.
+The release workflow triggers on version-shaped tag pushes, then enforces strict stable version syntax, agreement with `VERSION`, nonempty matching changelog notes, and membership in `main` history. Tag pushes are the only trigger; failed runs can be retried without manual dispatch. Subsequent jobs check out the validated commit SHA. Format/lint/unit/race/build checks run in the separate CI workflow; the release workflow does not add those test stages. Signing uses the tag-restricted `release` environment and ephemeral Keychain. Native candidate trust/tamper regression and separate fresh macOS 15 arm64 acceptance precede automatic publication. Per-tag workflow concurrency prevents competing runs for the same release.
 
-Only the publication job has repository contents-write permission. It refuses existing releases, creates a draft, uploads exactly the four distribution assets, checks their sizes and SHA-256 digests against GitHub's asset records, and rechecks the remote tag before publishing. Signing diagnostics stay in the retained workflow artifact bundle. Failures before publication leave drafts unpublished; retries require inspecting state and, if rebuilding, explicitly deleting only the unpublished draft while retaining its tag. Published releases are never overwritten or retagged. Administrators maintain the immutable-release setting; the workflow token has no administration permission to inspect or change it, and publication verifies the resulting release's immutable flag.
+Only the publication job has repository contents-write permission. It refuses existing releases, creates a draft, uploads exactly the platform distribution assets listed in section 13.9, checks their sizes and SHA-256 digests against GitHub's asset records, and rechecks the remote tag before publishing. Signing diagnostics stay in the retained workflow artifact bundle. Failures before publication leave drafts unpublished; retries require inspecting state and, if rebuilding, explicitly deleting only the unpublished draft while retaining its tag. Published releases are never overwritten or retagged. Administrators maintain the immutable-release setting; the workflow token has no administration permission to inspect or change it, and publication verifies the resulting release's immutable flag.
 
 ### 13.4 One install and upgrade engine
 
@@ -624,10 +629,9 @@ Use the pinned [Cobra completion support](https://cobra.dev/docs/how-to-guides/s
 | `data-mate `                                          | Public commands for the active environment           |
 | `data-mate db `                                       | Database subcommands and aliases                     |
 | `data-mate db edit `                                  | Saved connection aliases from the selected root      |
-| `data-mate db scope analytics --`                     | Valid flags for that command                         |
 | A flag with a finite value set or explicit local path | Allowed values or appropriately filtered local paths |
 
-Alias completion also applies to scope, remove/rm, and test. It uses the existing passive nonsecret store reader against the fixed production root or the development root selected by its default/explicit `--root`, and never starts a service, creates files, accesses Keychain, or queries PostgreSQL. Bound the lookup to 100 ms, 256 candidates, and 64 KiB of output; unavailable, locked, missing, or invalid state yields no dynamic candidates without terminal diagnostics. Static command/flag completion remains available. Disable arbitrary filename fallback for alias and secret-valued arguments. Omit hidden service/bridge/install commands and suppress schema/table catalog completion because that would require live database access. Escape shell metacharacters and omit candidates containing control characters; a stored alias is data, never shell code.
+Alias completion also applies to remove/rm, test, and describe. It uses the existing passive nonsecret store reader against the fixed production root or the development root selected by its default/explicit `--root`, and never starts a service, creates files, accesses Keychain, or queries PostgreSQL. Bound the lookup to 100 ms, 256 candidates, and 64 KiB of output; unavailable, locked, missing, or invalid state yields no dynamic candidates without terminal diagnostics. Static command/flag completion remains available. Disable arbitrary filename fallback for alias and secret-valued arguments. Omit hidden service/bridge/install commands and suppress schema catalog completion because that would require live database access. Escape shell metacharacters and omit candidates containing control characters; a stored alias is data, never shell code.
 
 Install generated scripts and small shell loaders under the owned `shell/` directory. By default, the installer configures the user's supported login shell with one uniquely marked block sourcing its absolute loader path, and records the exact startup file and block fingerprint. A bootstrap `--no-shell` option installs the executable/completion assets and prints manual activation instructions without modifying shell startup files. Unsupported shells receive manual PATH guidance. Installer output distinguishes successful binary installation from incomplete shell setup.
 
@@ -637,7 +641,7 @@ Only edit owned regular startup files, preserve unrelated bytes and permissions,
 
 ### 13.6 First-wins service exclusion
 
-Allow one Data Mate service per macOS user across the fixed production installation and development checkouts. Management-only services also occupy this slot: allowing both environments to hold credentials and perform database work would undermine the PRD's service exclusion. Passive list/status/completion and filesystem-only install operations remain available in the other environment.
+Allow one Data Mate service per OS user across the fixed production installation and development checkouts. Management-only services also occupy this slot: allowing both environments to hold credentials and perform database work would undermine the PRD's service exclusion. Passive list/status/completion and filesystem-only install operations remain available in the other environment.
 
 Use one fixed launchd label, `com.data-mate.service`, in the existing per-user GUI domain. Launchd registration arbitrates concurrent bootstraps; retain per-root lifecycle locks for root mutations. Every job inspection verifies the owning root, installation UUID, environment, executable binding, and ProgramArguments before reuse or cleanup. Only the process launched under that verified job may serve requests; direct invocation of an internal service command cannot bypass exclusion. There is no shared profile store or fallback to the winner's credentials.
 
@@ -648,6 +652,8 @@ Agent registrations remain installation-owned. After an explicit stop, an unchan
 ### 13.7 Complete terminal uninstall and recovery
 
 Production uninstall uses the complete recorded distribution inventory for the fixed root, including previously recorded agent configuration locations, shell startup blocks, symlinks, executables, staging artifacts, and owned runtime directories. Include verified legacy custom-root records only for recovery as described in section 13.2; cleanup accepts no caller-selected root. Preview those targets before confirmation. Never infer ownership from a path prefix, remove a user's whole shell/agent configuration file, or touch a remote database.
+
+For standalone installed artifacts, the validated recorded path grants deletion authority. Remove the current user-owned regular file or symlink at that path even when its contents, permissions, inode, device number, or symlink target differ from installation time. Unlink the entry without opening or following it; retain safe parent-directory and installation-identity checks. A changed directory at a recorded directory path can be removed only if it is an owned, safe, empty directory. Never recursively delete unrelated contents or follow a substituted parent symlink. Historical file identity remains relevant to installation/publication recovery, not authorization to remove installed artifacts. Cleanup-helper execution still requires verified recorded executable bytes and native signature verification, without depending on a previous mount's device or inode number.
 
 | Artifact                                                                                                                                                                | Default uninstall                   | `--purge`                                                        |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------- |
@@ -661,11 +667,11 @@ Recover/close SQLite before cleanup; preserve a journal needed for recovery rath
 
 Run cleanup from a verified copy of the installed executable in a private `/tmp` helper directory so the installed binary can be removed without Go or a download. Record helper ownership before use. Preserve the binary until external cleanup has succeeded where possible. On failure, retain only the authority and helper needed to retry, print the exact retry command and remaining targets, and exit nonzero. On success the helper removes its own file/directory and verifies their absence before reporting completion; retained retry helpers are outstanding cleanup, never a successful no-residue purge.
 
-Terminal production purge uses an owned `~/.data-mate-cleanup.json` receipt and `.data-mate-cleanup.lock` only while removing the data root and its owned empty parents. The receipt retains the verified helper and exact directory identities, blocks installation, and is removed last after helper cleanup. These files resolve from the OS account home and are included in managed cleanup.
+Terminal production purge uses an owned `~/.data-mate-cleanup.json` receipt and `.data-mate-cleanup.lock` only while removing the data root and its owned empty parents. The receipt retains the verified helper and recorded directory paths, blocks installation, and is removed last after helper cleanup. These files resolve from the OS account home and are included in managed cleanup.
 
 Extend the existing tombstone/terminal-receipt protocol to the fixed production installation and any verified legacy cleanup records: acquire the distribution lease, affected lifecycle leases in canonical path order, then state leases; record cleanup intent before the first deletion, reject install/upgrade/start while cleanup is incomplete, delete each exact Keychain item before discarding its root metadata, and remove the top-level receipt last. If default uninstall has already removed the command, a verified installer bootstrap option `--uninstall --purge` obtains a temporary helper and resumes cleanup from the fixed-root inventory without reinstalling runtime artifacts or accepting `--root`.
 
-Shell cleanup removes only the recorded unchanged block. Preserve a modified block, symlink, registration, or file and report the ownership conflict as incomplete cleanup with instructions to reconcile it and retry. Remove a startup file created by the installer only if no unrelated content remains. Do not delete shared shell completion caches or rewrite an already-running shell's memory; the generated loader creates no persistent shared cache. Verification accounts for every recorded target, including staging and helper files, before returning success.
+Shared shell configuration cleanup removes only the recorded unchanged block. Preserve a modified block or agent registration, or a substituted shared configuration symlink, and report the conflict as incomplete cleanup with instructions to reconcile it and retry. This shared-file rule does not protect modified standalone Data Mate artifacts from uninstall. Remove a startup file created by the installer only if no unrelated content remains. Do not delete shared shell completion caches or rewrite an already-running shell's memory; the generated loader creates no persistent shared cache. Verification accounts for every recorded target, including staging and helper files, before returning success.
 
 ### 13.8 Implementation acceptance boundaries
 
@@ -681,3 +687,19 @@ Extend existing CLI, config, lifecycle, agent, and installed-binary regressions 
 Run the repository's ordered code checks when implementation lands. The release workflow builds/signs/notarizes native artifacts and validates the same candidate on a separate fresh macOS 15 arm64 runner, using system tools without a Go setup or build. Acceptance verifies checksums, publisher/notarization and compiled metadata before executing installation, passive listing/status, Bash/zsh completion, same-version reinstall, credential-preserving uninstall, reinstall, and purge. It uses the disposable runner's real account home; no production root override is introduced. The acceptance script refuses ordinary workstation execution.
 
 GitHub-hosted images contain developer tools, so this automated publication gate is narrower than a physically toolchain-free host test. Interactive Keychain access across signed upgrades, actual agents, and PostgreSQL integrations remain isolated opt-in checks; passing automated acceptance does not claim those checks passed. Keep PostgreSQL 16/18 integration local and opt-in as before. Retain workflow signing diagnostics for failed-run investigation, and report native/hosted checks as unverified until an actual successful run. Update README usage and changelog only as behaviors become available.
+
+### 13.9 Linux distribution and release operations
+
+Linux supports x86_64 with glibc 2.39 or newer, using Ubuntu 24.04 as the build baseline. Source builds remain native Go/cgo. Hosted Linux jobs use `ubuntu-latest`; release construction builds inside the digest-pinned Ubuntu 24.04 image in `scripts/release-linux-build.sh`, using the pinned Go toolchain and downloaded module cache. The builder has no signing key or network access during compilation. Production requires Bash, curl, core system utilities and OpenSSL for bootstrap verification, not Go or a compiler. Runtime database/service operations require a systemd user manager and persistent Secret Service keyring. zsh is optional; both completion-generation commands remain available.
+
+The Linux service is a transient `com.data-mate.service` user unit, with `Type=exec`, `Restart=no`, private umask, a five-second stop timeout, and no login activation. Systemd arbitrates competing starts with fail-on-existing semantics. The owned `service.unit.json` descriptor replaces the macOS plist. Structured unit properties, exact arguments, installation identity, executable and nonce must match before admission or cleanup. Peer authentication uses `SO_PEERCRED` and hashes the executable handle under `/proc/<pid>/exe`. Private runtime sockets live under `/tmp`; production/development root and ownership rules otherwise remain the same. No system-wide service or administrator access is required for application operation.
+
+Keep the existing macOS assets (`install.sh`, `data-mate_darwin_arm64`, `release.txt`, `SHA256SUMS`) and the exact three-entry macOS checksum manifest so published clients can upgrade. Linux adds `data-mate_linux_amd64`, `data-mate_linux_amd64.sig`, `release_linux_amd64.txt`, and `SHA256SUMS_linux_amd64`. The Linux checksum manifest contains the installer, binary, signature and Linux metadata. Metadata retains format 1, version/platform/store/inventory fields, replacing `minimum_macos` with `minimum_glibc` only for Linux. Acquisition selects the host platform and pins all downloads to the resolved stable tag.
+
+Linux executables carry a detached RSA-3072 PKCS#1 v1.5/SHA-256 publisher signature. The public key is pinned in the executable and bootstrap, never trusted from a downloaded release. Verify the signature before executing a candidate; then compare its compiled metadata with the downloaded metadata. Native verification also checks ELF architecture, supported native libraries, absent custom library search paths and host glibc. Installation publishes `bin/data-mate.sig` transactionally with the executable. Cleanup helpers carry their own recorded signature sidecar; rollback, retained-state reinstall and terminal purge preserve or remove both under the existing inventory protocol.
+
+The protected GitHub `release` environment contains `LINUX_SIGNING_PRIVATE_KEY` alongside the existing Apple secrets. The Linux private key remains only in that secret after provisioning; signing jobs materialize it in a private temporary directory and delete it on exit. The public key and its SHA-256 fingerprint may be retained. Do not rotate the key casually: already installed clients pin the previous publisher, so rotation requires an explicitly designed signed transition.
+
+The release workflow retains validate → signed-artifacts → acceptance → publish. Validation and publication run on `ubuntu-latest`; only signed-artifacts and acceptance have platform matrices. Both candidates must pass the existing native candidate/tamper test and the existing fresh-runner install/list/status/completion/reinstall/uninstall/purge acceptance before one immutable release is published. macOS additionally retains notarization checks; Linux uses Bash and executes zsh only if installed. No unit, race, PostgreSQL, keyring, service-integration or extra acceptance suites are added to this workflow. The ordinary CI workflow retains its three job groups on both platforms. Each group has an aggregate gate with the original required-check name, preserving existing main-branch protection while requiring both platform jobs to succeed.
+
+Local native Linux provider checks use a private D-Bus/Keyring fixture with synthetic credentials; service checks require explicit opt-in and a vacant service slot. Their success does not establish hosted release success, actual agent interoperability or PostgreSQL integration results. Preparation leaves VERSION, Git commits/tags and publication unchanged until explicitly requested.

@@ -132,7 +132,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 		t.Fatal(e)
 	}
 	// A durable launch intent alone cannot authorize direct daemon invocation.
-	rejectedLaunch := &fakeLaunch{job: job{true, os.Getpid() + 1, filepath.Join(c.Root.Path, "service.plist"), rec.args()}}
+	rejectedLaunch := &fakeLaunch{job: job{true, os.Getpid() + 1, filepath.Join(c.Root.Path, config.ServiceFile()), rec.args()}}
 	if err := serve(t.Context(), c.Root, c.Build, rec.Nonce, noKeys{}, rejectedLaunch); !errors.Is(err, ErrConflict) {
 		t.Fatal("direct service bypassed launchd admission", err)
 	}
@@ -500,7 +500,7 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 		done <- m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
 			close(started)
 			<-finish
-			if a.Profile.Scope.Mode != "all" {
+			if a.Profile.Connection.Port != 1 {
 				return ErrState
 			}
 			return nil
@@ -519,10 +519,10 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	profiles.Connections[0].Scope = config.Scope{Mode: "selected", Schemas: []string{}, Tables: []config.Table{}}
+	profiles.Connections[0].Connection.Port = 2
 	putProfiles(t, s, profiles)
 	if err := m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
-		if a.Profile.Scope.Mode != "selected" {
+		if a.Profile.Connection.Port != 2 {
 			return ErrState
 		}
 		return nil
@@ -557,14 +557,14 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 	queued := make(chan error, 1)
 	go func() {
 		queued <- m.Work(t.Context(), "fixture", func(_ context.Context, _ database.Driver, a database.Access) error {
-			if a.Profile.Scope.Mode != "all" {
+			if a.Profile.Connection.Port != 1 {
 				return ErrState
 			}
 			return nil
 		})
 	}()
 	waitFor(t, func() bool { return len(m.waiting) == 1 })
-	profiles.Connections[0].Scope = config.Scope{Mode: "all"}
+	profiles.Connections[0].Connection.Port = 1
 	putProfiles(t, s, profiles)
 	for range cap(m.waiting) - 1 {
 		m.waiting <- struct{}{}

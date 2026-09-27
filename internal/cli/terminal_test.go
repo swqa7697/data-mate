@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/testsupport/transportfixture"
+	"golang.org/x/sys/unix"
 )
 
 // Real PTYs are necessary for hidden input, raw-mode restoration and cancellation;
@@ -24,9 +25,9 @@ func TestConnectionTerminal(t *testing.T) {
 		keys := &testKeys{}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		fixture := &fixtureDatabase{browseError: mode == "scope-fail"}
+		fixture := &fixtureDatabase{}
 		factory := databaseFactory(defaultDatabase)
-		if strings.HasPrefix(mode, "scope") {
+		if strings.HasPrefix(mode, "describe") || strings.HasPrefix(mode, "catalog") || mode == "diagnostics" {
 			factory = func() (cliDatabase, error) { return fixture, nil }
 		}
 		run := func(args ...string) int {
@@ -41,31 +42,109 @@ func TestConnectionTerminal(t *testing.T) {
 			}
 			return ExitCode(err)
 		}
-		if strings.HasPrefix(mode, "scope") {
-			if code := run(append(basicAdd, "--passwordless")...); code != 0 {
-				os.Exit(code)
+		// Extend the same PTY scenario: paging must release the service first,
+		// honor output width/colors, exit on q, and restore modes on cancellation.
+		if strings.HasPrefix(mode, "catalog") {
+			command(t, root, keys, "", 0, append(basicAdd, "--passwordless")...)
+			schema := database.SchemaDescription{Name: "public", Tables: []database.RelationName{}, Enums: []database.CatalogName{{Name: "status"}}, Sequences: []database.CatalogName{{Name: "items_id_seq"}}, Indexes: []database.CatalogName{{Name: "alpha_idx"}}, Functions: []database.CatalogName{{Name: "lookup"}}}
+			for _, name := range []string{"alpha", "beta", "delta", "gamma"} {
+				schema.Tables = append(schema.Tables, database.RelationName{Name: name, Kind: "table"})
 			}
+			schema.Tables = append(schema.Tables, database.RelationName{Name: "report", Kind: "view"})
+			fixture.catalog = []database.SchemaDescription{schema}
+			if mode == "catalog-layout" {
+				for _, variant := range []string{"color", "narrow", "no-color", "empty-no-color", "json"} {
+					columns := uint16(80)
+					if variant == "narrow" {
+						columns = 12
+					}
+					if err := unix.IoctlSetWinsize(int(os.Stdout.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: 40, Col: columns}); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Unsetenv("NO_COLOR"); err != nil {
+						t.Fatal(err)
+					}
+					if variant == "no-color" {
+						t.Setenv("NO_COLOR", "1")
+					}
+					if variant == "empty-no-color" {
+						t.Setenv("NO_COLOR", "")
+					}
+					args := []string{"describe", "analytics", "--no-pager"}
+					if variant == "json" {
+						args = append(args, "--json")
+					}
+					fmt.Println("catalog " + variant)
+					if code := run(args...); code != 0 {
+						t.Fatalf("catalog output: %d", code)
+					}
+					fmt.Println("catalog end")
+				}
+				os.Exit(0)
+			}
+			if mode != "catalog-short" {
+				fixture.catalog[0].Tables = nil
+				for i := 0; i < 1500; i++ {
+					fixture.catalog[0].Tables = append(fixture.catalog[0].Tables, database.RelationName{Name: fmt.Sprintf("item_%04d_%s", i, strings.Repeat("x", 40)), Kind: "table"})
+				}
+			}
+			args := []string{"describe", "analytics"}
+			if mode == "catalog-no-pager" {
+				args = append(args, "--no-pager")
+			}
+			if mode == "catalog-json" {
+				args = append(args, "--json")
+			}
+			code := run(args...)
+			if !fixture.closed {
+				t.Fatal("pager retained management resources")
+			}
+			fmt.Println("catalog done")
+			os.Exit(code)
+		}
+		// Extend the PTY harness because buffered diagnostics cannot verify output
+		// terminal detection, especially when stdin is redirected.
+		if strings.HasPrefix(mode, "describe") {
+			command(t, root, keys, "", 0, append(basicAdd, "--passwordless")...)
 			before := files(t, root)
-			code := run("scope", "analytics")
-			if mode == "scope-mixed" {
-				p := snapshot(t, root).Connections[0]
-				want := config.Scope{Mode: "selected", Schemas: []string{"schema0050"}, Tables: []config.Table{{Schema: "Dot.Schema", Name: "a.b"}, {Schema: "schema0051", Name: "table0050"}}}
-				if code != 0 || !reflect.DeepEqual(p.Scope, want) || len(fixture.requests) != 7 || !fixture.closed {
-					t.Fatalf("lazy mixed picker: %+v requests=%+v code=%d", p.Scope, fixture.requests, code)
-				}
-				for _, selection := range []string{"all", "none"} {
-					if code = run("scope"); code != 0 {
-						os.Exit(code)
-					}
-					scope := snapshot(t, root).Connections[0].Scope
-					if (selection == "all") != scope.ContainsName("future", "new") {
-						t.Fatal("interactive all/none failed")
-					}
-				}
-			} else if !reflect.DeepEqual(before, files(t, root)) {
-				t.Fatal("failed/canceled picker modified state")
+			code := run("describe", "--json")
+			if !reflect.DeepEqual(before, files(t, root)) {
+				t.Fatal("description changed saved state")
+			}
+			if mode == "describe" && (code != 0 || len(fixture.described) != 1) {
+				t.Fatal("description picker did not select profile")
+			}
+			if mode == "describe-cancel" && (code != ExitCancelled || len(fixture.described) != 0) {
+				t.Fatal("canceled description reached database")
 			}
 			os.Exit(code)
+		}
+		if mode == "diagnostics" {
+			for _, alias := range []string{"good", "bad"} {
+				command(t, root, keys, "", 0, "add", "--alias", alias, "--host", "localhost", "--database", "app", "--username", "reader", "--passwordless", "--yes")
+			}
+			for _, output := range []string{"color", "no-color", "empty-no-color", "json"} {
+				switch output {
+				case "no-color":
+					t.Setenv("NO_COLOR", "1")
+				case "empty-no-color":
+					t.Setenv("NO_COLOR", "")
+				default:
+					if err := os.Unsetenv("NO_COLOR"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				args := []string{"test"}
+				if output == "json" {
+					args = append(args, "--json")
+				}
+				fmt.Println("diagnostics " + output)
+				if code := run(args...); code != ExitFailure {
+					t.Fatalf("diagnostics %s exit: %d", output, code)
+				}
+				fmt.Println("diagnostics end")
+			}
+			os.Exit(0)
 		}
 		if strings.HasPrefix(mode, "enroll") {
 			peer := transportfixture.New(t, "ssh", transportfixture.Options{User: "fixture", Password: "synthetic"})

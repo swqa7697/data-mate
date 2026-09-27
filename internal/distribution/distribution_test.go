@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,11 @@ func fixture(t *testing.T) *Engine {
 	candidate := filepath.Join(candidateDir, "candidate")
 	if err := os.WriteFile(candidate, []byte("synthetic executable"), 0700); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "linux" {
+		if err := os.WriteFile(candidate+".sig", make([]byte, 384), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	e := &Engine{Home: home, Root: root, Candidate: candidate, Metadata: Contract("1.0.0"), Shell: "bash", checkInstalled: func(context.Context, string, Metadata) error { return nil }, Verify: func(context.Context, string, Metadata) error { return nil }, Completion: func(string) ([]byte, error) { return []byte("# synthetic completion\n"), nil }}
 	e.Cleanup = func(ctx context.Context, purge bool) error {
@@ -182,7 +188,7 @@ func TestDistributionPublication(t *testing.T) {
 			ID: "936e3468-5b48-4ef2-9a89-964449f06d98", Alias: "retained", Driver: "postgres",
 			CredentialRef: "606f9022-9128-4ab6-bb3f-410d701ef85b",
 			Connection:    config.Connection{Host: "127.0.0.1", Port: 5432, Database: "fixture", Username: "reader"},
-			Transport:     config.Transport{TLS: config.TLS{Mode: "disabled"}}, Scope: config.Scope{Mode: "all"},
+			Transport:     config.Transport{TLS: config.TLS{Mode: "disabled"}},
 		}
 		bundle := config.Ciphertext{Reference: profile.CredentialRef, ConnectionID: profile.ID, Version: 1, Data: []byte{0x01, 0x8f, 0x00, 0xfe, 0x03}}
 		key := config.KeysetMetadata{Account: initial.KeyAccount, Phase: "ready", Fingerprint: strings.Repeat("a", 64), Reserved: 1}
@@ -253,11 +259,65 @@ func TestDistributionPublication(t *testing.T) {
 		}
 		checkState(false)
 		source := e.Candidate
+		// Regression ladder 2: uninstall owns these recorded paths even after
+		// edits, replacement, chmod, hard links, retargeting or device renumbering.
+		// Reuse both retention and purge to cover the real config cleanup boundary.
+		sentinel := filepath.Join(e.Home, "unrelated")
+		if err = os.WriteFile(sentinel, []byte("preserve this target"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		modifyArtifacts := func(purge bool) {
+			t.Helper()
+			receipt, err := e.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, a := range receipt.Artifacts {
+				if err = os.Remove(a.Path); err != nil {
+					t.Fatal(err)
+				}
+				switch {
+				case a.File.Target != "" || (purge && a.Path == config.ExecutablePath(e.Root)):
+					err = os.Symlink(sentinel, a.Path)
+				case strings.HasSuffix(a.Path, "completion.zsh"):
+					err = os.Link(sentinel, a.Path)
+				case strings.HasSuffix(a.Path, "loader.bash"):
+					// An already removed artifact must not prevent retry.
+				default:
+					err = os.WriteFile(a.Path, []byte("edited artifact"), 0000)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				receipt.Artifacts[i].File.Device++
+				receipt.Artifacts[i].File.Inode++
+			}
+			for i := range receipt.Directories {
+				receipt.Directories[i].Device++
+				receipt.Directories[i].Inode++
+			}
+			receipt.Helper.File.Device++
+			receipt.Helper.File.Inode++
+			if err = e.save(receipt); err != nil {
+				t.Fatal(err)
+			}
+			if retry, err := prepareHelper(t, e); err != nil || retry != receipt.Helper.Path {
+				t.Fatal("unchanged helper rejected after remount", err)
+			}
+		}
+		checkSentinel := func() {
+			t.Helper()
+			raw, err := os.ReadFile(sentinel)
+			if err != nil || string(raw) != "preserve this target" {
+				t.Fatal("cleanup followed a symlink or modified a hard-link target", err)
+			}
+		}
 		helper, err := prepareHelper(t, e)
 		if err != nil {
 			t.Fatal(err)
 		}
 		e.Candidate = helper
+		modifyArtifacts(false)
 		if err = e.Uninstall(t.Context(), false); err != nil {
 			t.Fatal("uninstall", err)
 		}
@@ -268,6 +328,7 @@ func TestDistributionPublication(t *testing.T) {
 			t.Fatal("uninstall replaced credential namespace")
 		}
 		checkState(false)
+		checkSentinel()
 		e.Candidate = source
 		if err = e.Install(t.Context()); err != nil {
 			t.Fatal("retained reinstall", err)
@@ -278,12 +339,14 @@ func TestDistributionPublication(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.Candidate = helper
+		modifyArtifacts(true)
 		if err = e.Uninstall(t.Context(), true); err != nil {
 			t.Fatal("purge", err)
 		}
 		if !absent(e.Root.Path) || !absent(helper) {
 			t.Fatal("purge left managed residue")
 		}
+		checkSentinel()
 	})
 	t.Run("interrupted replacement restores old artifacts", func(t *testing.T) {
 		e := fixture(t)
@@ -411,6 +474,34 @@ func TestDistributionPublication(t *testing.T) {
 		if string(raw) != "unrelated" {
 			t.Fatal("unrelated command changed")
 		}
+		if err := os.Remove(collision); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Install(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		helper, err := prepareHelper(t, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Candidate = helper
+		// A changed leaf is removable; redirecting its parent must not authorize
+		// deletion outside the recorded directory. Retain the helper for retry.
+		shell := filepath.Join(e.Root.Path, "shell")
+		external := filepath.Join(e.Home, "external")
+		if err = os.Rename(shell, external); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Symlink(external, shell); err != nil {
+			t.Fatal(err)
+		}
+		if err = e.Uninstall(t.Context(), false); err == nil {
+			t.Fatal("cleanup followed a replaced parent directory")
+		}
+		raw, err = os.ReadFile(filepath.Join(external, "completion.bash"))
+		if err != nil || string(raw) != "# synthetic completion\n" || absent(helper) || absent(config.ExecutablePath(e.Root)) {
+			t.Fatal("unsafe path lost external data or retry authority", err)
+		}
 	})
 }
 
@@ -462,7 +553,7 @@ scenario="$2"
   [[ "$#" == 5 && "$1" == --verify && "$2" == --strict && "$3" == -R && "$5" == candidate ]] || return 1
   [[ "$4" != *notarized* && "$scenario" == accepted ]]
 }
-verify_signature candidate
+verify_darwin_signature candidate
 `, "verification", "../../scripts/install-release.sh", scenario.name)
 			output, shellErr := cmd.CombinedOutput()
 			if (shellErr == nil) != (scenario.want == nil) {
@@ -498,9 +589,13 @@ verify_signature candidate
 	for _, scenario := range []string{"pinned", "checksum", "truncated", "unsigned", "prerelease", "downgrade"} {
 		t.Run(scenario, func(t *testing.T) {
 			metadata := Contract("1.2.3")
+			names := platformAssets(metadata.Platform)
 			encoded, _ := json.Marshal(metadata)
 			executable := "#!/bin/sh\nprintf '%s\\n' '" + string(encoded) + "'\n"
-			sums := fmt.Sprintf("%s  install.sh\n%s  release.txt\n%s  data-mate_darwin_arm64\n", digest(nil), digest([]byte(metadata.Text())), digest([]byte(executable)))
+			sums := fmt.Sprintf("%s  install.sh\n%s  %s\n%s  %s\n", digest(nil), digest([]byte(metadata.Text())), names.metadata, digest([]byte(executable)), names.binary)
+			if names.signature != "" {
+				sums += fmt.Sprintf("%s  %s\n", digest([]byte("signature")), names.signature)
+			}
 			requests, verified := 0, false
 			c := NewClient()
 			c.verify = func(_ context.Context, path string, got Metadata) error {
@@ -518,7 +613,7 @@ verify_signature candidate
 						t.Fatal("not resolving latest first")
 					}
 					assets := []map[string]string{}
-					for _, name := range []string{"install.sh", "release.txt", "SHA256SUMS", "data-mate_darwin_arm64"} {
+					for _, name := range names.all() {
 						assets = append(assets, map[string]string{"name": name, "browser_download_url": "https://github.com/" + Repository + "/releases/download/v1.2.3/" + name})
 					}
 					raw, _ := json.Marshal(map[string]any{"tag_name": "v1.2.3", "draft": false, "prerelease": scenario == "prerelease", "assets": assets})
@@ -528,15 +623,17 @@ verify_signature candidate
 						t.Fatal("mixed release versions", req.URL)
 					}
 					switch filepath.Base(req.URL.Path) {
-					case "release.txt":
+					case names.metadata:
 						body = metadata.Text()
-					case "SHA256SUMS":
+					case names.sums:
 						body = sums
-					case "data-mate_darwin_arm64":
+					case names.binary:
 						body = executable
 						if scenario == "checksum" {
 							body += "#tampered"
 						}
+					case names.signature:
+						body = "signature"
 					default:
 						t.Fatal("unexpected request", req.URL)
 					}
@@ -580,6 +677,11 @@ func (f roundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return
 func TestShellActivation(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh"} {
 		t.Run(shell, func(t *testing.T) {
+			if shell == "zsh" && runtime.GOOS == "linux" {
+				if _, err := os.Stat("/bin/zsh"); os.IsNotExist(err) {
+					t.Skip("optional zsh is not installed on Linux")
+				}
+			}
 			e := fixture(t)
 			e.Shell = shell
 			if err := e.Install(t.Context()); err != nil {

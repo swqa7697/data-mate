@@ -82,38 +82,51 @@ func ReadKnownHosts(l *config.Lease) ([]byte, error) {
 // SaveHostKey rechecks the current pin under the writer's lease; a changed key
 // cannot be overwritten, even if enrollment raced another confirmed writer.
 func SaveHostKey(l *config.Lease, pin HostKey) error {
-	host, port, err := net.SplitHostPort(pin.Address)
-	n, e := strconv.Atoi(port)
-	if err != nil || e != nil || !validHost(host) || n < 1 || n > 65535 || pin.Key == nil {
-		return ErrKnownHosts
-	}
-	if _, ok := pin.Key.(*ssh.Certificate); ok {
-		return ErrKnownHosts
-	}
 	raw, err := ReadKnownHosts(l)
 	if err != nil {
 		return err
 	}
-	hosts, err := parseHosts(raw)
+	updated, err := WithHostKey(raw, pin)
 	if err != nil {
 		return err
 	}
-	err = checkHost(hosts, pin.Address, pin.Key)
-	if err == nil {
+	if bytes.Equal(raw, updated) {
 		return nil
 	}
-	if !errors.Is(err, ErrUnknownHost) {
-		return err
+	return l.Replace("known_hosts", updated)
+}
+
+// WithHostKey validates a candidate pin without publishing it or changing raw.
+func WithHostKey(raw []byte, pin HostKey) ([]byte, error) {
+	host, port, err := net.SplitHostPort(pin.Address)
+	n, e := strconv.Atoi(port)
+	if err != nil || e != nil || !validHost(host) || n < 1 || n > 65535 || pin.Key == nil {
+		return nil, ErrKnownHosts
 	}
+	if _, ok := pin.Key.(*ssh.Certificate); ok {
+		return nil, ErrKnownHosts
+	}
+	hosts, err := parseHosts(raw)
+	if err != nil {
+		return nil, err
+	}
+	err = checkHost(hosts, pin.Address, pin.Key)
+	if err == nil {
+		return raw, nil
+	}
+	if !errors.Is(err, ErrUnknownHost) {
+		return nil, err
+	}
+	raw = bytes.Clone(raw)
 	line := knownhosts.Line([]string{pin.Address}, pin.Key) + "\n"
 	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
 	raw = append(raw, line...)
 	if len(raw) > MaxKnownHostsBytes {
-		return ErrKnownHosts
+		return nil, ErrKnownHosts
 	}
-	return l.Replace("known_hosts", raw)
+	return raw, nil
 }
 
 // ProbeHostKey obtains a fingerprint candidate without sending credentials. The

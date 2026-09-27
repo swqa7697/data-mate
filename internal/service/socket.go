@@ -184,29 +184,6 @@ func (d *runtimeDir) cleanup() error {
 	}
 	return unix.Rmdir(d.path)
 }
-func peer(conn *net.UnixConn, uid uint32) (int, error) {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return 0, ErrConflict
-	}
-	var pid int
-	var check error
-	err = raw.Control(func(fd uintptr) {
-		cred, e := unix.GetsockoptXucred(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
-		if e != nil || cred.Uid != uid {
-			check = ErrConflict
-			return
-		}
-		pid, e = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
-		if e != nil || pid <= 0 {
-			check = ErrConflict
-		}
-	})
-	if err != nil || check != nil {
-		return 0, ErrConflict
-	}
-	return pid, nil
-}
 
 type hello struct {
 	Protocol    int      `json:"protocol"`

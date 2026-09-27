@@ -1,9 +1,7 @@
 package distribution
 
 import (
-	"context"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -18,23 +16,6 @@ type ShellBlock struct {
 
 // Quote returns a literal POSIX shell word, including embedded apostrophes.
 func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-
-// LoginShell reads the OS account's login shell without trusting SHELL or HOME.
-func LoginShell(ctx context.Context) (string, error) {
-	u, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-	raw, err := command(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+u.Username, "UserShell")
-	if err != nil {
-		return "", err
-	}
-	fields := strings.Fields(string(raw))
-	if len(fields) != 2 || fields[0] != "UserShell:" {
-		return "", ErrConflict
-	}
-	return filepath.Base(fields[1]), nil
-}
 
 func loader(home, root, shell string) []byte {
 	bin := Quote(filepath.Join(home, ".local", "bin"))

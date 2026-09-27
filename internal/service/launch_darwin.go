@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,24 +15,9 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 )
 
-func itoa(n int) string              { return strconv.Itoa(n) }
 func domain() string                 { return "gui/" + itoa(os.Geteuid()) }
 func target(root config.Root) string { return domain() + "/" + label(root) }
 
-type job struct {
-	Present bool
-	PID     int
-	Path    string
-	Args    []string
-}
-
-// launchManager is the external process boundary; fakes cannot replace runtime
-// ownership, socket verification, vault validation or state locking.
-type launchManager interface {
-	Inspect(context.Context, config.Root) (job, error)
-	Bootstrap(context.Context, config.Root) error
-	Bootout(context.Context, config.Root) error
-}
 type launchd struct{}
 type boundedOutput struct {
 	bytes.Buffer
@@ -122,7 +106,7 @@ func (launchd) Inspect(ctx context.Context, root config.Root) (job, error) {
 	return j, nil
 }
 func (launchd) Bootstrap(ctx context.Context, root config.Root) error {
-	if _, err := launch(ctx, "bootstrap", domain(), filepath.Join(root.Path, "service.plist")); err != nil {
+	if _, err := launch(ctx, "bootstrap", domain(), filepath.Join(root.Path, config.ServiceFile())); err != nil {
 		return ErrStartup
 	}
 	return nil
@@ -133,10 +117,7 @@ func (launchd) Bootout(ctx context.Context, root config.Root) error {
 	}
 	return nil
 }
-func matching(j job, r record) bool {
-	return j.Present && j.Path == filepath.Join(r.Identity.Root, "service.plist") && slices.Equal(j.Args, r.args())
-}
-func plist(root config.Root, r record) []byte {
+func serviceDefinition(root config.Root, r record) []byte {
 	quote := func(s string) string { var b strings.Builder; _ = xml.EscapeText(&b, []byte(s)); return b.String() }
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>` + label(root) + `</string><key>ProgramArguments</key><array>`)
@@ -147,3 +128,7 @@ func plist(root config.Root, r record) []byte {
 	b.WriteString(`</array><key>RunAtLoad</key><true/><key>KeepAlive</key><false/><key>ExitTimeOut</key><integer>5</integer><key>Umask</key><integer>63</integer><key>WorkingDirectory</key><string>/</string><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>`)
 	return []byte(b.String())
 }
+
+func nativeLauncher() launchManager { return launchd{} }
+
+func label(root config.Root) string { return "com.data-mate.service" }
