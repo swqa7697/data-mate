@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 ### Added
 
 - Add Linux x86_64 support for Ubuntu 24.04+ user sessions, with Secret Service credential storage (including running services without activation files), systemd service lifecycle, signed installation and upgrades, and complete uninstall/purge; retain existing CLI/MCP behavior and make zsh optional on Linux.
