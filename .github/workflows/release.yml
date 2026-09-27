@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
@@ -44,7 +44,6 @@ jobs:
           REQUESTED_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          [[ "$(uname -m)" == arm64 ]]
           ./scripts/release-tools.sh validate "$REQUESTED_TAG"
           commit="$(git rev-parse HEAD)"
           [[ "$commit" == "$(git rev-parse "$GITHUB_SHA^{commit}")" ]]
@@ -179,7 +178,7 @@ jobs:
   publish:
     needs: [validate, acceptance]
     environment: release
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
