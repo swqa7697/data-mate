@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-27
+
 ### Changed
 
 - Simplify installation, reinstall, updates and uninstall into retryable file operations with atomic executable replacement; preserve existing directory permissions, directory and shell-config symlinks, and saved credentials without manual repairs or cleanup helpers.
