@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/swqa7697/data-mate/internal/config"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/distribution"
+	"github.com/swqa7697/data-mate/internal/service"
 )
 
 func TestCLI(t *testing.T) {
@@ -30,6 +34,30 @@ func TestCLI(t *testing.T) {
 			}
 		}
 	})
+	// Regression ladder 2: extend production command failures with safe cause
+	// reporting. Wrapped private diagnostics must never reach stderr.
+	for _, tc := range []struct {
+		cause error
+		want  string
+		code  int
+	}{
+		{&distribution.DirectoryError{Path: "/synthetic/.local/bin", Cause: errors.New("secret-sentinel")}, "/synthetic/.local/bin", 1},
+		{config.ErrOwnership, config.ErrOwnership.Error(), 1},
+		{distribution.ErrRelease, distribution.ErrRelease.Error(), 1},
+		{config.ErrPending, config.ErrPending.Error(), 1},
+		{service.ErrUnavailable, "per-user service manager", 1},
+		{errors.New("unknown private cause"), "distribution operation incomplete", 1},
+		{context.Canceled, "cancelled", 130},
+	} {
+		var out, stderr bytes.Buffer
+		build := Build{Environment: config.Production, accountHome: func() (string, error) {
+			return "", fmt.Errorf("secret-sentinel: %w", tc.cause)
+		}}
+		code := Run(t.Context(), []string{"__install"}, &out, &stderr, build)
+		if code != tc.code || out.Len() != 0 || !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), "secret-sentinel") || strings.Contains(stderr.String(), "unknown private cause") {
+			t.Fatalf("%v: code=%d stdout=%q stderr=%q", tc.cause, code, out.String(), stderr.String())
+		}
+	}
 	t.Run("production completion is passive before install", func(t *testing.T) {
 		home := t.TempDir()
 		cmd := New(Build{Environment: config.Production, accountHome: func() (string, error) { return home, nil }})

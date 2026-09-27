@@ -15,7 +15,7 @@ func PreviewKnownHosts(ctx context.Context, root Root) ([]byte, error) {
 	if _, _, err := Preview(ctx, root); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, ErrOwnership
 	}
@@ -43,7 +43,7 @@ func Preview(ctx context.Context, root Root) (Profiles, Revision, error) {
 	}
 	s, err := OpenExisting(ctx, root)
 	if errors.Is(err, os.ErrNotExist) {
-		fd, e := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, e := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if e != nil {
 			return Profiles{}, "", ErrOwnership
 		}

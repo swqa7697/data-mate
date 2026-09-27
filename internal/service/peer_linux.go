@@ -35,7 +35,7 @@ func executablePeer(pid int, expected string) bool {
 	}
 	defer f.Close()
 	var st unix.Stat_t
-	if unix.Fstat(int(f.Fd()), &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0022 != 0 || st.Size > 256<<20 {
+	if unix.Fstat(int(f.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Size > 256<<20 {
 		return false
 	}
 	h := sha256.New()

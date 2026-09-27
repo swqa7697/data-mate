@@ -62,8 +62,53 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 			if state, err := winner.Inspect(t.Context()); err != nil || state.State != "running" {
 				t.Fatal("winner no longer healthy", state, err)
 			}
+			// The same publication path may update the loser without disturbing the
+			// winner, and must stop the winner only when updating that installation.
+			loser.launcher = registry
+			for _, selected := range []*Controller{loser, winner} {
+				target := config.ExecutablePath(selected.Root)
+				raw, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				staged := filepath.Join(filepath.Dir(target), ".data-mate.upgrade")
+				if err = os.WriteFile(staged, raw, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err = selected.InstallBinary(t.Context(), staged); err != nil {
+					t.Fatal("upgrade", err)
+				}
+				if selected == loser && registry.stops != 0 {
+					t.Fatal("upgrade stopped another installation")
+				}
+			}
+			if registry.stops != 1 || registry.job.Present {
+				t.Fatal("upgrade did not stop owned service")
+			}
+
 		})
 	}
+	// Regression ladder 2: extend lifecycle coverage with a never-used install.
+	// Any service-manager inspection or key-provider call would fail this scenario.
+	offline, registry, _ := controllerFixture(t, config.Production)
+	offline.launcher = admissionLaunch{launchManager: registry, beforeInspect: func() { t.Fatal("unused install contacted service manager") }}
+	installed := config.ExecutablePath(offline.Root)
+	raw, err := os.ReadFile(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(filepath.Dir(installed), ".data-mate.offline")
+	if err = os.WriteFile(staged, raw, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = offline.InstallBinary(t.Context(), staged); err != nil {
+		t.Fatal("offline reinstall", err)
+	}
+	if err = offline.Uninstall(t.Context(), true, noKeys{}); err != nil {
+		t.Fatal("unused purge required keyring or manager", err)
+	}
+	// Cleanup's fixture teardown also must not inspect a now-removed installation.
+	offline.launcher = registry
 	c, f, s := controllerFixture(t)
 	lease, _ := s.ReadLease(t.Context())
 	expectedAccount := lease.Identity().KeyAccount

@@ -40,34 +40,19 @@ func ExecutableBuild(version, revision string) (Build, error) {
 	if err != nil {
 		return Build{}, ErrState
 	}
-	hash, err := executableHash(p, false)
+	hash, err := executableHash(p)
 	return Build{version, revision, hash}, err
 }
-func binaryHash(path string) (string, error) { return executableHash(path, true) }
-func executableHash(path string, private bool) (string, error) {
-	var fd int
-	var err error
-	if private {
-		parent, e := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if e != nil {
-			return "", ErrState
-		}
-		defer unix.Close(parent)
-		var st unix.Stat_t
-		if unix.Fstat(parent, &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&07777 != 0700 {
-			return "", ErrState
-		}
-		fd, err = unix.Openat(parent, filepath.Base(path), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
-	} else {
-		fd, err = unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
-	}
+func binaryHash(path string) (string, error) { return executableHash(path) }
+func executableHash(path string) (string, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return "", ErrState
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
 	var st unix.Stat_t
-	if unix.Fstat(fd, &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFREG || (st.Mode&07777 != 0700 && (private || st.Mode&07777 != 0755)) || st.Nlink != 1 {
+	if unix.Fstat(fd, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return "", ErrState
 	}
 	h := sha256.New()

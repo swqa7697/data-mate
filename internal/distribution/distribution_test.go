@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,8 +46,8 @@ func fixture(t *testing.T) *Engine {
 			t.Fatal(err)
 		}
 	}
-	e := &Engine{Home: home, Root: root, Candidate: candidate, Metadata: Contract("1.0.0"), Shell: "bash", checkInstalled: func(context.Context, string, Metadata) error { return nil }, Verify: func(context.Context, string, Metadata) error { return nil }, Completion: func(string) ([]byte, error) { return []byte("# synthetic completion\n"), nil }}
-	e.Cleanup = func(ctx context.Context, purge bool) error {
+	e := &Engine{Home: home, Root: root, Candidate: candidate, Metadata: Contract("1.0.0"), Shell: "bash", Completion: func(string) ([]byte, error) { return []byte("# synthetic completion\n"), nil }}
+	e.Cleanup = func(ctx context.Context, purge bool, files func() error) error {
 		s, err := config.OpenLifecycle(ctx, root)
 		if err != nil {
 			return err
@@ -57,6 +58,9 @@ func fixture(t *testing.T) *Engine {
 			return err
 		}
 		defer l.Release()
+		if err = files(); err != nil {
+			return err
+		}
 		state, err := l.CleanupLease(ctx)
 		if err != nil {
 			return err
@@ -83,15 +87,6 @@ func (fixtureKeys) CreateIfAbsent(context.Context, string, []byte) ([]byte, erro
 	return nil, errors.New("unexpected key creation")
 }
 func (fixtureKeys) Delete(context.Context, string) error { return nil }
-
-func prepareHelper(t *testing.T, e *Engine) (string, error) {
-	t.Helper()
-	path, err := e.PrepareHelper(t.Context())
-	if err == nil {
-		t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(path)) })
-	}
-	return path, err
-}
 
 func storeIdentity(t *testing.T, e *Engine) config.Identity {
 	t.Helper()
@@ -129,7 +124,7 @@ func TestDistributionPublication(t *testing.T) {
 	}
 	t.Run("cross-process stale waiter cannot enter recreated root", func(t *testing.T) {
 		e := fixture(t)
-		if _, err := privateDirs([]string{filepath.Join(e.Home, ".local"), filepath.Join(e.Home, ".local", "share"), e.Root.Path}); err != nil {
+		if err := os.MkdirAll(e.Root.Path, 0700); err != nil {
 			t.Fatal(err)
 		}
 		held, err := acquire(t.Context(), e.Root)
@@ -179,6 +174,15 @@ func TestDistributionPublication(t *testing.T) {
 
 	t.Run("install no-op upgrade retention and purge", func(t *testing.T) {
 		e := fixture(t)
+		// Regression ladder 2: exercise the existing full lifecycle with a
+		// user-managed mode-0775 command directory, without permission repair.
+		bin := filepath.Join(e.Home, ".local", "bin")
+		if err := os.MkdirAll(bin, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(bin, 0775); err != nil {
+			t.Fatal(err)
+		}
 		if err := e.Install(t.Context()); err != nil {
 			t.Fatal("install", err)
 		}
@@ -258,249 +262,307 @@ func TestDistributionPublication(t *testing.T) {
 			t.Fatal("upgrade replaced store identity")
 		}
 		checkState(false)
-		source := e.Candidate
-		// Regression ladder 2: uninstall owns these recorded paths even after
-		// edits, replacement, chmod, hard links, retargeting or device renumbering.
-		// Reuse both retention and purge to cover the real config cleanup boundary.
+
+		// Known runtime leaves can be edited or replaced without touching link targets.
 		sentinel := filepath.Join(e.Home, "unrelated")
-		if err = os.WriteFile(sentinel, []byte("preserve this target"), 0600); err != nil {
+		if err = os.WriteFile(sentinel, []byte("keep"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		modifyArtifacts := func(purge bool) {
-			t.Helper()
-			receipt, err := e.load()
-			if err != nil {
-				t.Fatal(err)
-			}
-			for i, a := range receipt.Artifacts {
-				if err = os.Remove(a.Path); err != nil {
-					t.Fatal(err)
-				}
-				switch {
-				case a.File.Target != "" || (purge && a.Path == config.ExecutablePath(e.Root)):
-					err = os.Symlink(sentinel, a.Path)
-				case strings.HasSuffix(a.Path, "completion.zsh"):
-					err = os.Link(sentinel, a.Path)
-				case strings.HasSuffix(a.Path, "loader.bash"):
-					// An already removed artifact must not prevent retry.
-				default:
-					err = os.WriteFile(a.Path, []byte("edited artifact"), 0000)
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				receipt.Artifacts[i].File.Device++
-				receipt.Artifacts[i].File.Inode++
-			}
-			for i := range receipt.Directories {
-				receipt.Directories[i].Device++
-				receipt.Directories[i].Inode++
-			}
-			receipt.Helper.File.Device++
-			receipt.Helper.File.Inode++
-			if err = e.save(receipt); err != nil {
-				t.Fatal(err)
-			}
-			if retry, err := prepareHelper(t, e); err != nil || retry != receipt.Helper.Path {
-				t.Fatal("unchanged helper rejected after remount", err)
-			}
-		}
-		checkSentinel := func() {
-			t.Helper()
-			raw, err := os.ReadFile(sentinel)
-			if err != nil || string(raw) != "preserve this target" {
-				t.Fatal("cleanup followed a symlink or modified a hard-link target", err)
-			}
-		}
-		helper, err := prepareHelper(t, e)
-		if err != nil {
+		completion := filepath.Join(e.Root.Path, "shell", "completion.bash")
+		if err = os.Remove(completion); err != nil {
 			t.Fatal(err)
 		}
-		e.Candidate = helper
-		modifyArtifacts(false)
+		if err = os.Link(sentinel, completion); err != nil {
+			t.Fatal(err)
+		}
 		if err = e.Uninstall(t.Context(), false); err != nil {
 			t.Fatal("uninstall", err)
 		}
-		if !absent(helper) || !absent(config.ExecutablePath(e.Root)) || !absent(filepath.Join(e.Home, ".bashrc")) {
-			t.Fatal("default uninstall left runtime artifacts")
-		}
-		if got := storeIdentity(t, e); got.ID != initial.ID || got.KeyAccount != initial.KeyAccount {
-			t.Fatal("uninstall replaced credential namespace")
+		if !absent(config.ExecutablePath(e.Root)) || !absent(e.commandPath()) {
+			t.Fatal("default uninstall left runtime")
 		}
 		checkState(false)
-		checkSentinel()
-		e.Candidate = source
+		if got := storeIdentity(t, e); got.ID != initial.ID || got.KeyAccount != initial.KeyAccount {
+			t.Fatal("uninstall replaced identity")
+		}
 		if err = e.Install(t.Context()); err != nil {
 			t.Fatal("retained reinstall", err)
 		}
 		checkState(false)
-		helper, err = prepareHelper(t, e)
-		if err != nil {
-			t.Fatal(err)
-		}
-		e.Candidate = helper
-		modifyArtifacts(true)
 		if err = e.Uninstall(t.Context(), true); err != nil {
 			t.Fatal("purge", err)
 		}
-		if !absent(e.Root.Path) || !absent(helper) {
+		if err = e.Uninstall(t.Context(), true); err != nil {
+			t.Fatal("repeat purge", err)
+		}
+		if !absent(e.Root.Path) {
 			t.Fatal("purge left managed residue")
 		}
-		checkSentinel()
+		if raw, err := os.ReadFile(sentinel); err != nil || string(raw) != "keep" {
+			t.Fatal("unrelated target changed", err)
+		}
+		if st, err := os.Stat(bin); err != nil || st.Mode().Perm() != 0775 {
+			t.Fatal("user directory mode changed", err)
+		}
 	})
-	t.Run("interrupted replacement restores old artifacts", func(t *testing.T) {
+
+	t.Run("failed publication preserves binary and interrupted completion is repeatable", func(t *testing.T) {
 		e := fixture(t)
 		if err := e.Install(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		before, _ := e.load()
+		target := config.ExecutablePath(e.Root)
+		before, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
 		e.Metadata.Version = "1.1.0"
-		if err := os.WriteFile(e.Candidate, []byte("replacement"), 0700); err != nil {
+		if err = os.WriteFile(e.Candidate, []byte("new binary"), 0700); err != nil {
 			t.Fatal(err)
 		}
 		e.Fault = func(phase string) error {
-			if phase == "published:completion.bash" {
-				return errors.New("synthetic power loss")
+			if phase == "before-publish" {
+				return errors.New("interrupted")
 			}
 			return nil
 		}
-		if err := e.Install(t.Context()); err == nil {
-			t.Fatal("fault did not propagate")
+		if err = e.Install(t.Context()); err == nil {
+			t.Fatal("fault missing")
 		}
-		after, err := e.load()
-		if err != nil || after.Release != before.Release || !reflect.DeepEqual(after.Artifacts, before.Artifacts) {
-			t.Fatal("rollback", after.Phase, err)
+		if got, err := os.ReadFile(target); err != nil || string(got) != string(before) {
+			t.Fatal("failed preparation damaged old binary", err)
 		}
-		for _, a := range before.Artifacts {
-			if exact(a.Path, a.File) != nil {
-				t.Fatal("old artifact not restored", a.Path)
+		publish := e.Publish
+		e.Fault = nil
+		e.Publish = func(context.Context, string) error { return os.ErrPermission }
+		if err = e.Install(t.Context()); !errors.Is(err, os.ErrPermission) {
+			t.Fatal("replacement failure", err)
+		}
+		if got, err := os.ReadFile(target); err != nil || string(got) != string(before) {
+			t.Fatal("failed replacement damaged binary", err)
+		}
+		e.Publish = publish
+		e.Fault = func(phase string) error {
+			if phase == "published:binary" {
+				return errors.New("interrupted")
 			}
+			return nil
+		}
+		if err = e.Install(t.Context()); err == nil {
+			t.Fatal("post-publication fault missing")
+		}
+		if got, err := os.ReadFile(target); err != nil || string(got) != "new binary" {
+			t.Fatal("published binary missing", err)
 		}
 		e.Fault = nil
-		if err := e.Install(t.Context()); err != nil {
+		if err = e.Install(t.Context()); err != nil {
 			t.Fatal("retry", err)
 		}
 	})
-	t.Run("purge after default uninstall resumes without recreating runtime", func(t *testing.T) {
+	t.Run("legacy partial receipt and pending install reuse identity", func(t *testing.T) {
 		e := fixture(t)
 		if err := e.Install(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		source := e.Candidate
-		helper, err := prepareHelper(t, e)
+		id := storeIdentity(t, e)
+		inv, err := e.load()
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.Candidate = helper
+		inv.Phase = "publishing"
+		inv.Release = ""
+		inv.Directories = []Directory{{Path: e.Root.Path, Device: 999, Inode: 999}}
+		stage := filepath.Join(e.Root.Path, "bin", ".data-mate.old")
+		outside := filepath.Join(e.Home, ".data-mate.unrelated")
+		for _, path := range []string{stage, outside} {
+			if err = os.WriteFile(path, []byte("keep until scoped cleanup"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		inv.Changes = []change{{Path: config.ExecutablePath(e.Root), Stage: stage, Backup: outside}}
+		startup := filepath.Join(e.Home, ".bashrc")
+		backup := filepath.Join(e.Home, ".data-mate.legacy.rollback")
+		if err = os.WriteFile(startup, []byte("# unrelated startup\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Rename(startup, backup); err != nil {
+			t.Fatal(err)
+		}
+		inv.Changes = append(inv.Changes, change{Path: startup, Backup: backup, External: true})
+		if err = e.save(inv); err != nil {
+			t.Fatal(err)
+		}
+		store, err := config.OpenLifecycle(t.Context(), e.Root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := store.Lifecycle(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = l.SetDistributionPending(t.Context(), true); err != nil {
+			t.Fatal(err)
+		}
+		l.Release()
+		store.Close()
+		if err = e.Install(t.Context()); err != nil {
+			t.Fatal("adopt partial", err)
+		}
+		if raw, err := os.ReadFile(startup); err != nil || !strings.HasPrefix(string(raw), "# unrelated startup\n") || !absent(backup) {
+			t.Fatal("legacy rename lost unrelated shell content", err)
+		}
+		got := storeIdentity(t, e)
+		if got.ID != id.ID || got.KeyAccount != id.KeyAccount || got.Pending {
+			t.Fatal("migration changed namespace or retained pending")
+		}
+		if !absent(stage) || absent(outside) {
+			t.Fatal("legacy cleanup escaped recorded scope")
+		}
 		if err = e.Uninstall(t.Context(), false); err != nil {
 			t.Fatal(err)
 		}
-		e.Candidate = source
-		helper, err = prepareHelper(t, e)
-		if err != nil {
-			t.Fatal(err)
-		}
-		e.Candidate = helper
-		e.Fault = func(phase string) error {
-			if phase == "terminal-root-removed" {
-				return errors.New("interrupted terminal cleanup")
-			}
-			return nil
-		}
-		if err = e.Uninstall(t.Context(), true); err == nil {
-			t.Fatal("terminal fault missing")
-		}
-		if !absent(e.Root.Path) || absent(e.terminalPath()) || absent(helper) {
-			t.Fatal("terminal receipt lost recovery authority")
-		}
-		e.Fault = nil
-		e.Candidate = source
-		recovered, err := prepareHelper(t, e)
-		if err != nil || recovered != helper {
-			t.Fatal("bootstrap recovery helper", err)
-		}
-		e.Candidate = recovered
 		if err = e.Uninstall(t.Context(), true); err != nil {
-			t.Fatal("terminal retry", err)
-		}
-		if !absent(e.Root.Path) || !absent(e.terminalPath()) || !absent(helper) || !absent(filepath.Join(e.Home, ".data-mate-cleanup.lock")) {
-			t.Fatal("terminal cleanup residue")
+			t.Fatal("purge retained state", err)
 		}
 	})
-	t.Run("edited shell block retains helper and cleanup authority", func(t *testing.T) {
+	t.Run("shell ambiguity warns without blocking installation or cleanup", func(t *testing.T) {
 		e := fixture(t)
+		path := filepath.Join(e.Home, ".bashrc")
+		text := "user content\n# >>> Data Mate >>>\nuser edit\n"
+		if err := os.WriteFile(path, []byte(text), 0644); err != nil {
+			t.Fatal(err)
+		}
+		warnings := []string{}
+		e.Warn = func(s string) { warnings = append(warnings, s) }
 		if err := e.Install(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(e.Home, ".bashrc")
-		if err := os.WriteFile(path, []byte("user replacement\n"), 0600); err != nil {
-			t.Fatal(err)
+		if len(warnings) == 0 || absent(config.ExecutablePath(e.Root)) {
+			t.Fatal("shell conflict blocked install or lacked warning")
 		}
-		helper, err := prepareHelper(t, e)
+		if os.Geteuid() != 0 {
+			// The OS denies this real write; integration warns and preserves the program.
+			readOnly := filepath.Join(e.Home, ".bash_profile")
+			if err := os.WriteFile(readOnly, []byte("# read only\n"), 0400); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(readOnly, 0400); err != nil {
+				t.Fatal(err)
+			}
+			beforeWarnings := len(warnings)
+			if err := e.Install(t.Context()); err != nil {
+				t.Fatal("read-only shell blocked program", err)
+			}
+			if len(warnings) <= beforeWarnings {
+				t.Fatal("shell write failure lacked warning")
+			}
+			if raw, err := os.ReadFile(readOnly); err != nil || string(raw) != "# read only\n" {
+				t.Fatal("read-only shell changed", err)
+			}
+		}
+		// A recorded startup block can also become ambiguous after installation.
+		inv, err := e.load()
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.Candidate = helper
-		if err = e.Uninstall(t.Context(), true); err == nil {
-			t.Fatal("edited startup file removed")
-		}
-		raw, _ := os.ReadFile(path)
-		if string(raw) != "user replacement\n" || absent(helper) {
-			t.Fatal("conflict lost user data or retry helper")
-		}
-		inv, err := e.load()
-		if err != nil || inv.Phase != "purging" {
-			t.Fatal("missing durable cleanup intent", err)
-		}
-	})
-	t.Run("collision and signature refusal preserve unrelated state", func(t *testing.T) {
-		e := fixture(t)
-		e.Verify = func(context.Context, string, Metadata) error { return ErrRelease }
-		if err := e.Install(t.Context()); err == nil || !absent(e.Root.Path) {
-			t.Fatal("trust failure mutated root")
-		}
-		e.Verify = func(context.Context, string, Metadata) error { return nil }
-		if err := os.MkdirAll(filepath.Join(e.Home, ".local", "bin"), 0700); err != nil {
+		inv.Blocks = append(inv.Blocks, ShellBlock{Path: path})
+		if err = e.save(inv); err != nil {
 			t.Fatal(err)
 		}
-		collision := filepath.Join(e.Home, ".local", "bin", "data-mate")
-		if err := os.WriteFile(collision, []byte("unrelated"), 0700); err != nil {
+		if err = e.Uninstall(t.Context(), true); err != nil {
+			t.Fatal(err)
+		}
+		if raw, err := os.ReadFile(path); err != nil || string(raw) != text {
+			t.Fatal("ambiguous user content changed", err)
+		}
+	})
+	t.Run("command collision and user managed symlinks", func(t *testing.T) {
+		e := fixture(t)
+		local := filepath.Join(e.Home, ".local")
+		external := filepath.Join(e.Home, "shared directory")
+		if err := os.Mkdir(external, 0775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(external, 0775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, local); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(local, "bin"), 0775); err != nil {
+			t.Fatal(err)
+		}
+		collision := e.commandPath()
+		if err := os.WriteFile(collision, []byte("unrelated"), 0755); err != nil {
 			t.Fatal(err)
 		}
 		if err := e.Install(t.Context()); err == nil {
-			t.Fatal("unrelated command adopted")
+			t.Fatal("unrelated command overwritten")
 		}
-		raw, _ := os.ReadFile(collision)
-		if string(raw) != "unrelated" {
-			t.Fatal("unrelated command changed")
+		if raw, _ := os.ReadFile(collision); string(raw) != "unrelated" {
+			t.Fatal("command changed")
 		}
 		if err := os.Remove(collision); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.MkdirAll(filepath.Dir(e.Root.Path), 0775); err != nil {
+			t.Fatal(err)
+		}
+		dataTarget := filepath.Join(e.Home, "application data")
+		if err := os.Mkdir(dataTarget, 0775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dataTarget, 0775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(dataTarget, e.Root.Path); err != nil {
+			t.Fatal(err)
+		}
+		binaryTarget := filepath.Join(e.Home, "application binaries")
+		if err := os.Mkdir(binaryTarget, 0775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(binaryTarget, filepath.Join(e.Root.Path, "bin")); err != nil {
+			t.Fatal(err)
+		}
+		startup := filepath.Join(e.Home, "my shell config")
+		rc := filepath.Join(e.Home, ".bashrc")
+		if err := os.WriteFile(startup, []byte("# user's configuration\n"), 0640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(startup, 0640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(startup, rc); err != nil {
+			t.Fatal(err)
+		}
 		if err := e.Install(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		helper, err := prepareHelper(t, e)
-		if err != nil {
+		if err := e.Install(t.Context()); err != nil {
+			t.Fatal("repeat with links", err)
+		}
+		if link, err := os.Readlink(rc); err != nil || link != startup {
+			t.Fatal("startup symlink replaced", err)
+		}
+		if st, err := os.Stat(startup); err != nil || st.Mode().Perm() != 0640 {
+			t.Fatal("startup mode changed", err)
+		}
+		raw, err := os.ReadFile(startup)
+		if err != nil || strings.Count(string(raw), blockStart) != 1 {
+			t.Fatal("shell block duplicated", err)
+		}
+		if err = e.Uninstall(t.Context(), true); err != nil {
 			t.Fatal(err)
 		}
-		e.Candidate = helper
-		// A changed leaf is removable; redirecting its parent must not authorize
-		// deletion outside the recorded directory. Retain the helper for retry.
-		shell := filepath.Join(e.Root.Path, "shell")
-		external := filepath.Join(e.Home, "external")
-		if err = os.Rename(shell, external); err != nil {
-			t.Fatal(err)
+		if raw, err = os.ReadFile(startup); err != nil || string(raw) != "# user's configuration\n" {
+			t.Fatal("unrelated shell content changed", err)
 		}
-		if err = os.Symlink(external, shell); err != nil {
-			t.Fatal(err)
+		if st, err := os.Stat(external); err != nil || st.Mode().Perm() != 0775 {
+			t.Fatal("directory mode changed", err)
 		}
-		if err = e.Uninstall(t.Context(), false); err == nil {
-			t.Fatal("cleanup followed a replaced parent directory")
-		}
-		raw, err = os.ReadFile(filepath.Join(external, "completion.bash"))
-		if err != nil || string(raw) != "# synthetic completion\n" || absent(helper) || absent(config.ExecutablePath(e.Root)) {
-			t.Fatal("unsafe path lost external data or retry authority", err)
+		if link, err := os.Readlink(local); err != nil || link != external {
+			t.Fatal("directory link removed", err)
 		}
 	})
 }
@@ -571,6 +633,58 @@ verify_darwin_signature candidate
 			}
 		}
 	})
+	// Regression ladder 2: extend bootstrap coverage through main's EXIT trap.
+	// A failing download or candidate must preserve its status and remove staging
+	// after main's local variables have gone out of scope under errexit.
+	for _, scenario := range []string{"success", "download-failure", "install-failure"} {
+		scratch := t.TempDir()
+		cmd := exec.CommandContext(t.Context(), "/bin/bash", "-c", `
+source "$1"
+scenario="$2"
+scratch="$3"
+fetch() {
+  printf '%s' "$stage" > "$scratch/stage"
+  if [[ "$scenario" == download-failure ]]; then return 37; fi
+  fetched_url=https://github.com/swqa7697/data-mate/releases/tag/v1.2.3
+  if [[ "$2" == "$stage/$binary_name" ]]; then
+    printf '#!/bin/bash\nif [[ "$1" == __release-metadata ]]; then exit 0; fi\nexit %s\n' "$candidate_status" > "$2"
+  else
+    : > "$2"
+  fi
+}
+metadata() { :; }
+verify_checksums() { :; }
+verify_signature() { :; }
+/usr/bin/file() {
+  if [[ "$platform" == darwin_arm64 ]]; then
+    printf 'Mach-O 64-bit executable arm64\n'
+  else
+    printf 'ELF 64-bit LSB executable, x86-64\n'
+  fi
+}
+candidate_status=0
+if [[ "$scenario" == install-failure ]]; then candidate_status=23; fi
+main
+`, "bootstrap", "../../scripts/install-release.sh", scenario, scratch)
+		output, err := cmd.CombinedOutput()
+		want := 0
+		if scenario == "download-failure" {
+			want = 37
+		} else if scenario == "install-failure" {
+			want = 23
+		}
+		stage, readErr := os.ReadFile(filepath.Join(scratch, "stage"))
+		if readErr != nil {
+			t.Fatalf("%s: bootstrap did not stage: %v %s", scenario, readErr, output)
+		}
+		if !absent(string(stage)) {
+			_ = os.RemoveAll(string(stage))
+			t.Errorf("%s: bootstrap leaked staging directory", scenario)
+		}
+		if cmd.ProcessState.ExitCode() != want || len(output) != 0 {
+			t.Errorf("%s: exit=%d want=%d err=%v output=%s", scenario, cmd.ProcessState.ExitCode(), want, err, output)
+		}
+	}
 	valid := Contract("1.2.3").Text()
 	for _, input := range []string{valid + "format=1\n", strings.Replace(valid, "format=1", "format=2", 1), strings.TrimSuffix(valid, "\n"), strings.Replace(valid, "version=1.2.3", "version=1.2.3-rc.1", 1), valid + "unknown=value\n", strings.Replace(valid, "store_schema=1", "store_schema=$(touch /tmp/never)", 1)} {
 		if _, err := ParseMetadata([]byte(input)); err == nil {
@@ -580,10 +694,39 @@ verify_darwin_signature candidate
 	if meta, err := ParseMetadata([]byte(valid)); err != nil || meta != Contract("1.2.3") {
 		t.Fatal(meta, err)
 	}
-	for _, address := range []string{"http://github.com/" + Repository + "/releases/latest", "https://github.com.evil.test/" + Repository + "/releases/latest", "https://user@github.com/" + Repository + "/releases/latest", "https://github.com/another/project/releases/latest", "https://github.com:444/" + Repository + "/releases/latest"} {
+	for _, address := range []string{"http://github.com/" + Repository + "/releases/latest", "https://user@github.com/" + Repository + "/releases/latest", "https:///missing-host"} {
 		if allowedURL(address) {
 			t.Fatal("unsafe URL accepted", address)
 		}
+	}
+	// Use normal HTTPS redirects (including CDN hosts) and the standard proxy
+	// resolver, while still refusing a redirect downgrade to plain HTTP.
+	client := NewClient().HTTP
+	cdn, _ := http.NewRequest("GET", "https://cdn.example.test/asset", nil)
+	if err := client.CheckRedirect(cdn, nil); err != nil {
+		t.Fatal("ordinary CDN redirect refused", err)
+	}
+	insecure, _ := http.NewRequest("GET", "http://cdn.example.test/asset", nil)
+	if err := client.CheckRedirect(insecure, nil); err == nil {
+		t.Fatal("HTTPS downgrade accepted")
+	}
+	request, _ := http.NewRequest("GET", "https://github.com/", nil)
+	standard, err := http.ProxyFromEnvironment(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := client.Transport.(*http.Transport).Proxy(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asText := func(value *url.URL) string {
+		if value == nil {
+			return ""
+		}
+		return value.String()
+	}
+	if asText(proxy) != asText(standard) {
+		t.Fatal("release client bypassed standard proxy configuration")
 	}
 	// Local HTTP seam exercises pinning, integrity, truncation and trust failure.
 	for _, scenario := range []string{"pinned", "checksum", "truncated", "unsigned", "prerelease", "downgrade"} {

@@ -6,42 +6,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"golang.org/x/mod/semver"
-	"os"
 	"runtime"
 	"strings"
 )
 
 // VerifyNative authenticates the candidate before execution.
 func VerifyNative(ctx context.Context, path string, m Metadata) error {
-	return verifyDarwin(ctx, path, m)
-}
-
-func verifyDarwin(ctx context.Context, path string, m Metadata) error {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" || os.Geteuid() == 0 || !m.valid() || m.Platform != "darwin_arm64" {
-		return ErrRelease
-	}
-	if err := verifyMachO(path, m.MinimumMacOS); err != nil {
-		return err
-	}
-	osRaw, err := command(ctx, "/usr/bin/sw_vers", "-productVersion")
-	if err != nil {
-		return err
-	}
-	host := strings.TrimSpace(string(osRaw))
-	if !strings.Contains(host, ".") {
-		host += ".0"
-	}
-	if strings.Count(host, ".") == 1 {
-		host += ".0"
-	}
-	minimum := m.MinimumMacOS
-	if strings.Count(minimum, ".") == 1 {
-		minimum += ".0"
-	}
-	if err != nil || !semver.IsValid("v"+host) || semver.Compare("v"+host, "v"+minimum) < 0 {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" || !m.valid() || m.Platform != "darwin_arm64" {
 		return ErrRelease
 	}
 	return verifyCodeSignature(ctx, path, command)
+}
+func verifyReleaseImage(_ context.Context, path string, m Metadata) error {
+	return verifyMachO(path, m.MinimumMacOS)
 }
 
 func verifyMachO(path, minimum string) error {

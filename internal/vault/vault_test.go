@@ -637,7 +637,21 @@ func testPurgeRecovery(t *testing.T) {
 	t.Helper()
 	for _, point := range []string{"before-key-delete", "after-key-delete"} {
 		f := newFixture(t)
-		addSecret(t, f, 1)
+		if point == "before-key-delete" {
+			// Initialization can create an OS key before marking SQLite ready. Purge
+			// must delete this intent's key as well, and retain it on interruption.
+			f.repo.fault = func(op string) error {
+				if op == "after-key-create" {
+					return errors.New("interrupted key initialization")
+				}
+				return nil
+			}
+			if err := f.repo.Unlock(t.Context(), true, ""); err == nil || len(f.keys.keys) != 1 {
+				t.Fatal("initialization intent fixture", err)
+			}
+		} else {
+			addSecret(t, f, 1)
+		}
 		hit := false
 		f.repo.fault = func(op string) error {
 			if op == point && !hit {
@@ -661,6 +675,9 @@ func testPurgeRecovery(t *testing.T) {
 		reopened.Close()
 		if err != nil {
 			t.Fatal("purge restart", point, err)
+		}
+		if len(f.keys.keys) != 0 {
+			t.Fatal("purge retained initializing or ready OS key", point)
 		}
 	}
 	for _, path := range []string{"data-mate.db"} {

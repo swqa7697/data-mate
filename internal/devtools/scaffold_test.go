@@ -218,41 +218,37 @@ eval "actual=${COMPREPLY[0]}"
 	}
 }
 
-func TestBuildRefusesSymlinkOutput(t *testing.T) {
+// Regression ladder 2: replace the old symlink refusal corpus with ordinary
+// publication and cleanup through user-managed output/data directory links.
+func TestBuildAndCleanupPreserveDirectoryLinks(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "checkout")
 	copyCheckout(t, root)
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, ".dev")); err != nil {
-		t.Fatal(err)
-	}
-	run(t, root, false, "make", "build")
-	run(t, root, true, "make", "uninstall", "PURGE=1")
-	if info, err := os.Lstat(filepath.Join(root, ".dev")); err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("purge changed unrelated development symlink", err)
-	}
-	entries, err := os.ReadDir(outside)
-	if err != nil || len(entries) != 0 {
-		t.Fatal("build wrote through symlink")
-	}
-	if err = os.Remove(filepath.Join(root, ".dev")); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Mkdir(filepath.Join(root, ".dev"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"bin", "data-mate"} {
-		path := filepath.Join(root, ".dev", name)
-		if err = os.Symlink(outside, path); err != nil {
+	for _, name := range []string{".dev", ".dev/bin", ".dev/data-mate"} {
+		outside := t.TempDir()
+		if err := os.Chmod(outside, 0775); err != nil {
 			t.Fatal(err)
 		}
-		run(t, root, false, "make", "build")
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0775); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		run(t, root, true, "make", "build")
+		run(t, root, true, "make", "uninstall", "PURGE=1")
+		if target, err := os.Readlink(path); err != nil || target != outside {
+			t.Fatal("cleanup replaced user directory link", name, err)
+		}
+		if info, err := os.Stat(outside); err != nil || info.Mode().Perm() != 0775 {
+			t.Fatal("build changed directory mode", name, err)
+		}
+		entries, err := os.ReadDir(outside)
+		if err != nil || len(entries) != 0 {
+			t.Fatal("cleanup left installation files", name, err)
+		}
 		if err = os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
-		entries, err = os.ReadDir(outside)
-		if err != nil || len(entries) != 0 {
-			t.Fatal("build wrote through sibling symlink", name, err)
-		}
 	}
-
 }

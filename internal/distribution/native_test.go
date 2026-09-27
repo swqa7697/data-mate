@@ -26,6 +26,9 @@ func TestNativeRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = verifyReleaseImage(t.Context(), path, meta); err != nil {
+		t.Fatal("release image compatibility", err)
+	}
 	if err = VerifyNative(t.Context(), path, meta); err != nil {
 		t.Fatal("native publisher/compatibility check", err)
 	}

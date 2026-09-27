@@ -501,14 +501,20 @@ func (r *Repository) PurgeCredentials(ctx context.Context) error {
 	return r.PurgeLocked(ctx, l)
 }
 func (r *Repository) PurgeLocked(ctx context.Context, l *config.Lease) error {
+	hasKey, err := l.HasKeysetForPurge()
+	if err != nil {
+		return err
+	}
 	if err := l.BeginPurge(); err != nil {
 		return err
 	}
 	if err := r.point("before-key-delete"); err != nil {
 		return err
 	}
-	if err := r.keys.Delete(ctx, l.Identity().KeyAccount); err != nil {
-		return providerError(err)
+	if hasKey {
+		if err := r.keys.Delete(ctx, l.Identity().KeyAccount); err != nil {
+			return providerError(err)
+		}
 	}
 	if err := r.point("after-key-delete"); err != nil {
 		return err

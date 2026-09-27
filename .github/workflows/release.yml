@@ -172,7 +172,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus-user-session gnome-keyring
+          sudo apt-get install -y --no-install-recommends dbus-user-session
           sudo systemctl start "user@$(id -u).service"
       - name: Accept signed candidate with system tools
         env:

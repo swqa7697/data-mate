@@ -422,3 +422,34 @@ func (l *Lease) Publish(p Profiles, expected Revision, replacements []Ciphertext
 	}
 	return databaseRevision(digest, generation), nil
 }
+
+// HasKeysetForPurge checks durable key creation intent before contacting the OS.
+// A missing database during purge means key deletion already completed.
+func (l *Lease) HasKeysetForPurge() (bool, error) {
+	if err := l.check(); err != nil {
+		return false, err
+	}
+	f, err := l.store.openFile("data-mate.db", unix.O_RDONLY, 0)
+	if errors.Is(err, os.ErrNotExist) && l.Identity().Purging {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	f.Close()
+	k, err := l.Keyset()
+	// Release SQLite before OS key deletion and unlinking the database/journal.
+	if l.db != nil {
+		closeErr := l.db.Close()
+		l.db = nil
+		if closeErr != nil {
+			return false, closeErr
+		}
+	}
+	// A corrupt database cannot prove absence. Delete the exact key recorded in
+	// installation identity before discarding any state.
+	if err != nil {
+		return true, nil
+	}
+	return k.Phase != "", nil
+}

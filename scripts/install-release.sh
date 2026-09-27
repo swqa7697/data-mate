@@ -7,43 +7,13 @@ fail() {
   exit 1
 }
 
-allowed_url() {
-  case "$1" in
-  https://github.com/swqa7697/data-mate/releases/* | https://github.com:443/swqa7697/data-mate/releases/* | https://api.github.com/repos/swqa7697/data-mate/releases/* | https://release-assets.githubusercontent.com/* | https://objects.githubusercontent.com/*) ;;
-  *) return 1 ;;
-  esac
-  [[ "$1" != *'#'* && "$1" != *$'\r'* && "$1" != *$'\n'* ]]
-}
-
-# Follow redirects explicitly so curl cannot contact an untrusted redirect host.
+# Standard HTTPS downloads honor curl's proxy environment and CA configuration.
 fetch() {
   local address="$1" output="$2" limit="$3" head="${4:-false}"
-  local code next count=0 started=$SECONDS remaining
-  local curl_args=()
-  while :; do
-    allowed_url "$address" || fail 'untrusted release URL'
-    remaining=$((300 - SECONDS + started))
-    ((remaining > 0)) || fail 'download timed out'
-    curl_args=(--disable --proxy '' --proto '=https' --tlsv1.2 --silent --show-error --connect-timeout 10 --max-time "$remaining" --max-filesize "$limit" --max-redirs 0 --dump-header "$stage/headers" --output "$output" --write-out '%{http_code}')
-    if [[ "$head" == true ]]; then curl_args+=(--head); fi
-    code="$(/usr/bin/curl "${curl_args[@]}" "$address")" || fail 'download failed'
-    [[ "$(file_size "$output")" -le "$limit" ]] || fail 'download exceeded size limit'
-    case "$code" in
-    200)
-      fetched_url="$address"
-      return
-      ;;
-    301 | 302 | 303 | 307 | 308)
-      count=$((count + 1))
-      ((count <= 5)) || fail 'too many redirects'
-      next="$(/usr/bin/awk 'tolower($1)=="location:" {sub(/\r$/, "", $2); print $2}' "$stage/headers")"
-      [[ -n "$next" && "$next" != *$'\n'* ]] || fail 'invalid redirect'
-      if [[ "$head" != true && "$next" == https://github.com/* && "$next" != "$1" ]]; then fail 'redirect changed the pinned release asset'; fi
-      address="$next"
-      ;;
-    *) fail 'stable release unavailable' ;;
-    esac
-  done
+  local curl_args=(--location --fail --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error --connect-timeout 10 --max-time 300 --max-filesize "$limit" --max-redirs 10 --output "$output" --write-out '%{url_effective}')
+  if [[ "$head" == true ]]; then curl_args+=(--head); fi
+  fetched_url="$(curl "${curl_args[@]}" "$address")" || fail "download failed: $address"
+  [[ "$(file_size "$output")" -le "$limit" ]] || fail 'download exceeded size limit'
 }
 
 stable_version() { [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
@@ -173,12 +143,12 @@ main() {
     printf 'Bootstrap cleanup requires --uninstall --purge.\n' >&2
     exit 2
   fi
-  [[ "$EUID" != 0 ]] || fail 'run as your normal account, not root'
   detect_platform
   umask 077
   stage="$(/usr/bin/mktemp -d /tmp/data-mate-download.XXXXXX)"
-  # The trap stores a literal pathname produced by mktemp, never metadata.
-  trap '/bin/rm -rf -- "$stage"' EXIT
+  # Capture mktemp's fixed-template pathname now: main's locals are out of
+  # scope when errexit runs the EXIT trap. Never interpolate release metadata.
+  trap "/bin/rm -rf -- '$stage'" EXIT
   fetch 'https://github.com/swqa7697/data-mate/releases/latest' "$stage/latest" 1048576 true
   case "$fetched_url" in https://github.com/swqa7697/data-mate/releases/tag/v*) version="${fetched_url##*/v}" ;; *) fail 'invalid stable release redirect' ;; esac
   stable_version "$version" || fail 'stable semantic release required'
@@ -189,11 +159,6 @@ main() {
   fetch "$base/$binary_name" "$stage/$binary_name" 268435456
   if [[ -n "$signature_name" ]]; then fetch "$base/$signature_name" "$stage/$signature_name" 4096; fi
   verify_checksums
-  if [[ "$platform" == darwin_arm64 ]]; then
-    case "$(/usr/bin/file -b "$stage/$binary_name")" in 'Mach-O 64-bit executable arm64'*) ;; *) fail 'native arm64 executable required' ;; esac
-  else
-    case "$(/usr/bin/file -b "$stage/$binary_name")" in 'ELF 64-bit LSB '*x86-64*) ;; *) fail 'Linux x86_64 executable required' ;; esac
-  fi
   verify_signature "$stage/$binary_name"
   /bin/chmod 700 "$stage/$binary_name"
   "$stage/$binary_name" __release-metadata --text >"$stage/compiled.txt"

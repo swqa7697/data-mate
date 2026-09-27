@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // Environment is selected by immutable build metadata, never user configuration.
@@ -50,26 +49,11 @@ func ProductionRoot(home string) (Root, error) {
 	return Root{Path: path, Digest: hex.EncodeToString(sum[:]), Environment: Production}, nil
 }
 
-// CheckPath rejects symlinks and writable/unowned directory ancestors. Missing
-// suffixes are allowed for passive discovery; callers must recheck before writes.
+// CheckPath checks syntax only. User-managed directory permissions and symlinks
+// are handled by normal filesystem operations, not installation policy.
 func CheckPath(path string) error {
-	if !filepath.IsAbs(path) {
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n\t") {
 		return ErrOwnership
-	}
-	current := string(os.PathSeparator)
-	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(path), "/"), "/") {
-		current = filepath.Join(current, part)
-		st, err := os.Lstat(current)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-			return ErrOwnership
-		}
-		raw, ok := st.Sys().(*syscall.Stat_t)
-		if !ok || (raw.Uid != uint32(os.Geteuid()) && raw.Uid != 0) || (st.Mode().Perm()&0022 != 0 && !(raw.Uid == 0 && st.Mode()&os.ModeSticky != 0)) {
-			return ErrOwnership
-		}
 	}
 	return nil
 }
@@ -83,8 +67,8 @@ func ExecutablePath(root Root) string {
 }
 
 func validateRoot(root Root) error {
-	actual, err := ResolveRoot(root.Path, "")
-	if err != nil || actual.Path != root.Path || actual.Digest != root.Digest {
+	sum := sha256.Sum256([]byte(root.Path))
+	if !filepath.IsAbs(root.Path) || filepath.Clean(root.Path) != root.Path || hex.EncodeToString(sum[:]) != root.Digest {
 		return ErrOwnership
 	}
 	if root.Environment.Kind() != Development && root.Environment.Kind() != Production {

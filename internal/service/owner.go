@@ -3,6 +3,8 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -38,7 +40,9 @@ func (c *Controller) owner(ctx context.Context, j job) (*Owner, error) {
 	}
 	s, err := config.OpenLifecycle(ctx, root)
 	if err != nil {
-		root.Environment = config.Production
+		path := filepath.Dir(j.Path)
+		sum := sha256.Sum256([]byte(path))
+		root = config.Root{Path: path, Digest: hex.EncodeToString(sum[:]), Environment: config.Production}
 		s, err = config.OpenLifecycle(ctx, root)
 	}
 	if err != nil {

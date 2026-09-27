@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -106,18 +107,11 @@ func (l *LifecycleLease) InstallBinary(ctx context.Context, name string) error {
 	defer d.close()
 	dir := d.dir
 	fd := int(dir.Fd())
-	source, err := checkBinary(fd, name, false)
+	source, err := checkBinary(fd, name)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
-	target, err := checkBinary(fd, "data-mate", true)
-	if err != nil {
-		return err
-	}
-	if target != nil {
-		defer target.Close()
-	}
 	if err = source.Sync(); err != nil {
 		return err
 	}
@@ -151,23 +145,14 @@ func (l *LifecycleLease) InstallBinary(ctx context.Context, name string) error {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if target != nil {
-		if !sameNamed(fd, "data-mate", target) {
-			return ErrStale
-		}
-	} else {
-		var st unix.Stat_t
-		if e := unix.Fstatat(fd, "data-mate", &st, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(e, unix.ENOENT) {
-			return ErrStale
-		}
-	}
 	if err = unix.Renameat(fd, name, fd, "data-mate"); err != nil {
-		return errors.New("cannot publish executable")
+		return &os.PathError{Op: "replace executable", Path: ExecutablePath(s.root), Err: err}
 	}
 	return dir.Sync()
 }
 
-// SetDistributionPending gates ordinary startup and state access during publication.
+// SetDistributionPending reads legacy publication state for migration. New
+// installers only clear this flag after successfully replacing the executable.
 // The caller holds the distribution lease before acquiring this lifecycle lease.
 func (l *LifecycleLease) SetDistributionPending(ctx context.Context, pending bool) error {
 	state, err := l.CleanupLease(ctx)
