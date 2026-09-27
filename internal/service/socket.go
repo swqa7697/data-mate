@@ -257,7 +257,7 @@ func connect(ctx context.Context, root config.Root, r record, build Build, purpo
 	_ = conn.SetDeadline(deadline)
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
-	h := hello{Protocol: 2, Purpose: purpose, Identity: r.Identity, Build: build, PID: os.Getpid(), Nonce: r.Nonce}
+	h := hello{Protocol: 3, Purpose: purpose, Identity: r.Identity, Build: build, PID: os.Getpid(), Nonce: r.Nonce}
 	if err = writeHello(conn, h); err != nil {
 		return fail(ErrUnavailable)
 	}
@@ -268,7 +268,7 @@ func connect(ctx context.Context, root config.Root, r record, build Build, purpo
 	if reply.Identity != r.Identity || reply.Nonce != r.Nonce || reply.PID != pid || (r.PID != 0 && r.PID != pid) || reply.Purpose != purpose {
 		return fail(ErrConflict)
 	}
-	if reply.Protocol != 2 || reply.Build != build || reply.Error == "restart" {
+	if reply.Protocol != 3 || reply.Build != build || reply.Error == "restart" {
 		return fail(ErrRestart)
 	}
 	if purpose == "management" && !executablePeer(pid, reply.Build.Fingerprint) {

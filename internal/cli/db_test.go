@@ -19,13 +19,19 @@ import (
 )
 
 type testKeys struct {
-	key    []byte
-	denied bool
-	calls  int
+	key     []byte
+	denied  bool
+	calls   int
+	keyring string
 }
 
-func (k *testKeys) Load(context.Context, string) ([]byte, error) {
+func (k *testKeys) Load(ctx context.Context, _ string) ([]byte, error) {
 	k.calls++
+	if k.keyring != "" {
+		if err := k.prepare(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if k.denied {
 		return nil, vault.ErrDenied
 	}
@@ -34,8 +40,13 @@ func (k *testKeys) Load(context.Context, string) ([]byte, error) {
 	}
 	return bytes.Clone(k.key), nil
 }
-func (k *testKeys) CreateIfAbsent(_ context.Context, _ string, key []byte) ([]byte, error) {
+func (k *testKeys) CreateIfAbsent(ctx context.Context, _ string, key []byte) ([]byte, error) {
 	k.calls++
+	if k.keyring != "" {
+		if err := k.prepare(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if k.denied {
 		return nil, vault.ErrDenied
 	}
@@ -43,6 +54,20 @@ func (k *testKeys) CreateIfAbsent(_ context.Context, _ string, key []byte) ([]by
 		k.key = bytes.Clone(key)
 	}
 	return bytes.Clone(k.key), nil
+}
+func (k *testKeys) prepare(ctx context.Context) error {
+	for attempt := 1; attempt <= 3; attempt++ {
+		password, err := vault.AskKeyring(ctx, vault.KeyringChallenge{Kind: k.keyring, Attempt: attempt})
+		if err != nil {
+			return err
+		}
+		match := string(password) == "pty-keyring-secret"
+		clear(password)
+		if match {
+			return nil
+		}
+	}
+	return vault.ErrPassword
 }
 func (k *testKeys) Delete(context.Context, string) error { k.key = nil; return nil }
 func privateRoot(t *testing.T) string {

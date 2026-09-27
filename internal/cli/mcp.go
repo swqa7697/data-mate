@@ -20,6 +20,9 @@ import (
 )
 
 func serviceError(err error) error {
+	if message := keyringError(err); message != "" {
+		return failure(message)
+	}
 	if err == nil {
 		return nil
 	}
@@ -72,7 +75,11 @@ func newMCP(override *string, build Build) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 45*time.Second)
+			budget := 45 * time.Second
+			if name == "start" {
+				budget += vault.PreparationTimeout
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), budget)
 			defer cancel()
 			if name == "bridge" {
 				conn, err := c.OpenSession(ctx)
@@ -189,13 +196,16 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), vault.PreparationTimeout+60*time.Second)
 		defer cancel()
 		c.Agents = agent.New(c.Root)
 		c.Interactive = hasTerminal(cmd)
 		if err = c.Uninstall(ctx, flag(cmd, "purge"), keys); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
+			}
+			if message := keyringError(err); message != "" {
+				return failure(message)
 			}
 			var cleanup *service.CleanupError
 			if errors.As(err, &cleanup) {

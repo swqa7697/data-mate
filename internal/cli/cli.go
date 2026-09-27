@@ -79,15 +79,16 @@ func commandWithManagement(build Build, keys vault.KeyProvider, factory manageme
 	var override string
 	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
-	if build.Environment.Kind() == config.Production {
-		root.PersistentPreRunE = func(_ *cobra.Command, args []string) error {
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		cmd.SetContext(vault.WithKeyringPrompt(cmd.Context(), keyringPrompt(cmd)))
+		if build.Environment.Kind() == config.Production {
 			for _, arg := range args {
 				if arg == "--root" || strings.HasPrefix(arg, "--root=") {
 					return invalid("production does not accept --root")
 				}
 			}
-			return nil
 		}
+		return nil
 	}
 	root.Args = cobra.NoArgs
 	root.RunE = func(cmd *cobra.Command, _ []string) error { return cmd.Help() }

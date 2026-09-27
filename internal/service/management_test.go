@@ -24,6 +24,7 @@ type managedKeys struct {
 	key            []byte
 	loads, creates int
 	denied         bool
+	terminal       bool
 	entered        chan struct{}
 	release        chan struct{}
 }
@@ -40,12 +41,29 @@ func (k *managedKeys) Load(context.Context, string) ([]byte, error) {
 	}
 	return bytes.Clone(k.key), nil
 }
-func (k *managedKeys) CreateIfAbsent(_ context.Context, _ string, key []byte) ([]byte, error) {
+func (k *managedKeys) CreateIfAbsent(ctx context.Context, _ string, key []byte) ([]byte, error) {
 	k.mu.Lock()
 	k.creates++
 	entered, release := k.entered, k.release
+	terminal := k.terminal
 	k.entered = nil
 	k.mu.Unlock()
+	if terminal {
+		for attempt := 1; attempt <= 3; attempt++ {
+			password, err := vault.AskKeyring(ctx, vault.KeyringChallenge{Kind: "create", Attempt: attempt})
+			if err != nil {
+				return nil, err
+			}
+			accepted := string(password) == "synthetic-keyring-password"
+			clear(password)
+			if accepted {
+				break
+			}
+			if attempt == 3 {
+				return nil, vault.ErrPassword
+			}
+		}
+	}
 	if entered != nil {
 		close(entered)
 		<-release
@@ -105,7 +123,7 @@ func (d *blockedDiagnostics) Test(ctx context.Context, a database.Access) (datab
 // management-only admission, patches, independent clients, framing and cancellation.
 func TestPrivateManagement(t *testing.T) {
 	c, f, _ := controllerFixture(t)
-	keys := &managedKeys{}
+	keys := &managedKeys{terminal: true}
 	f.keys = keys
 	driver := &blockedDiagnostics{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	f.driver = driver
@@ -122,16 +140,119 @@ func TestPrivateManagement(t *testing.T) {
 	}
 	profile := fixtureProfile()
 	p.Connections = append(p.Connections, profile)
+	requestCtx := t.Context()
+	interactive := false
 	apply := func(p config.Profiles, rev config.Revision, patch vault.Patch) (ManagementReply, error) {
-		q := ManagementRequest{Operation: "mutate", ProfileID: profile.ID, Mutation: &vault.Mutation{Expected: rev, Profiles: p}}
+		q := ManagementRequest{Operation: "mutate", Interactive: interactive, ProfileID: profile.ID, Mutation: &vault.Mutation{Expected: rev, Profiles: p}}
 		if patch != nil {
 			q.Mutation.Patches = map[string]vault.Patch{profile.ID: patch}
 		}
-		return c.Request(t.Context(), q)
+		return c.Request(requestCtx, q)
 	}
+	// Extend the authenticated request scenario: preparation precedes validation,
+	// canceled/invalid answers publish nothing, and one request resumes one save.
+	if r, e := apply(p, rev, vault.Patch{"password": "synthetic-management-secret"}); !errors.Is(e, vault.ErrTerminal) || r.Outcome == nil || r.Outcome.ProfilesSaved {
+		t.Fatal("noninteractive authentication", r, e)
+	}
+	interactive = true
+	requestCtx = vault.WithKeyringPrompt(t.Context(), func(context.Context, vault.KeyringChallenge) ([]byte, error) { return nil, context.Canceled })
+	if r, e := apply(p, rev, vault.Patch{"password": "synthetic-management-secret"}); !errors.Is(e, context.Canceled) || r.Outcome == nil || r.Outcome.ProfilesSaved {
+		t.Fatal("canceled preparation", r, e)
+	}
+	for _, mode := range []string{"unsolicited", "wrong-id", "empty", "cancel-with-password", "oversized", "disconnect"} {
+		store, e := config.OpenExisting(t.Context(), c.Root)
+		if e != nil {
+			t.Fatal(e)
+		}
+		lease, e := store.ReadLease(t.Context())
+		if e != nil {
+			t.Fatal(e)
+		}
+		record, e := readRecord(lease.Read, c.Root, lease.Identity())
+		lease.Release()
+		store.Close()
+		if e != nil {
+			t.Fatal(e)
+		}
+		conn, _, e := connect(t.Context(), c.Root, record, c.Build, "management")
+		if e != nil {
+			t.Fatal(e)
+		}
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if mode == "unsolicited" {
+			_ = writeFrame(conn, keyringAnswer{ID: profile.ID, Password: []byte("synthetic-keyring-password")})
+		} else {
+			q := ManagementRequest{Operation: "mutate", Interactive: true, ProfileID: profile.ID, Mutation: &vault.Mutation{Expected: rev, Profiles: p, Patches: map[string]vault.Patch{profile.ID: {"password": "synthetic-management-secret"}}}}
+			if e = writeFrame(conn, q); e != nil {
+				t.Fatal(e)
+			}
+			var frame managementFrame
+			if e = readFrame(conn, &frame); e != nil || frame.Challenge == nil {
+				t.Fatal("missing challenge", e)
+			}
+			a := keyringAnswer{ID: frame.ID}
+			switch mode {
+			case "wrong-id":
+				a.ID, _ = config.NewID()
+				a.Password = []byte("synthetic-keyring-password")
+			case "cancel-with-password":
+				a.Cancel = true
+				a.Password = []byte("synthetic-keyring-password")
+			case "oversized":
+				var size [4]byte
+				binary.BigEndian.PutUint32(size[:], 2*vault.MaxSecretBytes+257)
+				_, _ = conn.Write(size[:])
+			case "disconnect":
+				conn.Close()
+			}
+			if mode != "oversized" && mode != "disconnect" {
+				_ = writeFrame(conn, a)
+			}
+		}
+		var frame managementFrame
+		e = readFrame(conn, &frame)
+		conn.Close()
+		if e == nil && frame.Reply != nil && frame.Reply.Outcome != nil && frame.Reply.Outcome.ProfilesSaved {
+			t.Fatal("invalid answer published", mode)
+		}
+	}
+	driver.mu.Lock()
+	validated := len(driver.validated)
+	driver.mu.Unlock()
+	if validated != 0 {
+		t.Fatal("database work preceded authentication")
+	}
+	prompts := 0
+	requestCtx = vault.WithKeyringPrompt(t.Context(), func(ctx context.Context, challenge vault.KeyringChallenge) ([]byte, error) {
+		prompts++
+		if challenge.Attempt != prompts {
+			t.Error("wrong attempt", challenge)
+		}
+		// No SQLite/state lease may be retained while the user thinks.
+		read, stop := context.WithTimeout(ctx, time.Second)
+		defer stop()
+		current, currentRev, e := config.Preview(read, c.Root)
+		if e != nil || currentRev != rev || len(current.Connections) != 0 {
+			t.Error("preparation locked/published state", e)
+		}
+		if prompts == 1 {
+			return []byte("synthetic-wrong-password"), nil
+		}
+		return []byte("synthetic-keyring-password"), nil
+	})
 	if r, e := apply(p, rev, vault.Patch{"password": "synthetic-management-secret"}); e != nil || !r.Outcome.ProfilesSaved {
 		t.Fatal("initial save", r, e)
 	}
+	if prompts != 2 {
+		t.Fatal("retry count", prompts)
+	}
+	driver.mu.Lock()
+	validated = len(driver.validated)
+	driver.mu.Unlock()
+	if validated != 1 {
+		t.Fatal("request validated more than once", validated)
+	}
+	requestCtx = t.Context()
 	calls := keys.calls()
 	keys.mu.Lock()
 	keys.denied = true
@@ -338,7 +459,7 @@ func TestPrivateManagement(t *testing.T) {
 		t.Fatal(e)
 	}
 	_ = conn.SetDeadline(time.Now().Add(time.Second))
-	_ = writeHello(conn, hello{Protocol: 2, Purpose: "management", Identity: r.Identity, Build: c.Build, PID: os.Getpid(), Nonce: r.Nonce})
+	_ = writeHello(conn, hello{Protocol: 3, Purpose: "management", Identity: r.Identity, Build: c.Build, PID: os.Getpid(), Nonce: r.Nonce})
 	if _, e = readHello(conn); e == nil {
 		t.Fatal("MCP dispatched management")
 	}
@@ -367,10 +488,10 @@ func TestPrivateManagement(t *testing.T) {
 		binary.BigEndian.PutUint32(size[:], uint32(len(raw)))
 		_, _ = malformed.Write(size[:])
 		_, _ = malformed.Write([]byte(raw))
-		var reply ManagementReply
-		e = readFrame(malformed, &reply)
+		var frame managementFrame
+		e = readFrame(malformed, &frame)
 		malformed.Close()
-		if e == nil && reply.Error == "" {
+		if e == nil && (frame.Reply == nil || frame.Reply.Error == "") {
 			t.Fatal("invalid/private operation accepted")
 		}
 	}
@@ -404,6 +525,30 @@ func TestPrivateManagement(t *testing.T) {
 		t.Fatal("locked delete", e)
 	}
 
+	beforeStart := keys.calls()
+	if state, e = c.Start(t.Context()); e != nil || !state.MCPEnabled || keys.calls() != beforeStart {
+		t.Fatal("credential-free MCP start accessed locked keyset", e)
+	}
+
+	if err := filepath.WalkDir(c.Root.Path, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			raw, e := os.ReadFile(path)
+			if e != nil {
+				return e
+			}
+			for _, secret := range []string{"synthetic-keyring-password", "synthetic-management-secret"} {
+				if bytes.Contains(raw, []byte(secret)) {
+					t.Error("secret persisted", path)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// An uninterruptible provider may complete late, but cannot publish a canceled save.
 	c2, f2, _ := controllerFixture(t)
 	blocked := &managedKeys{entered: make(chan struct{}), release: make(chan struct{})}
@@ -446,5 +591,40 @@ func TestPrivateManagement(t *testing.T) {
 	current, _, e = config.Preview(t.Context(), c2.Root)
 	if e != nil || len(current.Connections) != 0 {
 		t.Fatal("late publication", e)
+	}
+	// A service shutdown while the terminal is waiting must cancel the client
+	// prompt too, even when the caller itself has no deadline or cancellation.
+	f2.keys = &managedKeys{terminal: true}
+	if _, e = c2.EnsureManagement(t.Context()); e != nil {
+		t.Fatal(e)
+	}
+	promptEntered := make(chan struct{})
+	terminalCtx := vault.WithKeyringPrompt(t.Context(), func(ctx context.Context, _ vault.KeyringChallenge) ([]byte, error) {
+		close(promptEntered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	q.Interactive = true
+	go func() { _, e := c2.Request(terminalCtx, q); done <- e }()
+	select {
+	case <-promptEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("terminal prompt not reached")
+	}
+	f2.mu.Lock()
+	shutdown := f2.cancel
+	f2.mu.Unlock()
+	shutdown()
+	select {
+	case e = <-done:
+		if e == nil {
+			t.Fatal("shutdown published")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("disconnection left terminal waiting")
+	}
+	current, _, e = config.Preview(t.Context(), c2.Root)
+	if e != nil || len(current.Connections) != 0 {
+		t.Fatal("disconnected preparation published", e)
 	}
 }

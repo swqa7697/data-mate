@@ -22,8 +22,15 @@ type cleanupKeys struct {
 	noKeys
 	err     error
 	digests []string
+	prepare func(context.Context, string) error
 }
 
+func (k *cleanupKeys) PrepareDelete(ctx context.Context, account string) error {
+	if k.prepare != nil {
+		return k.prepare(ctx, account)
+	}
+	return nil
+}
 func (k *cleanupKeys) Delete(_ context.Context, digest string) error {
 	k.digests = append(k.digests, digest)
 	return k.err

@@ -64,7 +64,7 @@ func (r ManagementReply) ResultError() error {
 	return ManagementError(r.Error)
 }
 
-var managementErrors = []error{context.Canceled, context.DeadlineExceeded, config.ErrRevision, config.ErrCommitUnknown, config.ErrObsolete, config.ErrRecovery, config.ErrState, config.ErrOwnership, config.ErrStale, config.ErrPurging, vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, vault.ErrCredentialMissing, transport.ErrChangedHost, transport.ErrKnownHosts, ErrState, ErrConflict, ErrRestart, ErrUnavailable}
+var managementErrors = []error{context.Canceled, context.DeadlineExceeded, config.ErrRevision, config.ErrCommitUnknown, config.ErrObsolete, config.ErrRecovery, config.ErrState, config.ErrOwnership, config.ErrStale, config.ErrPurging, vault.ErrTerminal, vault.ErrPassword, vault.ErrUserBus, vault.ErrUnsupported, vault.ErrProviderChanged, vault.ErrProviderUnavailable, vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, vault.ErrCredentialMissing, transport.ErrChangedHost, transport.ErrKnownHosts, ErrState, ErrConflict, ErrRestart, ErrUnavailable}
 
 func safeManagementError(err error) string {
 	for _, e := range managementErrors {
@@ -87,13 +87,14 @@ func ManagementError(message string) error {
 	}
 	return ErrUnavailable
 }
-func readFrame(r io.Reader, dst any) error {
+func readFrame(r io.Reader, dst any) error { return readFrameLimit(r, dst, managementLimit) }
+func readFrameLimit(r io.Reader, dst any, limit int) error {
 	var size [4]byte
 	if _, err := io.ReadFull(r, size[:]); err != nil {
 		return err
 	}
 	n := binary.BigEndian.Uint32(size[:])
-	if n == 0 || n > managementLimit {
+	if n == 0 || n > uint32(limit) {
 		return ErrState
 	}
 	raw := make([]byte, n)
@@ -101,7 +102,7 @@ func readFrame(r io.Reader, dst any) error {
 	if _, err := io.ReadFull(r, raw); err != nil {
 		return err
 	}
-	if config.DecodeStrict(raw, managementLimit, dst) != nil {
+	if config.DecodeStrict(raw, limit, dst) != nil {
 		return ErrState
 	}
 	return nil
@@ -153,13 +154,7 @@ func (c *Controller) Request(ctx context.Context, request ManagementRequest) (Ma
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetReadDeadline(deadline)
 	}
-	if err = readFrame(conn, &reply); err != nil {
-		if ctx.Err() != nil {
-			return reply, ctx.Err()
-		}
-		return reply, ErrUnavailable
-	}
-	return reply, reply.ResultError()
+	return exchangeManagement(ctx, conn, request.Interactive)
 }
 
 // HandleManagement owns independent admission and service-side input validation.
@@ -192,8 +187,6 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 	}()
 	switch q.Operation {
 	case "mutate":
-		ctx, finish := context.WithTimeout(ctx, 30*time.Second)
-		defer finish()
 		if q.Mutation == nil || q.Expected != "" || q.Alias != "" {
 			err = ErrState
 			return
@@ -206,10 +199,14 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			}
 			q.Mutation.HostKey = &transport.HostKey{Address: q.Pin.Address, Key: key}
 		}
-		if err = m.validateMutation(ctx, q); err != nil {
+		deadline, validationError := m.validateMutation(ctx, q)
+		err = validationError
+		if err != nil {
 			reply.Outcome = &vault.Outcome{}
 			return
 		}
+		ctx, finish := context.WithDeadline(ctx, deadline)
+		defer finish()
 		out, e := m.repo.Apply(ctx, *q.Mutation)
 		reply.Outcome = &out
 		err = e
@@ -226,11 +223,25 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			err = ErrState
 			return
 		}
-		ctx, finish := context.WithTimeout(ctx, 30*time.Second)
-		defer finish()
-		if err = m.repo.Unlock(ctx, false, ""); err != nil {
+		profiles, _, e := m.repo.Snapshot(ctx)
+		if e != nil {
+			err = e
 			return
 		}
+		for _, p := range profiles.Connections {
+			if p.CredentialRef == "" {
+				continue
+			}
+			prep, prepared := context.WithTimeout(ctx, vault.PreparationTimeout)
+			err = m.repo.Unlock(prep, false, "")
+			prepared()
+			if err != nil {
+				return
+			}
+			break
+		}
+		ctx, finish := context.WithTimeout(ctx, 30*time.Second)
+		defer finish()
 		l, e := m.store.ReadLease(ctx)
 		if e != nil {
 			err = e
@@ -277,9 +288,6 @@ func (m *Manager) keysetState(ctx context.Context) string {
 	return m.repo.State()
 }
 func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest, description *database.DatabaseDescription) (*DiagnosticResult, error) {
-	started := time.Now()
-	parent, finish := context.WithTimeout(parent, config.MaxQueryTimeout)
-	defer finish()
 	l, err := m.store.ReadLease(parent)
 	if err != nil {
 		return nil, err
@@ -301,11 +309,10 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 	if p == nil {
 		return nil, config.ErrRevision
 	}
-	ctx, cancel := context.WithDeadline(parent, started.Add(time.Duration(p.Limits.QueryTimeoutMS)*time.Millisecond))
-	defer cancel()
+	ctx := parent
 	result := &DiagnosticResult{Alias: p.Alias, Stage: "config", Stages: []database.Stage{{Stage: "config", OK: true}}}
 	fail := func(stage string, code contracts.Code, e error) (*DiagnosticResult, error) {
-		if q.Operation == "describe" && errors.Is(e, context.Canceled) {
+		if errors.Is(e, context.Canceled) {
 			return nil, context.Canceled
 		}
 		if parent.Err() != nil {
@@ -338,10 +345,15 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		}
 	}
 	if p.CredentialRef != "" {
-		if err = m.repo.Unlock(ctx, false, ""); err != nil {
+		prep, prepared := context.WithTimeout(parent, vault.PreparationTimeout)
+		err = m.repo.Unlock(prep, false, "")
+		prepared()
+		if err != nil {
 			return fail("vault", contracts.VaultUnavailable, err)
 		}
 	}
+	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Limits.QueryTimeoutMS)*time.Millisecond)
+	defer cancel()
 	// Work admits before acquiring a fresh snapshot, preserving query-vs-mutation leases.
 	err = m.Work(ctx, p.Alias, func(ctx context.Context, d database.Driver, a database.Access) error {
 		if a.Profile.ID != q.ProfileID {
@@ -411,11 +423,5 @@ func serveManagement(ctx context.Context, c *net.UnixConn, m *Manager) {
 		return
 	}
 	_ = c.SetReadDeadline(time.Time{})
-	operation, cancel := context.WithCancel(ctx)
-	defer cancel()
-	// A client keeps its write half open until completion; EOF cancels the operation.
-	go func() { var b [1]byte; _, _ = c.Read(b[:]); cancel() }()
-	reply := m.HandleManagement(operation, q)
-	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_ = writeFrame(c, reply)
+	serveManagementExchange(ctx, c, m, q)
 }

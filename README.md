@@ -93,7 +93,7 @@ data-mate uninstall           # Keep saved connections and credentials
 data-mate uninstall --purge   # Remove saved connections, credentials, and their keyset
 ```
 
-Uninstall shows what it will remove and asks for confirmation. Saved connections and credentials remain available after reinstalling unless you use `--purge`. Add `--yes` to confirm noninteractively.
+Uninstall shows what it will remove and asks for confirmation. Saved connections and credentials remain available after reinstalling unless you use `--purge`. Add `--yes` to skip confirmation; purging protected credentials can still require keyring authentication.
 
 Run `data-mate help` for the complete command reference.
 

@@ -109,7 +109,7 @@ func (r *Repository) Unlock(ctx context.Context, create bool, expected config.Re
 		if result != nil {
 			r.mu.Lock()
 			r.state = "unavailable"
-			if errors.Is(result, ErrLocked) || errors.Is(result, ErrDenied) {
+			if errors.Is(result, ErrLocked) || errors.Is(result, ErrDenied) || errors.Is(result, ErrPassword) || errors.Is(result, ErrTerminal) {
 				r.state = "locked"
 			}
 			r.mu.Unlock()
@@ -317,6 +317,30 @@ type Outcome struct {
 	PublicationUncertain bool            `json:"publication_uncertain"`
 }
 
+// NeedsKey shares the credential-patch requirement with management preparation.
+func (m Mutation) NeedsKey() (bool, error) {
+	p := m.Profiles
+	needsKey := len(m.Replacements) > 0
+	for id, patch := range m.Patches {
+		var check Secrets
+		if !config.ValidUUID(id) || patch.Apply(&check) != nil {
+			return false, ErrRepair
+		}
+		found := false
+		for _, c := range p.Connections {
+			if c.ID != id {
+				continue
+			}
+			found = true
+			needsKey = needsKey || check != (Secrets{}) || c.CredentialRef != ""
+		}
+		if !found {
+			return false, ErrRepair
+		}
+	}
+	return needsKey, nil
+}
+
 func (r *Repository) Apply(ctx context.Context, m Mutation) (Outcome, error) {
 	var out Outcome
 	raw, err := json.Marshal(m.Profiles)
@@ -327,17 +351,9 @@ func (r *Repository) Apply(ctx context.Context, m Mutation) (Outcome, error) {
 	if err != nil {
 		return out, err
 	}
-	needsKey := len(m.Replacements) > 0
-	for id, patch := range m.Patches {
-		var check Secrets
-		if !config.ValidUUID(id) || patch.Apply(&check) != nil {
-			return out, ErrRepair
-		}
-		for _, c := range p.Connections {
-			if c.ID == id && (check != (Secrets{}) || c.CredentialRef != "") {
-				needsKey = true
-			}
-		}
+	needsKey, err := m.NeedsKey()
+	if err != nil {
+		return out, err
 	}
 	if needsKey {
 		if err = r.Unlock(ctx, true, m.Expected); err != nil {

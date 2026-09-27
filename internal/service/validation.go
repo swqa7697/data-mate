@@ -15,27 +15,27 @@ import (
 )
 
 // validateMutation resolves the same candidate patches as publication, but releases
-// state access before network work. Apply rechecks Expected before any publication.
-func (m *Manager) validateMutation(ctx context.Context, q ManagementRequest) error {
-	started := time.Now()
+// state access before network work. It returns the post-preparation mutation
+// deadline so Apply shares the same budget and rechecks Expected before publication.
+func (m *Manager) validateMutation(ctx context.Context, q ManagementRequest) (time.Time, error) {
 	mutation := q.Mutation
 	if len(mutation.Replacements) != 0 {
-		return ErrState
+		return time.Time{}, ErrState
 	}
 	raw, err := json.Marshal(mutation.Profiles)
 	if err != nil {
-		return ErrState
+		return time.Time{}, ErrState
 	}
 	candidates, _, err := config.DecodeProfiles(bytes.NewReader(raw))
 	if err != nil {
-		return ErrState
+		return time.Time{}, ErrState
 	}
 	previous, rev, err := m.repo.Snapshot(ctx)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if rev != mutation.Expected {
-		return config.ErrRevision
+		return time.Time{}, config.ErrRevision
 	}
 	old := make(map[string]config.Profile)
 	for _, p := range previous.Connections {
@@ -47,34 +47,43 @@ func (m *Manager) validateMutation(ctx context.Context, q ManagementRequest) err
 		targetFound = true
 	}
 	needsUnlock := false
-	deadline := started.Add(config.MaxQueryTimeout)
+	budget := config.MaxQueryTimeout
 	for _, p := range candidates.Connections {
 		if p.ID == q.ProfileID {
 			targetFound = true
 		}
 		before, exists := old[p.ID]
 		if p.CredentialRef != before.CredentialRef {
-			return vault.ErrBinding
+			return time.Time{}, vault.ErrBinding
 		}
 		if !exists || p.ID == q.ProfileID || !reflect.DeepEqual(p, before) || len(mutation.Patches[p.ID]) != 0 {
 			changed = append(changed, p)
-			limit := started.Add(time.Duration(p.Limits.QueryTimeoutMS) * time.Millisecond)
-			if limit.Before(deadline) {
-				deadline = limit
+			limit := time.Duration(p.Limits.QueryTimeoutMS) * time.Millisecond
+			if limit < budget {
+				budget = limit
 			}
 			needsUnlock = needsUnlock || before.CredentialRef != ""
 		}
 	}
 	if !targetFound || (q.ProfileID == "" && len(changed) == 0 && len(candidates.Connections) >= len(previous.Connections)) {
-		return ErrState
+		return time.Time{}, ErrState
 	}
-	ctx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	if needsUnlock {
-		if err = m.repo.Unlock(ctx, false, ""); err != nil {
-			return err
+	create, err := mutation.NeedsKey()
+	if err != nil {
+		return time.Time{}, err
+	}
+	if needsUnlock || create {
+		prep, finish := context.WithTimeout(ctx, vault.PreparationTimeout)
+		err = m.repo.Unlock(prep, create, mutation.Expected)
+		finish()
+		if err != nil {
+			return time.Time{}, err
 		}
 	}
+	started := time.Now()
+	deadline := started.Add(30 * time.Second)
+	ctx, cancel := context.WithDeadline(ctx, started.Add(min(budget, 30*time.Second)))
+	defer cancel()
 	accesses, err := func() ([]database.Access, error) {
 		l, err := m.store.ReadLease(ctx)
 		if err != nil {
@@ -121,18 +130,18 @@ func (m *Manager) validateMutation(ctx context.Context, q ManagementRequest) err
 		return accesses, nil
 	}()
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	for _, a := range accesses {
 		leave, admissionError := m.admit(ctx)
 		if admissionError != nil {
-			return admissionError
+			return time.Time{}, admissionError
 		}
 		_, err = m.driver.Test(ctx, a)
 		leave()
 		if err != nil {
-			return err
+			return time.Time{}, err
 		}
 	}
-	return ctx.Err()
+	return deadline, ctx.Err()
 }
