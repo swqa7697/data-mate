@@ -13,9 +13,13 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Format and lint
-    runs-on: macos-15
+  quality-platform:
+    name: Format and lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
@@ -30,8 +34,13 @@ jobs:
           uname -m
           go version
           go env GOOS GOARCH CGO_ENABLED
-          xcrun clang --version
-          xcrun --show-sdk-path
+          if [[ "$(uname -s)" == Darwin ]]; then
+            xcrun clang --version
+            xcrun --show-sdk-path
+          else
+            cc --version
+            getconf GNU_LIBC_VERSION
+          fi
       - name: Prepare pinned dependencies and tools
         run: make setup
       - name: Check formatting
@@ -39,9 +48,13 @@ jobs:
       - name: Lint
         run: make lint
 
-  test-build:
-    name: Test and build
-    runs-on: macos-15
+  test-build-platform:
+    name: Test and build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
@@ -56,8 +69,13 @@ jobs:
           uname -m
           go version
           go env GOOS GOARCH CGO_ENABLED
-          xcrun clang --version
-          xcrun --show-sdk-path
+          if [[ "$(uname -s)" == Darwin ]]; then
+            xcrun clang --version
+            xcrun --show-sdk-path
+          else
+            cc --version
+            getconf GNU_LIBC_VERSION
+          fi
       - name: Prepare pinned dependencies and tools
         run: make setup
       - name: Unit and regression tests
@@ -65,9 +83,13 @@ jobs:
       - name: Build
         run: make build
 
-  race:
-    name: Race tests
-    runs-on: macos-15
+  race-platform:
+    name: Race tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
@@ -82,9 +104,50 @@ jobs:
           uname -m
           go version
           go env GOOS GOARCH CGO_ENABLED
-          xcrun clang --version
-          xcrun --show-sdk-path
+          if [[ "$(uname -s)" == Darwin ]]; then
+            xcrun clang --version
+            xcrun --show-sdk-path
+          else
+            cc --version
+            getconf GNU_LIBC_VERSION
+          fi
       - name: Prepare pinned dependencies and tools
         run: make setup
       - name: Race tests
         run: make test-race
+
+  quality:
+    name: Format and lint
+    needs: quality-platform
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require both platforms
+        env:
+          PLATFORM_RESULT: ${{ needs.quality-platform.result }}
+        run: test "$PLATFORM_RESULT" = success
+
+  test-build:
+    name: Test and build
+    needs: test-build-platform
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require both platforms
+        env:
+          PLATFORM_RESULT: ${{ needs.test-build-platform.result }}
+        run: test "$PLATFORM_RESULT" = success
+
+  race:
+    name: Race tests
+    needs: race-platform
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require both platforms
+        env:
+          PLATFORM_RESULT: ${{ needs.race-platform.result }}
+        run: test "$PLATFORM_RESULT" = success

@@ -20,7 +20,7 @@ var (
 	ErrUnavailable = errors.New("service unavailable; run mcp start")
 	ErrConflict    = errors.New("service identity conflict; owned state was preserved")
 	ErrRestart     = errors.New("service build or protocol changed; run mcp stop then mcp start")
-	ErrStartup     = errors.New("service failed readiness; check profiles and native Keychain access")
+	ErrStartup     = errors.New("service failed readiness; check profiles and OS credential store access")
 )
 
 // Build identifies the application and executable bytes, including dirty rebuilds.
@@ -104,9 +104,8 @@ func (r record) args() []string {
 	}
 	return args
 }
-func label(root config.Root) string { return "com.data-mate.service" }
 func socketDir(root config.Root) string {
-	return "/private/tmp/dm-" + itoa(os.Geteuid()) + "-" + root.Digest[:16]
+	return config.RuntimeTemp() + "/dm-" + itoa(os.Geteuid()) + "-" + root.Digest[:16]
 }
 func readRecord(read func(string, int) ([]byte, error), root config.Root, id config.Identity) (record, error) {
 	b, err := read("service.json", 4096)

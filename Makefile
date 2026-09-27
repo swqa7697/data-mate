@@ -46,7 +46,7 @@ test-race: ## Run the same suite with Go's race detector
 test-integration: ## Run owned PostgreSQL 16/18 Docker fixtures (never in CI)
 	@./scripts/test-integration.sh
 
-release: ## Build signed/notarized production artifacts (explicit signing settings required)
+release: ## Build signed production artifacts; macOS also notarizes (signing settings required)
 	@./scripts/release.sh
 
 bump-major: ## Bump VERSION major and roll CHANGELOG; no Git mutations

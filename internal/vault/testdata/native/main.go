@@ -77,7 +77,7 @@ func run() error {
 		return err
 	}
 	defer store.Close()
-	keys := vault.Keychain{} // unattended: native approval remains required if denied
+	keys := vault.NewKeyProvider() // unattended: native approval remains required if denied
 	repo := vault.New(store, keys)
 	defer repo.Close()
 	account := ""
@@ -173,17 +173,17 @@ func (k observedKeys) Load(ctx context.Context, account string) ([]byte, error) 
 	if e := k.record("load"); e != nil {
 		return nil, vault.ErrUnavailable
 	}
-	return (vault.Keychain{}).Load(ctx, account)
+	return vault.NewKeyProvider().Load(ctx, account)
 }
 func (k observedKeys) CreateIfAbsent(ctx context.Context, account string, raw []byte) ([]byte, error) {
 	if e := k.record("create"); e != nil {
 		return nil, vault.ErrUnavailable
 	}
-	return (vault.Keychain{}).CreateIfAbsent(ctx, account, raw)
+	return vault.NewKeyProvider().CreateIfAbsent(ctx, account, raw)
 }
 func (k observedKeys) Delete(ctx context.Context, account string) error {
 	if e := k.record("delete"); e != nil {
 		return vault.ErrUnavailable
 	}
-	return (vault.Keychain{}).Delete(ctx, account)
+	return vault.NewKeyProvider().Delete(ctx, account)
 }

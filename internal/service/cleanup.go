@@ -88,7 +88,7 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 	if err = m.RemoveOwned(ctx, l); err != nil {
 		return err
 	}
-	for _, path := range []string{"registrations.json.tmp", "registrations.json", "service.json.tmp", "service.plist.tmp", "service.plist"} {
+	for _, path := range []string{"registrations.json.tmp", "registrations.json", "service.json.tmp", config.ServiceFile() + ".tmp", config.ServiceFile()} {
 		if err = l.Remove(path); err != nil {
 			return err
 		}
@@ -105,7 +105,7 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 	if purge {
 		stage = "credential purge"
 		if keys == nil {
-			keys = vault.Keychain{}
+			keys = vault.NewKeyProvider()
 		}
 		if err = vault.New(s, keys).PurgeLocked(ctx, state); err != nil {
 			return err

@@ -50,12 +50,17 @@ func (e *Engine) PrepareHelper(ctx context.Context) (string, error) {
 		return "", config.ErrPending
 	}
 	if inv.Helper != nil {
-		if helperMatches(inv.Helper.Path, inv.Helper.File) {
+		if helperMatches(inv.Helper.Path, inv.Helper.File) && (e.Metadata.Platform != "linux_amd64" || (inv.HelperSignature != nil && helperMatches(inv.HelperSignature.Path, inv.HelperSignature.File))) {
 			return inv.Helper.Path, nil
 		}
 		// A crash after unlinking the helper can be resumed by a verified bootstrap.
 		if !absent(inv.Helper.Path) {
 			return "", ErrConflict
+		}
+		if inv.HelperSignature != nil {
+			if err := removeExact(inv.HelperSignature.Path, inv.HelperSignature.File); err != nil {
+				return "", err
+			}
 		}
 		dir := filepath.Dir(inv.Helper.Path)
 		if !absent(dir) {
@@ -63,7 +68,7 @@ func (e *Engine) PrepareHelper(ctx context.Context) (string, error) {
 				return "", ErrConflict
 			}
 		}
-		inv.Helper = nil
+		inv.Helper, inv.HelperSignature = nil, nil
 		if err = e.save(inv); err != nil {
 			return "", err
 		}
@@ -72,11 +77,38 @@ func (e *Engine) PrepareHelper(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir, err := os.MkdirTemp("/private/tmp", "data-mate-cleanup-")
+	dir, err := os.MkdirTemp(config.RuntimeTemp(), "data-mate-cleanup-")
 	if err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, "data-mate")
+	var signature *Artifact
+	if e.Metadata.Platform == "linux_amd64" {
+		raw, err := candidateSignature(e.Candidate)
+		if err != nil {
+			_ = os.Remove(dir)
+			return "", err
+		}
+		if err = writeNew(path+".sig", raw, 0600); err != nil {
+			_ = os.Remove(dir)
+			return "", err
+		}
+		f, _, err := inspect(path + ".sig")
+		if err != nil {
+			return "", err
+		}
+		signature = &Artifact{path + ".sig", f}
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			if signature != nil {
+				_ = removeExact(signature.Path, signature.File)
+			}
+			_ = os.Remove(path)
+			_ = os.Remove(dir)
+		}
+	}()
 	if err = writeNew(path, raw, 0700); err != nil {
 		return "", err
 	}
@@ -94,11 +126,13 @@ func (e *Engine) PrepareHelper(ctx context.Context) (string, error) {
 		return "", err
 	}
 	inv.Helper = &Artifact{path, file}
+	inv.HelperSignature = signature
 	if err = e.save(inv); err != nil {
 		_ = removeExact(path, file)
 		_ = os.Remove(dir)
 		return "", err
 	}
+	keep = true
 	return path, nil
 }
 
@@ -129,6 +163,9 @@ func (e *Engine) Preview(ctx context.Context) ([]string, error) {
 	}
 	if inv.Helper != nil {
 		out = append(out, inv.Helper.Path)
+		if inv.HelperSignature != nil {
+			out = append(out, inv.HelperSignature.Path)
+		}
 	}
 	out = append(out, e.Root.Path+" (owned runtime; saved store retained unless --purge)")
 	return out, nil
@@ -281,10 +318,10 @@ func (e *Engine) Uninstall(ctx context.Context, purge bool) error {
 	}
 
 	if !purge {
-		if err = removeHelper(inv.Helper); err != nil {
+		if err = removeHelper(inv.Helper, inv.HelperSignature); err != nil {
 			return err
 		}
-		inv.Helper = nil
+		inv.Helper, inv.HelperSignature = nil, nil
 		return e.save(inv)
 	}
 	// A fixed account-home receipt survives removal of the data root and its
@@ -306,12 +343,20 @@ func (e *Engine) Uninstall(ctx context.Context, purge bool) error {
 	return e.finishTerminal(ctx, &inv, terminalLock, lock)
 }
 
-func removeHelper(helper *Artifact) error {
+func removeHelper(helper, signature *Artifact) error {
 	if helper == nil {
 		return nil
 	}
 	if err := removeRecorded(helper.Path); err != nil {
 		return err
+	}
+	if signature != nil {
+		if signature.Path != helper.Path+".sig" {
+			return ErrConflict
+		}
+		if err := removeRecorded(signature.Path); err != nil {
+			return err
+		}
 	}
 	dir := filepath.Dir(helper.Path)
 	if !absent(dir) {
@@ -363,7 +408,7 @@ func (e *Engine) finishTerminal(ctx context.Context, inv *inventory, terminalLoc
 	if err := e.point("terminal-root-removed"); err != nil {
 		return err
 	}
-	if err := removeHelper(inv.Helper); err != nil {
+	if err := removeHelper(inv.Helper, inv.HelperSignature); err != nil {
 		return err
 	}
 	if err := terminalLock.check(); err != nil {

@@ -36,6 +36,7 @@ type inventory struct {
 	PreviousBlocks  []ShellBlock       `json:"previous_blocks"`
 	Directories     []Directory        `json:"directories"`
 	Helper          *Artifact          `json:"helper,omitempty"`
+	HelperSignature *Artifact          `json:"helper_signature,omitempty"`
 	Purge           bool               `json:"purge"`
 	Terminal        bool               `json:"terminal"`
 }
@@ -117,9 +118,12 @@ func (e *Engine) load() (inventory, error) {
 	}
 	if inv.Helper != nil {
 		dir := filepath.Dir(inv.Helper.Path)
-		if filepath.Dir(dir) != "/private/tmp" || !strings.HasPrefix(filepath.Base(dir), "data-mate-cleanup-") || filepath.Base(inv.Helper.Path) != "data-mate" {
+		if filepath.Dir(dir) != config.RuntimeTemp() || !strings.HasPrefix(filepath.Base(dir), "data-mate-cleanup-") || filepath.Base(inv.Helper.Path) != "data-mate" {
 			return inv, ErrConflict
 		}
+	}
+	if inv.HelperSignature != nil && (inv.Helper == nil || inv.HelperSignature.Path != inv.Helper.Path+".sig" || inv.HelperSignature.File.Target != "" || inv.HelperSignature.File.Mode != 0600) {
+		return inv, ErrConflict
 	}
 	seen := map[string]bool{}
 	for _, a := range inv.Artifacts {
@@ -141,7 +145,7 @@ func (e *Engine) load() (inventory, error) {
 	return inv, nil
 }
 func (e *Engine) artifactPath(path string) bool {
-	if path == filepath.Join(e.Home, ".local", "bin", "data-mate") || path == config.ExecutablePath(e.Root) {
+	if path == filepath.Join(e.Home, ".local", "bin", "data-mate") || path == config.ExecutablePath(e.Root) || (e.Metadata.Platform == "linux_amd64" && path == config.ExecutablePath(e.Root)+".sig") {
 		return true
 	}
 	for _, shell := range []string{"bash", "zsh"} {
@@ -369,6 +373,13 @@ func (e *Engine) Install(ctx context.Context) (result error) {
 		inv.Directories = append(inv.Directories, dir)
 	}
 	desiredFiles := []desired{{path: config.ExecutablePath(e.Root), raw: raw, mode: 0700}, {path: filepath.Join(e.Home, ".local", "bin", "data-mate"), target: config.ExecutablePath(e.Root)}}
+	if e.Metadata.Platform == "linux_amd64" {
+		sig, err := candidateSignature(e.Candidate)
+		if err != nil {
+			return err
+		}
+		desiredFiles = append(desiredFiles, desired{path: config.ExecutablePath(e.Root) + ".sig", raw: sig, mode: 0600})
+	}
 	for _, shell := range []string{"bash", "zsh"} {
 		script, err := e.Completion(shell)
 		if err != nil {

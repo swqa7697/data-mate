@@ -3,10 +3,6 @@
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 check_build_deps
-[[ "$(uname -m)" == arm64 ]] || {
-  echo 'Native arm64 host required.' >&2
-  exit 1
-}
 version="$(cat VERSION)"
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
   echo 'Stable VERSION required.' >&2
@@ -19,8 +15,6 @@ if [[ "${DATA_MATE_RELEASE_TRIAL:-0}" != 1 ]]; then
     exit 1
   }
 fi
-: "${DATA_MATE_SIGNING_IDENTITY:?Select a Developer ID Application identity}"
-: "${DATA_MATE_NOTARY_PROFILE:?Select a notarytool Keychain profile}"
 output="${DATA_MATE_RELEASE_OUTPUT:-$project_dir/.dist}"
 [[ "$output" == /* && ! -e "$output" ]] || {
   echo 'Release output must be a new absolute directory. Move or remove previous output before rebuilding.' >&2
@@ -28,6 +22,35 @@ output="${DATA_MATE_RELEASE_OUTPUT:-$project_dir/.dist}"
 }
 umask 077
 mkdir -p "$output"
+if [[ "$GOOS" == linux ]]; then
+  : "${DATA_MATE_LINUX_SIGNING_KEY:?Select the private Linux release signing key file}"
+  binary="$output/data-mate_linux_amd64"
+  if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    "$project_dir/scripts/release-linux-build.sh" "$binary" "$version" "$revision"
+  else
+    [[ "$(getconf GNU_LIBC_VERSION)" == 'glibc 2.39' ]] || {
+      echo 'Linux releases require the Ubuntu 24.04/glibc 2.39 build baseline.' >&2
+      exit 1
+    }
+    go build -mod=readonly -trimpath -ldflags "-X main.version=$version -X main.revision=$revision -X main.dirty=false -X main.environment=production" -o "$binary" ./cmd/data-mate
+  fi
+  chmod 700 "$binary"
+  readelf -d "$binary" >"$output/native-libraries.txt"
+  if grep -Eq '\((RPATH|RUNPATH)\)' "$output/native-libraries.txt"; then
+    echo 'Unexpected native library search path.' >&2
+    exit 1
+  fi
+  awk '/NEEDED/ && $NF !~ /^\[(libc.so.6|libpthread.so.0|libdl.so.2|libm.so.6|librt.so.1|ld-linux-x86-64.so.2)\]$/ {bad=1} END {exit bad}' "$output/native-libraries.txt"
+  openssl dgst -sha256 -sign "$DATA_MATE_LINUX_SIGNING_KEY" -out "$binary.sig" "$binary"
+  openssl dgst -sha256 -verify "$project_dir/internal/distribution/linux-public.pem" -signature "$binary.sig" "$binary"
+  "$binary" __release-metadata --text >"$output/release_linux_amd64.txt"
+  cp scripts/install-release.sh "$output/install.sh"
+  (cd "$output" && sha256sum install.sh data-mate_linux_amd64 data-mate_linux_amd64.sig release_linux_amd64.txt >SHA256SUMS_linux_amd64)
+  printf 'Verified Linux artifacts: %s\n' "$output"
+  exit 0
+fi
+: "${DATA_MATE_SIGNING_IDENTITY:?Select a Developer ID Application identity}"
+: "${DATA_MATE_NOTARY_PROFILE:?Select a notarytool Keychain profile}"
 export MACOSX_DEPLOYMENT_TARGET=15.0
 export CGO_CFLAGS='-O2 -g -mmacosx-version-min=15.0'
 export CGO_LDFLAGS='-O2 -g -mmacosx-version-min=15.0'

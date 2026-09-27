@@ -158,7 +158,7 @@ func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 		s.Close()
 		return err
 	}
-	f.job = job{true, os.Getpid(), filepath.Join(root.Path, "service.plist"), r.args()}
+	f.job = job{true, os.Getpid(), filepath.Join(root.Path, config.ServiceFile()), r.args()}
 	f.starts++
 	if f.noReady {
 		s.Close()

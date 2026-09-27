@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"debug/macho"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -47,17 +45,25 @@ type Metadata struct {
 	Format          int    `json:"format"`
 	Version         string `json:"version"`
 	Platform        string `json:"platform"`
-	MinimumMacOS    string `json:"minimum_macos"`
+	MinimumMacOS    string `json:"minimum_macos,omitempty"`
+	MinimumGlibc    string `json:"minimum_glibc,omitempty"`
 	StoreSchema     int    `json:"store_schema"`
 	InventorySchema int    `json:"inventory_schema"`
 }
 
 // Contract derives the sole application version from build metadata.
 func Contract(version string) Metadata {
-	return Metadata{1, version, "darwin_arm64", MinimumMacOS, 1, 1}
+	m := Metadata{Format: 1, Version: version, Platform: runtime.GOOS + "_" + runtime.GOARCH, StoreSchema: 1, InventorySchema: 1}
+	if runtime.GOOS == "linux" {
+		m.MinimumGlibc = "2.39"
+	} else {
+		m.MinimumMacOS = MinimumMacOS
+	}
+	return m
 }
 func (m Metadata) valid() bool {
-	return m.Format == 1 && stable.MatchString(m.Version) && m.Platform == "darwin_arm64" && osVersion.MatchString(m.MinimumMacOS) && m.StoreSchema > 0 && m.InventorySchema > 0
+	platform := (m.Platform == "darwin_arm64" && osVersion.MatchString(m.MinimumMacOS) && m.MinimumGlibc == "") || (m.Platform == "linux_amd64" && osVersion.MatchString(m.MinimumGlibc) && m.MinimumMacOS == "")
+	return m.Format == 1 && stable.MatchString(m.Version) && platform && m.StoreSchema > 0 && m.InventorySchema > 0
 }
 
 // ParseMetadata never evaluates metadata as shell or accepts extension fields.
@@ -90,7 +96,7 @@ func ParseMetadata(raw []byte) (Metadata, error) {
 		}
 		return n
 	}
-	m = Metadata{integer("format"), fields["version"], fields["platform"], fields["minimum_macos"], integer("store_schema"), integer("inventory_schema")}
+	m = Metadata{Format: integer("format"), Version: fields["version"], Platform: fields["platform"], MinimumMacOS: fields["minimum_macos"], MinimumGlibc: fields["minimum_glibc"], StoreSchema: integer("store_schema"), InventorySchema: integer("inventory_schema")}
 	if !m.valid() {
 		return Metadata{}, ErrRelease
 	}
@@ -99,7 +105,11 @@ func ParseMetadata(raw []byte) (Metadata, error) {
 
 // Text is the canonical bootstrap-readable representation.
 func (m Metadata) Text() string {
-	return fmt.Sprintf("format=%d\nversion=%s\nplatform=%s\nminimum_macos=%s\nstore_schema=%d\ninventory_schema=%d\n", m.Format, m.Version, m.Platform, m.MinimumMacOS, m.StoreSchema, m.InventorySchema)
+	key, minimum := "minimum_macos", m.MinimumMacOS
+	if m.Platform == "linux_amd64" {
+		key, minimum = "minimum_glibc", m.MinimumGlibc
+	}
+	return fmt.Sprintf("format=%d\nversion=%s\nplatform=%s\n%s=%s\nstore_schema=%d\ninventory_schema=%d\n", m.Format, m.Version, m.Platform, key, minimum, m.StoreSchema, m.InventorySchema)
 }
 
 func allowedURL(raw string) bool {
@@ -210,7 +220,8 @@ func (c Client) Latest(ctx context.Context, current string) (_ *Candidate, resul
 		}
 		assets[a.Name] = a.URL
 	}
-	for _, name := range []string{"install.sh", "release.txt", "SHA256SUMS", "data-mate_darwin_arm64"} {
+	names := platformAssets(runtime.GOOS + "_" + runtime.GOARCH)
+	for _, name := range names.all() {
 		if assets[name] != base+name {
 			return nil, ErrRelease
 		}
@@ -226,30 +237,36 @@ func (c Client) Latest(ctx context.Context, current string) (_ *Candidate, resul
 		}
 	}()
 	var meta, sums strings.Builder
-	if c.fetch(ctx, base+"release.txt", 4096, &meta) != nil || c.fetch(ctx, base+"SHA256SUMS", 65536, &sums) != nil {
+	if c.fetch(ctx, base+names.metadata, 4096, &meta) != nil || c.fetch(ctx, base+names.sums, 65536, &sums) != nil {
 		return nil, ErrRelease
 	}
 	candidate.Metadata, err = ParseMetadata([]byte(meta.String()))
-	if err != nil || candidate.Metadata.Version != version {
+	if err != nil || candidate.Metadata.Version != version || candidate.Metadata.Platform != runtime.GOOS+"_"+runtime.GOARCH {
 		return nil, ErrRelease
 	}
-	hashes, err := checksums(sums.String())
-	if err != nil || digest([]byte(meta.String())) != hashes["release.txt"] {
+	hashes, err := checksumsFor(sums.String(), names)
+	if err != nil || digest([]byte(meta.String())) != hashes[names.metadata] {
 		return nil, ErrRelease
 	}
 	file, err := os.OpenFile(candidate.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0700)
 	if err != nil {
 		return nil, ErrRelease
 	}
-	err = c.fetch(ctx, base+"data-mate_darwin_arm64", MaxBinary, file)
+	err = c.fetch(ctx, base+names.binary, MaxBinary, file)
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if err != nil || syncErr != nil || closeErr != nil {
 		return nil, ErrRelease
 	}
 	hash, err := hashFile(candidate.Path)
-	if err != nil || hash != hashes["data-mate_darwin_arm64"] {
+	if err != nil || hash != hashes[names.binary] {
 		return nil, ErrRelease
+	}
+	if names.signature != "" {
+		var sig bytes.Buffer
+		if c.fetch(ctx, base+names.signature, 4096, &sig) != nil || digest(sig.Bytes()) != hashes[names.signature] || os.WriteFile(candidate.Path+".sig", sig.Bytes(), 0600) != nil {
+			return nil, ErrRelease
+		}
 	}
 	verify := c.verify
 	if verify == nil {
@@ -280,7 +297,27 @@ func hashFile(path string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
-func checksums(raw string) (map[string]string, error) {
+
+type releaseAssets struct{ binary, metadata, sums, signature string }
+
+func platformAssets(platform string) releaseAssets {
+	if platform == "linux_amd64" {
+		return releaseAssets{"data-mate_linux_amd64", "release_linux_amd64.txt", "SHA256SUMS_linux_amd64", "data-mate_linux_amd64.sig"}
+	}
+	return releaseAssets{"data-mate_darwin_arm64", "release.txt", "SHA256SUMS", ""}
+}
+func (a releaseAssets) all() []string {
+	names := append(a.hashed(), a.sums)
+	return names
+}
+func (a releaseAssets) hashed() []string {
+	names := []string{"install.sh", a.metadata, a.binary}
+	if a.signature != "" {
+		names = append(names, a.signature)
+	}
+	return names
+}
+func checksumsFor(raw string, assets releaseAssets) (map[string]string, error) {
 	out := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSuffix(raw, "\n"), "\n") {
 		h, name, ok := strings.Cut(line, "  ")
@@ -288,14 +325,18 @@ func checksums(raw string) (map[string]string, error) {
 		if !ok || err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != h || out[name] != "" {
 			return nil, ErrRelease
 		}
-		switch name {
-		case "install.sh", "release.txt", "data-mate_darwin_arm64":
-		default:
+		allowed := false
+		for _, asset := range assets.hashed() {
+			if name == asset {
+				allowed = true
+			}
+		}
+		if !allowed {
 			return nil, ErrRelease
 		}
 		out[name] = h
 	}
-	if len(out) != 3 {
+	if len(out) != len(assets.hashed()) {
 		return nil, ErrRelease
 	}
 	return out, nil
@@ -330,34 +371,6 @@ func command(parent context.Context, exe string, args ...string) ([]byte, error)
 // VerifyNative checks publisher identity and platform compatibility before executing code.
 // Notarization is checked during release publication; macOS owns runtime policy.
 // Bare Mach-O tools are not assessed as application bundles by spctl.
-func VerifyNative(ctx context.Context, path string, m Metadata) error {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" || os.Geteuid() == 0 || !m.valid() {
-		return ErrRelease
-	}
-	if err := verifyMachO(path, m.MinimumMacOS); err != nil {
-		return err
-	}
-	osRaw, err := command(ctx, "/usr/bin/sw_vers", "-productVersion")
-	if err != nil {
-		return err
-	}
-	host := strings.TrimSpace(string(osRaw))
-	if !strings.Contains(host, ".") {
-		host += ".0"
-	}
-	if strings.Count(host, ".") == 1 {
-		host += ".0"
-	}
-	minimum := m.MinimumMacOS
-	if strings.Count(minimum, ".") == 1 {
-		minimum += ".0"
-	}
-	if err != nil || !semver.IsValid("v"+host) || semver.Compare("v"+host, "v"+minimum) < 0 {
-		return ErrRelease
-	}
-	return verifyCodeSignature(ctx, path, command)
-}
-
 // Keep the publisher requirement independent of Apple's online notarization
 // service. macOS may still enforce its own certificate and execution policies.
 func verifyCodeSignature(ctx context.Context, path string, run func(context.Context, string, ...string) ([]byte, error)) error {
@@ -367,59 +380,6 @@ func verifyCodeSignature(ctx context.Context, path string, run func(context.Cont
 	}
 	_, err := run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", requirement, path)
 	return err
-}
-
-func verifyMachO(path, minimum string) error {
-	f, err := macho.Open(path)
-	if err != nil {
-		return ErrRelease
-	}
-	defer f.Close()
-	if f.Cpu != macho.CpuArm64 || f.Type != macho.TypeExec {
-		return ErrRelease
-	}
-	found := false
-	for _, load := range f.Loads {
-		if lib, ok := load.(*macho.Dylib); ok && !strings.HasPrefix(lib.Name, "/usr/lib/") && !strings.HasPrefix(lib.Name, "/System/Library/") {
-			return ErrRelease
-		}
-		raw := load.Raw()
-		if len(raw) < 8 {
-			return ErrRelease
-		}
-		kind := binary.LittleEndian.Uint32(raw)
-		if kind == 0x8000001c {
-			return ErrRelease
-		} // LC_RPATH
-		var version uint32
-		if kind == 0x32 { // LC_BUILD_VERSION
-			if len(raw) < 24 || binary.LittleEndian.Uint32(raw[8:]) != 1 {
-				return ErrRelease
-			}
-			version = binary.LittleEndian.Uint32(raw[12:])
-			found = true
-		} else if kind == 0x24 { // LC_VERSION_MIN_MACOSX
-			if len(raw) < 16 {
-				return ErrRelease
-			}
-			version = binary.LittleEndian.Uint32(raw[8:])
-			found = true
-		}
-		if version != 0 {
-			target := fmt.Sprintf("v%d.%d.%d", version>>16, (version>>8)&255, version&255)
-			bound := "v" + minimum
-			if strings.Count(minimum, ".") == 1 {
-				bound += ".0"
-			}
-			if semver.Compare(target, bound) > 0 {
-				return ErrRelease
-			}
-		}
-	}
-	if !found {
-		return ErrRelease
-	}
-	return nil
 }
 
 func boundedJSON(raw []byte) ([]byte, error) { return contracts.JSON(bytes.NewReader(raw), 1<<20) }

@@ -11,7 +11,7 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
   - More Supports: Be able to add more agents to be compatible in the future
 - Broad DB Supports: Supports all mainstream DB types, such as PG, MySQL, MongoDB, etc.
   - First Implementation: Add PG supports in the first version (min 16), and should be able to add more later without pain because of abstraction design
-- OS Supports: Test and run only on macOS (Apple Silicon) for now, and may add Linux in the future (never supports Windows or Intel x86 macOS)
+- OS Supports: macOS 15+ (Apple Silicon) and Linux x86_64 (Windows, Intel macOS, Linux arm64 are unsupported)
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
@@ -50,8 +50,8 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Distribution Installer: A installation bash script (also in `scripts`) for users to install latest stable standalone binary through terminal
 - Self-Contained: Not requiring user to have Go installed
 - Standalone Upgrades: Run `data-mate upgrade` (or its alias `data-mate update`) to upgrade to the latest stable release, reusing the same upgrade path as the distribution installer
-- Complete Terminal Uninstall: `data-mate uninstall` stops Data Mate and removes its executable, MCP registrations, runtime files, logs, caches, preferences, and other installation artifacts; retain only configured DB connections and their reusable encrypted credential store, required store metadata, and Keychain encryption keys.
-  - Explicit Full Removal: `data-mate uninstall --purge` removes anything, including saved connections, encrypted credential store and associated Keychain keys, leaving literally **no residue**
+- Complete Terminal Uninstall: `data-mate uninstall` stops Data Mate and removes its executable, MCP registrations, runtime files, logs, caches, preferences, and other installation artifacts; retain only configured DB connections and their reusable encrypted credential store, required store metadata, and OS credential-store encryption keys.
+  - Explicit Full Removal: `data-mate uninstall --purge` removes anything, including saved connections, encrypted credential store and associated OS credential-store keys, leaving literally **no residue**
   - Scope: No-residue cleanup covers Data Mate managed artifacts, not OS snapshots, user managed backups, external agent transcripts, or independent manual copies
 
 #### Development

@@ -99,7 +99,7 @@ func nativeAgentAcceptance(t *testing.T, p config.Profile, password string, sql 
 			clean = false
 			t.Error("native agent registration cleanup", e)
 		}
-		if e = (vault.Keychain{}).Delete(cleanup, account); e != nil {
+		if e = vault.NewKeyProvider().Delete(cleanup, account); e != nil {
 			clean = false
 			t.Error("native agent key cleanup", e)
 		}

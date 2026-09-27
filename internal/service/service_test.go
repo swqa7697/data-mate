@@ -132,7 +132,7 @@ func TestLifecycleIdentityAndReadiness(t *testing.T) {
 		t.Fatal(e)
 	}
 	// A durable launch intent alone cannot authorize direct daemon invocation.
-	rejectedLaunch := &fakeLaunch{job: job{true, os.Getpid() + 1, filepath.Join(c.Root.Path, "service.plist"), rec.args()}}
+	rejectedLaunch := &fakeLaunch{job: job{true, os.Getpid() + 1, filepath.Join(c.Root.Path, config.ServiceFile()), rec.args()}}
 	if err := serve(t.Context(), c.Root, c.Build, rec.Nonce, noKeys{}, rejectedLaunch); !errors.Is(err, ErrConflict) {
 		t.Fatal("direct service bypassed launchd admission", err)
 	}

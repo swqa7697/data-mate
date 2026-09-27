@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,12 @@ func TestInstallIsolationAndClean(t *testing.T) {
 		if i == 0 {
 			shellHome := t.TempDir()
 			for _, shell := range []string{"bash", "zsh"} {
+				if shell == "zsh" && runtime.GOOS == "linux" {
+					if _, err := os.Stat("/bin/zsh"); os.IsNotExist(err) {
+						t.Log("optional zsh execution unverified: not installed")
+						continue
+					}
+				}
 				generated := run(t, temp, true, bin, "completion", shell)
 				path := filepath.Join(shellHome, "completion."+shell)
 				if err := os.WriteFile(path, []byte(generated), 0600); err != nil {

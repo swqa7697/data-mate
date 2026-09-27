@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,11 @@ func fixture(t *testing.T) *Engine {
 	candidate := filepath.Join(candidateDir, "candidate")
 	if err := os.WriteFile(candidate, []byte("synthetic executable"), 0700); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "linux" {
+		if err := os.WriteFile(candidate+".sig", make([]byte, 384), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	e := &Engine{Home: home, Root: root, Candidate: candidate, Metadata: Contract("1.0.0"), Shell: "bash", checkInstalled: func(context.Context, string, Metadata) error { return nil }, Verify: func(context.Context, string, Metadata) error { return nil }, Completion: func(string) ([]byte, error) { return []byte("# synthetic completion\n"), nil }}
 	e.Cleanup = func(ctx context.Context, purge bool) error {
@@ -547,7 +553,7 @@ scenario="$2"
   [[ "$#" == 5 && "$1" == --verify && "$2" == --strict && "$3" == -R && "$5" == candidate ]] || return 1
   [[ "$4" != *notarized* && "$scenario" == accepted ]]
 }
-verify_signature candidate
+verify_darwin_signature candidate
 `, "verification", "../../scripts/install-release.sh", scenario.name)
 			output, shellErr := cmd.CombinedOutput()
 			if (shellErr == nil) != (scenario.want == nil) {
@@ -583,9 +589,13 @@ verify_signature candidate
 	for _, scenario := range []string{"pinned", "checksum", "truncated", "unsigned", "prerelease", "downgrade"} {
 		t.Run(scenario, func(t *testing.T) {
 			metadata := Contract("1.2.3")
+			names := platformAssets(metadata.Platform)
 			encoded, _ := json.Marshal(metadata)
 			executable := "#!/bin/sh\nprintf '%s\\n' '" + string(encoded) + "'\n"
-			sums := fmt.Sprintf("%s  install.sh\n%s  release.txt\n%s  data-mate_darwin_arm64\n", digest(nil), digest([]byte(metadata.Text())), digest([]byte(executable)))
+			sums := fmt.Sprintf("%s  install.sh\n%s  %s\n%s  %s\n", digest(nil), digest([]byte(metadata.Text())), names.metadata, digest([]byte(executable)), names.binary)
+			if names.signature != "" {
+				sums += fmt.Sprintf("%s  %s\n", digest([]byte("signature")), names.signature)
+			}
 			requests, verified := 0, false
 			c := NewClient()
 			c.verify = func(_ context.Context, path string, got Metadata) error {
@@ -603,7 +613,7 @@ verify_signature candidate
 						t.Fatal("not resolving latest first")
 					}
 					assets := []map[string]string{}
-					for _, name := range []string{"install.sh", "release.txt", "SHA256SUMS", "data-mate_darwin_arm64"} {
+					for _, name := range names.all() {
 						assets = append(assets, map[string]string{"name": name, "browser_download_url": "https://github.com/" + Repository + "/releases/download/v1.2.3/" + name})
 					}
 					raw, _ := json.Marshal(map[string]any{"tag_name": "v1.2.3", "draft": false, "prerelease": scenario == "prerelease", "assets": assets})
@@ -613,15 +623,17 @@ verify_signature candidate
 						t.Fatal("mixed release versions", req.URL)
 					}
 					switch filepath.Base(req.URL.Path) {
-					case "release.txt":
+					case names.metadata:
 						body = metadata.Text()
-					case "SHA256SUMS":
+					case names.sums:
 						body = sums
-					case "data-mate_darwin_arm64":
+					case names.binary:
 						body = executable
 						if scenario == "checksum" {
 							body += "#tampered"
 						}
+					case names.signature:
+						body = "signature"
 					default:
 						t.Fatal("unexpected request", req.URL)
 					}
@@ -665,6 +677,11 @@ func (f roundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return
 func TestShellActivation(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh"} {
 		t.Run(shell, func(t *testing.T) {
+			if shell == "zsh" && runtime.GOOS == "linux" {
+				if _, err := os.Stat("/bin/zsh"); os.IsNotExist(err) {
+					t.Skip("optional zsh is not installed on Linux")
+				}
+			}
 			e := fixture(t)
 			e.Shell = shell
 			if err := e.Install(t.Context()); err != nil {

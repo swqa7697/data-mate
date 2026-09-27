@@ -2,12 +2,13 @@
 
 <p align="center">
   <strong>Explore PostgreSQL from Codex or Claude Code.</strong><br />
-  A local CLI and <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> (MCP) service for read-only database access on macOS.
+  A local CLI and <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> (MCP) service for read-only database access on macOS and Linux.
 </p>
 
 <p align="center">
   <a href="https://github.com/swqa7697/data-mate/releases/latest"><img src="https://img.shields.io/github/v/release/swqa7697/data-mate" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/macOS-15%2B%20%C2%B7%20Apple%20Silicon-000000?logo=apple&logoColor=white" alt="macOS 15+ on Apple Silicon" />
+  <img src="https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%C2%B7%20x86__64-FCC624?logo=linux&logoColor=black" alt="Linux x86_64 on Ubuntu 24.04+" />
   <img src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white" alt="Go 1.27" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0 license" /></a>
 </p>
@@ -25,17 +26,17 @@ Data Mate lets coding agents discover tables, inspect columns, and answer questi
 
 ## At a glance
 
-| Feature               | What it gives you                                                      |
-| --------------------- | ---------------------------------------------------------------------- |
-| Read-only tools       | List connections and tables, describe tables, and run bounded queries. |
-| Protected credentials | Keep saved credentials protected with macOS Keychain.                  |
-| Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.     |
-| Agent setup           | Register the service with installed Codex and Claude Code clients.     |
-| Shell completion      | Complete commands and saved aliases in Bash or zsh.                    |
+| Feature               | What it gives you                                                             |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Read-only tools       | List connections and tables, describe tables, and run bounded queries.        |
+| Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
+| Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
+| Agent setup           | Register the service with installed Codex and Claude Code clients.            |
+| Shell completion      | Complete commands and saved aliases in Bash or zsh.                           |
 
 ## Get started
 
-Data Mate supports **macOS 15 or later on Apple Silicon** and **PostgreSQL 16 or later**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only PostgreSQL account with access only to the data you intend to share.
+Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only PostgreSQL account with access only to the data you intend to share.
 
 Install the latest stable release:
 

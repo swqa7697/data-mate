@@ -246,7 +246,7 @@ func renameExact(from, to string, expected File) error {
 	if exact(from, expected) != nil || src.check() != nil || dst.check() != nil {
 		return ErrConflict
 	}
-	if err = unix.RenameatxNp(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to), unix.RENAME_EXCL); err != nil {
+	if err = renameExclusive(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to)); err != nil {
 		return err
 	}
 	return dst.last().Sync()
@@ -266,7 +266,7 @@ func replaceExact(from, to string, before *File) error {
 		return ErrConflict
 	}
 	if before == nil {
-		return unix.RenameatxNp(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to), unix.RENAME_EXCL)
+		return renameExclusive(int(src.last().Fd()), filepath.Base(from), int(dst.last().Fd()), filepath.Base(to))
 	}
 	if exact(to, *before) != nil {
 		return ErrConflict

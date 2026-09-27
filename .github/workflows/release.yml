@@ -54,7 +54,17 @@ jobs:
     needs: validate
     # This environment must restrict eligible tags and access to signing secrets.
     environment: release
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin_arm64
+            arch: arm64
+          - os: ubuntu-latest
+            platform: linux_amd64
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
@@ -66,17 +76,18 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: true
-      - name: Require native arm64 and matching stable tag
+      - name: Require native target and matching stable tag
         env:
           REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = "${{ matrix.arch }}"
           ./scripts/release-tools.sh validate "$REQUESTED_TAG"
       - name: Prepare pinned dependencies
         run: make setup
       - name: Build, sign and notarize
-        id: sign
+        id: sign-macos
+        if: runner.os == 'macOS'
         env:
           APPLE_SIGNING_P12_BASE64: ${{ secrets.APPLE_SIGNING_P12_BASE64 }}
           APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
@@ -106,22 +117,47 @@ jobs:
           export DATA_MATE_NOTARY_KEYCHAIN="$signing_keychain"
           export DATA_MATE_RELEASE_OUTPUT="$RUNNER_TEMP/data-mate-release"
           ./scripts/release.sh
+      - name: Build and sign Linux candidate
+        id: sign-linux
+        if: runner.os == 'Linux'
+        env:
+          LINUX_SIGNING_PRIVATE_KEY: ${{ secrets.LINUX_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          signing_dir="$(mktemp -d /tmp/data-mate-signing.XXXXXX)"
+          trap 'rm -rf "$signing_dir"' EXIT
+          printf '%s\n' "$LINUX_SIGNING_PRIVATE_KEY" > "$signing_dir/private.pem"
+          unset LINUX_SIGNING_PRIVATE_KEY
+          export DATA_MATE_LINUX_SIGNING_KEY="$signing_dir/private.pem"
+          export DATA_MATE_RELEASE_OUTPUT="$RUNNER_TEMP/data-mate-release"
+          ./scripts/release.sh
       - name: Verify signed candidate and tamper rejection
         env:
           DATA_MATE_NATIVE_TEST: '1'
-          DATA_MATE_DISTRIBUTION_CANDIDATE: ${{ runner.temp }}/data-mate-release/data-mate_darwin_arm64
+          DATA_MATE_DISTRIBUTION_CANDIDATE: ${{ runner.temp }}/data-mate-release/data-mate_${{ matrix.platform }}
         run: go test -mod=readonly -count=1 -run '^TestNativeRelease$' ./internal/distribution
       - uses: actions/upload-artifact@v7.0.0
-        if: ${{ always() && steps.sign.outcome != 'skipped' }}
+        if: ${{ always() && (steps.sign-macos.outcome != 'skipped' || steps.sign-linux.outcome != 'skipped') }}
         with:
-          name: signed-release-candidate
+          name: signed-release-candidate-${{ matrix.platform }}
           path: ${{ runner.temp }}/data-mate-release/
           if-no-files-found: warn
           retention-days: 14
 
   acceptance:
     needs: [validate, signed-artifacts]
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin_arm64
+            arch: arm64
+          - os: ubuntu-latest
+            platform: linux_amd64
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
@@ -130,8 +166,11 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v8.0.1
         with:
-          name: signed-release-candidate
+          name: signed-release-candidate-${{ matrix.platform }}
           path: ${{ runner.temp }}/data-mate-release
+      - name: Prepare Linux user service manager
+        if: runner.os == 'Linux'
+        run: sudo systemctl start "user@$(id -u).service"
       - name: Accept signed candidate with system tools
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
@@ -156,7 +195,8 @@ jobs:
           cache: true
       - uses: actions/download-artifact@v8.0.1
         with:
-          name: signed-release-candidate
+          pattern: signed-release-candidate-*
+          merge-multiple: true
           path: ${{ runner.temp }}/data-mate-release
       - name: Upload, verify and publish immutable release
         env:

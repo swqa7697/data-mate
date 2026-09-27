@@ -23,7 +23,7 @@ func TestNativeKeychainLifecycle(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	keys := Keychain{}
+	keys := NewKeyProvider()
 	dir, e := os.MkdirTemp("/tmp", "data-mate-p1-native-")
 	if e != nil {
 		t.Fatal(e)

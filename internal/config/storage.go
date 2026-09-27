@@ -70,7 +70,7 @@ var ownedPaths = []string{
 	"lifecycle.lock", "state-gate.lock", "state.lock",
 	"known_hosts", "known_hosts.tmp",
 	"service.json", "service.json.tmp",
-	"service.plist", "service.plist.tmp",
+	ServiceFile(), ServiceFile() + ".tmp",
 	"registrations.json", "registrations.json.tmp",
 	"purge.json", "purge.json.tmp",
 }
@@ -372,11 +372,11 @@ func checkFD(fd int, directory bool) error {
 	if unix.Fstat(fd, &st) != nil || st.Uid != uint32(os.Geteuid()) {
 		return ErrOwnership
 	}
-	kind, mode := uint16(unix.S_IFREG), uint16(0600)
+	kind, mode := uint32(unix.S_IFREG), uint32(0600)
 	if directory {
 		kind, mode = unix.S_IFDIR, 0700
 	}
-	if st.Mode&unix.S_IFMT != kind || st.Mode&07777 != mode || (!directory && st.Nlink != 1) {
+	if uint32(st.Mode)&unix.S_IFMT != kind || uint32(st.Mode)&07777 != mode || (!directory && st.Nlink != 1) {
 		return ErrOwnership
 	}
 	return nil

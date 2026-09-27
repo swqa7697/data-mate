@@ -17,7 +17,7 @@ import (
 // Serve is the private launchd entry point. A matching durable launch intent is
 // required; calling this function never bootstraps a job or creates credentials.
 func Serve(ctx context.Context, root config.Root, build Build, nonce string, keys vault.KeyProvider) error {
-	return serve(ctx, root, build, nonce, keys, launchd{})
+	return serve(ctx, root, build, nonce, keys, nativeLauncher())
 }
 func serve(ctx context.Context, root config.Root, build Build, nonce string, keys vault.KeyProvider, launcher launchManager) error {
 	s, err := config.OpenExisting(ctx, root)
@@ -43,7 +43,7 @@ func serve(ctx context.Context, root config.Root, build Build, nonce string, key
 		return ErrStartup
 	}
 	if keys == nil {
-		keys = vault.Keychain{}
+		keys = vault.NewKeyProvider()
 	}
 	m := newManager(ctx, s, keys, d)
 	defer m.Close()

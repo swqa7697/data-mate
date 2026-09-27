@@ -82,12 +82,23 @@ func artifactFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{"install.sh": "#!/bin/bash\n", "data-mate_darwin_arm64": "synthetic signed candidate", "release.txt": "format=1\nversion=1.2.3\nplatform=darwin_arm64\nminimum_macos=15.0\nstore_schema=1\ninventory_schema=1\n"}
-	var sums strings.Builder
-	for _, name := range publicAssets[:3] {
-		writeFile(t, filepath.Join(dir, name), files[name])
-		fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256([]byte(files[name])), name)
+	files["data-mate_linux_amd64"] = "synthetic signed Linux candidate"
+	files["data-mate_linux_amd64.sig"] = strings.Repeat("s", 384)
+	files["release_linux_amd64.txt"] = "format=1\nversion=1.2.3\nplatform=linux_amd64\nminimum_glibc=2.39\nstore_schema=1\ninventory_schema=1\n"
+	for _, group := range []struct {
+		name   string
+		assets []string
+	}{
+		{"SHA256SUMS", publicAssets[:3]},
+		{"SHA256SUMS_linux_amd64", []string{"install.sh", "data-mate_linux_amd64", "data-mate_linux_amd64.sig", "release_linux_amd64.txt"}},
+	} {
+		var sums strings.Builder
+		for _, name := range group.assets {
+			writeFile(t, filepath.Join(dir, name), files[name])
+			fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256([]byte(files[name])), name)
+		}
+		writeFile(t, filepath.Join(dir, group.name), sums.String())
 	}
-	writeFile(t, filepath.Join(dir, "SHA256SUMS"), sums.String())
 	return dir
 }
 
@@ -150,7 +161,7 @@ case "$1 $2" in
   'release upload')
     [[ "$FAKE_GH_MODE" != upload-error ]] || exit 1
     [[ "$*" != *--clobber* ]]
-    [[ "$#" == 9 ]] ;;
+    [[ "$#" == 13 ]] ;;
   'release edit') touch "$base/published" ;;
   'api repos/swqa7697/data-mate/releases/tags/v1.2.3')
     # GitHub's tag endpoint only returns published releases, never drafts.
