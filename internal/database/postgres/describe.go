@@ -20,10 +20,19 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		// At least one row per schema; the extra row detects overflow without
 		// materializing an unbounded catalog. A left join preserves empty schemas.
-		rows, err := tx.Query(ctx, `SELECT n.nspname::text, c.relname::text, c.relkind::text
- FROM pg_catalog.pg_namespace n LEFT JOIN pg_catalog.pg_class c
- ON c.relnamespace=n.oid AND `+relationKindSQL+`
- ORDER BY n.nspname::text COLLATE "C", c.relname::text COLLATE "C" LIMIT 4097`)
+		rows, err := tx.Query(ctx, `WITH schemas AS MATERIALIZED (
+ SELECT oid,nspname FROM pg_catalog.pg_namespace
+ WHERE nspname <> 'information_schema' AND left(nspname::text,3) <> 'pg_'
+ ), objects AS (
+ SELECT c.relnamespace AS namespace,c.relname::text AS name,c.relkind::text AS kind
+ FROM pg_catalog.pg_class c JOIN schemas n ON n.oid=c.relnamespace
+ WHERE (`+relationKindSQL+`) OR c.relkind='S'
+ UNION ALL
+ SELECT t.typnamespace,t.typname::text,'enum'::text
+ FROM pg_catalog.pg_type t JOIN schemas n ON n.oid=t.typnamespace WHERE t.typtype='e'
+ ) SELECT n.nspname::text,o.name,o.kind
+ FROM schemas n LEFT JOIN objects o ON o.namespace=n.oid
+ ORDER BY n.nspname::text COLLATE "C",o.name COLLATE "C",o.kind COLLATE "C" LIMIT 4097`)
 		if err != nil {
 			return err
 		}
@@ -37,15 +46,22 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 			}
 			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
 				count++
-				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}})
+				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}})
 			}
 			if name != nil {
 				count++
 				i := len(out.Schemas) - 1
-				out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: *name, Kind: kind(*relationKind)})
+				switch *relationKind {
+				case "enum":
+					out.Schemas[i].Enums = append(out.Schemas[i].Enums, database.CatalogName{Name: *name})
+				case "S":
+					out.Schemas[i].Sequences = append(out.Schemas[i].Sequences, database.CatalogName{Name: *name})
+				default:
+					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: *name, Kind: kind(*relationKind)})
+				}
 			}
 			if count > maxCatalogObjects {
-				return database.Fail(contracts.ResourceLimit, "database description exceeds 4096 schemas and relations", false)
+				return database.Fail(contracts.ResourceLimit, "database description exceeds 4096 schemas and objects", false)
 			}
 		}
 		if err := rows.Err(); err != nil {

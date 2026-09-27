@@ -1,5 +1,8 @@
 """Drive the real CLI parser/forms in a test subprocess with a fake key provider."""
 import errno
+import fcntl
+import struct
+import re
 import json
 import sqlite3
 import os
@@ -12,15 +15,19 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
-for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel"):
+base_duration = catalog_duration = 0.0
+for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel", "catalog-layout", "catalog-short", "catalog-pager", "catalog-cancel", "catalog-no-pager", "catalog-json", "catalog-redirected"):
+    mode_started = time.monotonic()
+    print("PTY mode: " + mode, file=sys.stderr, flush=True)
     root = os.path.join(base, mode)
     os.mkdir(root, 0o700)
     master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
     original = termios.tcgetattr(slave)
     env = dict(os.environ, DATA_MATE_P2_PTY_HELPER=mode,
-               DATA_MATE_P2_PTY_ROOT=root, NO_COLOR="1")
+               DATA_MATE_P2_PTY_ROOT=root, NO_COLOR="1", TERM="xterm-256color", LESS="--INVALID-OPTION", LESSOPEN="|false %s")
     proc = subprocess.Popen([binary, "-test.run=^TestConnectionTerminal$"],
-                            stdin=subprocess.DEVNULL if mode == "diagnostics" else slave,
+                            stdin=subprocess.DEVNULL if mode in ("diagnostics", "catalog-layout", "catalog-redirected") else slave,
                             stdout=slave, stderr=slave, env=env,
                             start_new_session=True)
     transcript = bytearray()
@@ -44,7 +51,22 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         os.write(master, answer.encode())
 
     try:
-        if mode == "diagnostics":
+        if mode.startswith("catalog"):
+            if mode == "catalog-layout":
+                send_after("catalog json\r\n", "")
+                send_after("catalog end\r\n", "")
+            elif mode in ("catalog-pager", "catalog-cancel"):
+                send_after("item_0000", "")
+                if mode == "catalog-cancel":
+                    proc.send_signal(signal.SIGINT)
+                else:
+                    send_after(":", "/item_0100\r")
+                    send_after("item_0101_", " ")
+                    send_after("item_0123_", "q")
+                send_after("catalog done\r\n", "")
+            else:
+                send_after("catalog done\r\n", "")
+        elif mode == "diagnostics":
             # Drain output while the child runs so the PTY buffer cannot block
             # the JSON write before proc.wait completes.
             send_after("diagnostics json\r\n", "")
@@ -68,7 +90,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith(("enroll", "describe")) or mode == "diagnostics":
+        if mode.startswith(("enroll", "describe", "catalog")) or mode == "diagnostics":
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -100,7 +122,7 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
         assert restored == original, ("terminal modes not restored", mode)
         os.close(slave)
         slave = None
-        while True:
+        while select.select([master], [], [], 0)[0]:
             try:
                 chunk = os.read(master, 65536)
                 if not chunk:
@@ -110,10 +132,39 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (0 if mode in ("happy", "enroll", "diagnostics", "describe") else 130), (mode, code, transcript)
+        assert code == (0 if mode in ("happy", "enroll", "diagnostics", "describe") or (mode.startswith("catalog") and mode != "catalog-cancel") else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
-        if mode == "diagnostics":
+        if mode == "catalog-layout":
+            for variant in ("color", "narrow", "no-color", "empty-no-color", "json"):
+                block = transcript.split(("catalog " + variant + "\r\n").encode(), 1)[1].split(b"catalog end\r\n", 1)[0]
+                if variant == "json":
+                    assert b"\x1b" not in block, block
+                    report = json.loads(block)
+                    assert report["schemas"][0]["enums"] == [{"name":"status"}], report
+                    assert report["schemas"][0]["sequences"] == [{"name":"items_id_seq"}], report
+                    continue
+                plain = re.sub(rb"\x1b\[[0-9;]*m", b"", block)
+                if variant in ("color", "narrow"):
+                    for tint, name in ((b"35", b"status"), (b"32", b"alpha"), (b"36", b"report"), (b"33", b"items_id_seq")):
+                        assert b"\x1b["+tint+b"m"+name+b"\x1b[0m" in block, block
+                    assert plain.count(b"Tables") == 1, plain
+                else:
+                    assert b"\x1b" not in block, block
+                if variant == "narrow":
+                    assert b"  alpha\r\n  beta" in plain, plain
+                else:
+                    assert b"  alpha  beta  delta  gamma\r\n" in plain, plain
+        elif mode == "catalog-json":
+            report = json.loads(transcript.split(b"catalog done",1)[0])
+            assert len(report["schemas"][0]["tables"]) == 1500, report
+        elif mode in ("catalog-no-pager", "catalog-redirected"):
+            assert b"item_1499_" in transcript and b"\x1b" not in transcript, transcript
+        elif mode == "catalog-pager":
+            assert b"item_0101_" in transcript and b"item_1499_" not in transcript, transcript
+        elif mode.startswith("catalog"):
+            assert b"catalog done" in transcript, transcript
+        elif mode == "diagnostics":
             for output in ("color", "no-color", "empty-no-color", "json"):
                 block = transcript.split(("diagnostics " + output + "\r\n").encode(), 1)[1].split(b"diagnostics end\r\n", 1)[0]
                 lines = block.splitlines()
@@ -147,17 +198,24 @@ for mode in ("happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-c
             assert b'reader' in transcript, "username must remain visible"
             # Raw-mode review must emit CRLF so subsequent lines start at column 0.
             assert b'\r\nAlias: analytics\r\nDriver: postgres\r\n' in transcript
-        elif mode != "diagnostics" and not mode.startswith("describe"):
+        elif mode != "diagnostics" and not mode.startswith(("describe", "catalog")):
             assert os.listdir(root) == [], "cancellation created state"
         for parent, _, names in os.walk(root):
             for name in names:
                 with open(os.path.join(parent, name), 'rb') as stream:
                     assert b"pty-hidden-secret" not in stream.read(), name
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.wait()
         if slave is not None:
             os.close(slave)
         os.close(master)
-print("PTY create/edit/remove, hidden input, default-No, Ctrl-C, SIGINT, restoration and diagnostics colors passed")
+    if mode.startswith("catalog"):
+        catalog_duration += time.monotonic() - mode_started
+    else:
+        base_duration += time.monotonic() - mode_started
+print(f"PTY duration: existing modes {base_duration:.3f}s; added catalog modes {catalog_duration:.3f}s")
+print("PTY create/edit/remove, hidden input, default-No, Ctrl-C, SIGINT, restoration, diagnostics colors, catalog grids and paging passed")

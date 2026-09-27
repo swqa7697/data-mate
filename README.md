@@ -55,16 +55,16 @@ data-mate mcp start
 
 ## Manage connections
 
-| Command                         | Purpose                                             |
-| ------------------------------- | --------------------------------------------------- |
-| `data-mate db add`              | Save a PostgreSQL connection.                       |
-| `data-mate db list`             | View aliases and nonsecret settings.                |
-| `data-mate db describe [alias]` | List database schemas and table metadata.           |
-| `data-mate db test [alias]`     | Test one connection, or all connections if omitted. |
-| `data-mate db edit [alias]`     | Update settings or credentials.                     |
-| `data-mate db remove [alias]`   | Remove a connection and its saved credentials.      |
-| `data-mate mcp status`          | Check service and agent registration status.        |
-| `data-mate mcp stop`            | Stop agent access.                                  |
+| Command                         | Purpose                                               |
+| ------------------------------- | ----------------------------------------------------- |
+| `data-mate db add`              | Save a PostgreSQL connection.                         |
+| `data-mate db list`             | View aliases and nonsecret settings.                  |
+| `data-mate db describe [alias]` | List application enums, tables, views, and sequences. |
+| `data-mate db test [alias]`     | Test one connection, or all connections if omitted.   |
+| `data-mate db edit [alias]`     | Update settings or credentials.                       |
+| `data-mate db remove [alias]`   | Remove a connection and its saved credentials.        |
+| `data-mate mcp status`          | Check service and agent registration status.          |
+| `data-mate mcp stop`            | Stop agent access.                                    |
 
 Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively.
 

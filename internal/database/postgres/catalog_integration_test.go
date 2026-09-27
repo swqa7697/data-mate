@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,12 +20,17 @@ import (
 // Extends the existing owned fixture with catalog metadata, bounds and future-schema access.
 func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password string, sql func(string, ...any)) {
 	t.Helper()
-	sql(`CREATE SCHEMA picker; CREATE SCHEMA picker_empty; GRANT USAGE ON SCHEMA picker,picker_empty TO reader`)
+	sql(`CREATE SCHEMA picker_vacant; CREATE SCHEMA picker; CREATE SCHEMA picker_empty; GRANT USAGE ON SCHEMA picker,picker_empty TO reader`)
 	defer sql("DROP SCHEMA picker_empty")
+	defer sql("DROP SCHEMA picker_vacant")
 	defer sql("DROP SCHEMA picker CASCADE")
 	// Extend the catalog fixture: descriptions preserve empty schemas, list only
 	// catalog-visible relations independently of data grants.
-	sql(`CREATE SCHEMA describe_denied; CREATE TABLE describe_denied.items(id int);
+	sql(`CREATE TYPE picker.status AS ENUM ('new','done');
+ CREATE TYPE picker.priority AS ENUM ('x'); CREATE SEQUENCE picker.shared;
+ CREATE SEQUENCE picker.items_id_seq;
+ CREATE EXTENSION hstore SCHEMA picker; ALTER EXTENSION hstore ADD TYPE picker.status;
+ CREATE SCHEMA describe_denied; CREATE TABLE describe_denied.items(id int);
  GRANT SELECT ON describe_denied.items TO reader;
  CREATE TABLE picker_empty.unreadable(id int);
  CREATE TABLE picker.unreadable(id int);
@@ -37,6 +43,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
  CREATE FOREIGN TABLE picker.foreign_table(id int) SERVER describe_server;
  GRANT SELECT ON picker.a_view,picker.materialized,picker.partitioned,picker.foreign_table TO reader`)
 	defer sql("DROP SCHEMA describe_denied CASCADE")
+	defer sql("DROP EXTENSION hstore")
 	defer sql("DROP FOREIGN DATA WRAPPER describe_fdw CASCADE")
 	{
 		description, err := d.DescribeDatabase(t.Context(), a)
@@ -47,25 +54,37 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 		if contracts.Validate("db-describe.output", raw) != nil {
 			t.Fatal("database description contract", string(raw))
 		}
-		foundEmpty, foundPicker := false, false
+		foundEmpty, foundPicker, foundVacant := false, false, false
 		previous := ""
 		for _, s := range description.Schemas {
 			if s.Name <= previous {
 				t.Fatalf("schema visibility/order: %+v", s)
 			}
 			previous = s.Name
+			if strings.HasPrefix(s.Name, "pg_") || s.Name == "information_schema" {
+				t.Fatalf("system schema fetched: %s", s.Name)
+			}
+			if s.Name == "picker_vacant" {
+				foundVacant = len(s.Tables)+len(s.Enums)+len(s.Sequences) == 0
+			}
+			if s.Enums == nil || s.Sequences == nil || s.Tables == nil {
+				t.Fatal("null collection")
+			}
 			if s.Name == "picker_empty" {
 				foundEmpty = len(s.Tables) == 1 && s.Tables[0].Name == "unreadable"
 			}
 			if s.Name == "picker" {
 				foundPicker = true
+				if !reflect.DeepEqual(s.Enums, []database.CatalogName{{Name: "priority"}, {Name: "status"}}) || !reflect.DeepEqual(s.Sequences, []database.CatalogName{{Name: "items_id_seq"}, {Name: "shared"}}) {
+					t.Fatalf("enum/sequence metadata: %+v", s)
+				}
 				want := []database.RelationName{{Name: "a_view", Kind: "view"}, {Name: "column_only", Kind: "table"}, {Name: "foreign_table", Kind: "foreign_table"}, {Name: "materialized", Kind: "materialized_view"}, {Name: "partitioned", Kind: "partitioned_table"}, {Name: "unreadable", Kind: "table"}}
 				if !reflect.DeepEqual(s.Tables, want) {
 					t.Fatalf("readable relations: %+v", s.Tables)
 				}
 			}
 		}
-		if !foundEmpty || !foundPicker {
+		if !foundEmpty || !foundPicker || !foundVacant {
 			t.Fatal("description omitted accessible or empty schema")
 		}
 		page, err := d.ListTables(t.Context(), a, database.PageRequest{Schema: "picker"})
@@ -73,7 +92,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			t.Fatal("agent catalog omitted readable relations", err)
 		}
 	}
-	// A compact database-generated corpus verifies the combined schema/relation
+	// A compact database-generated corpus verifies the combined schema/object
 	// boundary in this owned fixture, without thousands of test executions.
 	bounded := a.Profile
 	limits := config.DefaultLimits()
@@ -85,7 +104,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	}
 	count := len(description.Schemas)
 	for _, s := range description.Schemas {
-		count += len(s.Tables)
+		count += len(s.Tables) + len(s.Enums) + len(s.Sequences)
 	}
 	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(maxCatalogObjects-count) + ` LOOP
  EXECUTE format('CREATE SCHEMA describe_bound%s',i);
@@ -98,17 +117,22 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	if _, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password)); err != nil {
 		t.Fatal("exact catalog bound rejected", err)
 	}
-	sql("CREATE TABLE describe_bound1.extra(id int); GRANT SELECT ON describe_bound1.extra TO reader")
+	sql("CREATE SEQUENCE describe_bound1.extra")
 	result, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
 	requireCode(t, err, contracts.ResourceLimit)
 	if result.Schemas != nil {
 		t.Fatal("oversized catalog returned partial result")
 	}
-	sql("DROP TABLE describe_bound1.extra")
+	sql("DROP SEQUENCE describe_bound1.extra; CREATE TYPE describe_bound1.extra AS ENUM ('x')")
+	_, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
+	requireCode(t, err, contracts.ResourceLimit)
+	sql("DROP TYPE describe_bound1.extra")
 	bounded.Limits.MaxResultBytes = 1024
 	_, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
 	requireCode(t, err, contracts.ResourceLimit)
 	cleanupBounds()
+	sql("ALTER EXTENSION hstore DROP TYPE picker.status")
+	sql("DROP SEQUENCE picker.shared,picker.items_id_seq; DROP TYPE picker.priority,picker.status")
 	sql("DROP TABLE picker.column_only,picker.unreadable,picker.partitioned,picker_empty.unreadable; DROP VIEW picker.a_view; DROP MATERIALIZED VIEW picker.materialized; DROP FOREIGN TABLE picker.foreign_table")
 	// Newly granted schemas and renamed tables need no connection reconfiguration.
 	sql("CREATE TABLE picker.original(id int); GRANT SELECT ON picker.original TO reader")

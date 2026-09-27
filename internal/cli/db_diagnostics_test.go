@@ -40,6 +40,14 @@ func TestConnectionDiagnostics(t *testing.T) {
 		cmd.SetIn(strings.NewReader(""))
 		var out, diag bytes.Buffer
 		cmd.SetOut(&out)
+		if action == "describe" {
+			cmd.SetOut(writerFunc(func(b []byte) (int, error) {
+				if !d.closed {
+					t.Fatal("description output retained management resources")
+				}
+				return out.Write(b)
+			}))
+		}
 		cmd.SetErr(&diag)
 		before := files(t, root)
 		err := cmd.ExecuteContext(t.Context())
@@ -126,18 +134,47 @@ func TestConnectionDiagnostics(t *testing.T) {
 			t.Fatalf("description snapshot: %+v", description)
 		}
 		for _, s := range description.Schemas {
-			if s.Tables == nil {
+			if s.Tables == nil || s.Enums == nil || s.Sequences == nil {
 				t.Fatal("description lost empty collections")
 			}
 		}
 		out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
 		for _, s := range description.Schemas {
-			if !strings.Contains(out, fmt.Sprintf("%q", s.Name)) {
+			if !strings.Contains(out, "\n"+s.Name+"\n") {
 				t.Fatal("human description lost schema", out)
 			}
 		}
-		if !strings.Contains(out, `"line\n\x1b[31m" (table)`) {
+		if !strings.Contains(out, `line\n\x1b[31m`) {
 			t.Fatal("relation identifier not safely escaped", out)
+		}
+		if strings.Contains(out, `"Dot.Schema"`) || strings.Contains(out, `(table)`) || !strings.Contains(out, "items  line") || !strings.Contains(out, "cached_report  report") || !strings.Contains(out, "status") || !strings.Contains(out, "items_id_seq") {
+			t.Fatalf("description lost compact categories or unquoted names: %q", out)
+		}
+		// Extend the description scenario with narrow grids, display-cell widths,
+		// punctuation, and hostile names. These are output behaviors, not help prose.
+		for _, tc := range []struct {
+			names []string
+			width int
+			want  string
+		}{
+			{[]string{"a", "bb", "ccc", "dddd"}, 12, "  a    bb\n  ccc  dddd\n"},
+			{[]string{"a", "bb", "ccc", "dddd"}, 80, "  a  bb  ccc  dddd\n"},
+			{[]string{"日本", "x", "e\u0301", "y"}, 9, "  日本  x\n  e\u0301     y\n"},
+			{[]string{"a very long name", "b"}, 5, "  a very long name\n  b\n"},
+			{[]string{`a"b`, "c.d"}, 80, "  a\"b  c.d\n"},
+		} {
+			var grid strings.Builder
+			writeNameGrid(&grid, tc.names, tc.width, "")
+			if grid.String() != tc.want {
+				t.Fatalf("grid width %d: %q", tc.width, grid.String())
+			}
+		}
+		if got := displayName("a\n\t\x1b[31m\u202eb"); got != `a\n\t\x1b[31m\u202eb` {
+			t.Fatalf("unsafe catalog display: %q", got)
+		}
+		withoutPager, _ := runCommand("describe", &fixtureDatabase{}, 0, "good", "--no-pager")
+		if withoutPager != out {
+			t.Fatal("no-pager changed redirected result")
 		}
 	}
 	for _, args := range [][]string{{}, {"absent"}} {

@@ -75,7 +75,7 @@ type Stage struct {
 }
 
 // DatabaseDescription is the complete, bounded user-facing catalog. It is never
-// an MCP result; it includes empty and system schemas.
+// an MCP result; it includes empty application schemas but excludes system schemas.
 type DatabaseDescription struct {
 	Version  int                 `json:"version"`
 	Alias    string              `json:"alias"`
@@ -83,10 +83,17 @@ type DatabaseDescription struct {
 	Schemas  []SchemaDescription `json:"schemas"`
 }
 
-// SchemaDescription groups catalog-visible relations in a schema.
+// SchemaDescription groups catalog-visible application objects in a schema.
 type SchemaDescription struct {
-	Name   string         `json:"name"`
-	Tables []RelationName `json:"tables"`
+	Name      string         `json:"name"`
+	Tables    []RelationName `json:"tables"`
+	Enums     []CatalogName  `json:"enums"`
+	Sequences []CatalogName  `json:"sequences"`
+}
+
+// CatalogName identifies an object without fetching its definition or values.
+type CatalogName struct {
+	Name string `json:"name"`
 }
 
 // RelationName describes a relation without reading its columns or rows.

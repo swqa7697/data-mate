@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
@@ -19,8 +16,8 @@ func describeDatabase(cmd *cobra.Command, root config.Root, revision config.Revi
 	if err != nil {
 		return serviceError(err)
 	}
-	defer client.Close()
 	reply, err := client.Request(cmd.Context(), service.ManagementRequest{Operation: "describe", Interactive: hasTerminal(cmd), Expected: revision, ProfileID: p.ID, Alias: p.Alias})
+	client.Close()
 	if err != nil {
 		if errors.Is(err, config.ErrRevision) {
 			return storageError(err, false)
@@ -50,21 +47,10 @@ func describeDatabase(cmd *cobra.Command, root config.Root, revision config.Revi
 	if flag(cmd, "json") {
 		err = json.NewEncoder(cmd.OutOrStdout()).Encode(description)
 	} else {
-		var out strings.Builder
-		fmt.Fprintf(&out, "%s — database=%q\n", description.Alias, description.Database)
-		if len(description.Schemas) == 0 {
-			out.WriteString("\nNo accessible application schemas.\n")
-		}
-		for _, schema := range description.Schemas {
-			fmt.Fprintf(&out, "\n%q\n", schema.Name)
-			if len(schema.Tables) == 0 {
-				out.WriteString("  (no readable relations)\n")
-			}
-			for _, table := range schema.Tables {
-				fmt.Fprintf(&out, "  %q (%s)\n", table.Name, table.Kind)
-			}
-		}
-		_, err = io.WriteString(cmd.OutOrStdout(), out.String())
+		err = writeDescription(cmd, description)
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
 	}
 	if err != nil {
 		return failure("cannot write database description")

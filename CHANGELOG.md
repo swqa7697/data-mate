@@ -5,7 +5,7 @@
 ### Added
 
 - Add `list_objects` and `describe_object` MCP tools for routine source, enum and other type details (including arrays and table-row types), and sequence configuration; expand table descriptions with defaults, indexes, constraints, triggers, view definitions, and row-security policies without evaluating stored expressions.
-- Add `db describe [alias]` with an interactive profile picker and versioned `--json` output to list catalog-visible schemas and tables/views, including system schemas; fail clearly when complete results exceed catalog, byte, or timeout limits.
+- Add `db describe [alias]` with an interactive profile picker, compact color-grouped grids of unquoted enums, tables, views, and sequences under application schemas, and automatic terminal paging (`--no-pager` to bypass). Exclude system schemas, retain extension objects in application schemas, provide plain group headings without color and complete versioned `--json` metadata, and fail clearly when complete results exceed catalog, byte, or timeout limits.
 
 ### Changed
 

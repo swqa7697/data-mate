@@ -37,6 +37,8 @@ func newDB(override *string, factory managementFactory, build Build) *cobra.Comm
 		}
 		if action == "describe" {
 			cmd.Use = "describe [alias]"
+			cmd.Short = "Describe application enums, tables, views, and sequences"
+			cmd.Flags().Bool("no-pager", false, "Print directly without the terminal pager")
 		}
 		if action == "list" || action == "describe" {
 			cmd.Flags().Bool("json", false, "Versioned JSON output")

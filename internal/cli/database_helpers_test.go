@@ -21,6 +21,7 @@ type fixtureDatabase struct {
 	described     []string
 	describeError error
 	emptyCatalog  bool
+	catalog       []database.SchemaDescription
 }
 
 func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access) (database.DatabaseDescription, error) {
@@ -31,12 +32,20 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	if !d.emptyCatalog {
 		for _, name := range []string{"Dot.Schema", "empty", "private", "public"} {
-			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}}
+			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}}
 			if name != "empty" {
 				s.Tables = append(s.Tables, database.RelationName{Name: "line\n\x1b[31m", Kind: "table"})
 			}
+			if name == "public" {
+				s.Enums = append(s.Enums, database.CatalogName{Name: "status"})
+				s.Sequences = append(s.Sequences, database.CatalogName{Name: "items_id_seq"})
+				s.Tables = append(s.Tables, database.RelationName{Name: "items", Kind: "table"}, database.RelationName{Name: "report", Kind: "view"}, database.RelationName{Name: "cached_report", Kind: "materialized_view"})
+			}
 			out.Schemas = append(out.Schemas, s)
 		}
+	}
+	if d.catalog != nil {
+		out.Schemas = d.catalog
 	}
 	return out, nil
 }

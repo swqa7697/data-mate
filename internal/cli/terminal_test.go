@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/testsupport/transportfixture"
+	"golang.org/x/sys/unix"
 )
 
 // Real PTYs are necessary for hidden input, raw-mode restoration and cancellation;
@@ -25,7 +27,7 @@ func TestConnectionTerminal(t *testing.T) {
 		defer stop()
 		fixture := &fixtureDatabase{}
 		factory := databaseFactory(defaultDatabase)
-		if strings.HasPrefix(mode, "describe") || mode == "diagnostics" {
+		if strings.HasPrefix(mode, "describe") || strings.HasPrefix(mode, "catalog") || mode == "diagnostics" {
 			factory = func() (cliDatabase, error) { return fixture, nil }
 		}
 		run := func(args ...string) int {
@@ -39,6 +41,66 @@ func TestConnectionTerminal(t *testing.T) {
 				fmt.Fprintln(os.Stderr, err)
 			}
 			return ExitCode(err)
+		}
+		// Extend the same PTY scenario: paging must release the service first,
+		// honor output width/colors, exit on q, and restore modes on cancellation.
+		if strings.HasPrefix(mode, "catalog") {
+			command(t, root, keys, "", 0, append(basicAdd, "--passwordless")...)
+			schema := database.SchemaDescription{Name: "public", Tables: []database.RelationName{}, Enums: []database.CatalogName{{Name: "status"}}, Sequences: []database.CatalogName{{Name: "items_id_seq"}}}
+			for _, name := range []string{"alpha", "beta", "delta", "gamma"} {
+				schema.Tables = append(schema.Tables, database.RelationName{Name: name, Kind: "table"})
+			}
+			schema.Tables = append(schema.Tables, database.RelationName{Name: "report", Kind: "view"})
+			fixture.catalog = []database.SchemaDescription{schema}
+			if mode == "catalog-layout" {
+				for _, variant := range []string{"color", "narrow", "no-color", "empty-no-color", "json"} {
+					columns := uint16(80)
+					if variant == "narrow" {
+						columns = 12
+					}
+					if err := unix.IoctlSetWinsize(int(os.Stdout.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: 40, Col: columns}); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Unsetenv("NO_COLOR"); err != nil {
+						t.Fatal(err)
+					}
+					if variant == "no-color" {
+						t.Setenv("NO_COLOR", "1")
+					}
+					if variant == "empty-no-color" {
+						t.Setenv("NO_COLOR", "")
+					}
+					args := []string{"describe", "analytics", "--no-pager"}
+					if variant == "json" {
+						args = append(args, "--json")
+					}
+					fmt.Println("catalog " + variant)
+					if code := run(args...); code != 0 {
+						t.Fatalf("catalog output: %d", code)
+					}
+					fmt.Println("catalog end")
+				}
+				os.Exit(0)
+			}
+			if mode != "catalog-short" {
+				fixture.catalog[0].Tables = nil
+				for i := 0; i < 1500; i++ {
+					fixture.catalog[0].Tables = append(fixture.catalog[0].Tables, database.RelationName{Name: fmt.Sprintf("item_%04d_%s", i, strings.Repeat("x", 40)), Kind: "table"})
+				}
+			}
+			args := []string{"describe", "analytics"}
+			if mode == "catalog-no-pager" {
+				args = append(args, "--no-pager")
+			}
+			if mode == "catalog-json" {
+				args = append(args, "--json")
+			}
+			code := run(args...)
+			if !fixture.closed {
+				t.Fatal("pager retained management resources")
+			}
+			fmt.Println("catalog done")
+			os.Exit(code)
 		}
 		// Extend the PTY harness because buffered diagnostics cannot verify output
 		// terminal detection, especially when stdin is redirected.
