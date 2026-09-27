@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-27
+
 ### Added
 
 - Add automatic GNOME Keyring setup and unlocking through hidden terminal prompts, including over SSH, for credential-dependent commands and confirmed purge. Confirm new keyring passwords, retry incorrect passwords, and resume the original command without reentering connection details; preserve existing keyrings and encrypted credentials, with no credential migration.
