@@ -91,9 +91,8 @@ func editLeaseAcceptance(t *testing.T) {
 		t.Fatalf("edit completed under old lease: %v", err)
 	default:
 	}
-	if snapshot(t, root).Connections[0].Limits.MaxRows != 500 {
-		t.Fatal("edit published before cleanup")
-	}
+	// The child checks the old profile through its existing lease. A fresh
+	// parent snapshot would queue behind the writer and prevent child release.
 	if _, err = stdin.Write([]byte("release\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -136,5 +135,12 @@ func editLeaseChild(t *testing.T, rootPath string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() || scanner.Text() != "release" {
 		t.Fatal("lease release absent")
+	}
+	profiles, _, err := l.ProfileSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profiles.Connections[0].Limits.MaxRows != 500 {
+		t.Fatal("edit published before cleanup")
 	}
 }

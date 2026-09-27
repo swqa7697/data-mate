@@ -193,16 +193,19 @@ func (f *fakeLaunch) Bootstrap(ctx context.Context, root config.Root) error {
 	}
 	m := newManager(bg, s, keys, d)
 	go func() {
+		var result error
+		// Bootout must join all daemon cleanup before the controller removes
+		// runtime state, just as waiting for a real service process would.
+		defer func() { f.done <- result }()
 		defer s.Close()
 		defer runtime.file.Close()
 		defer runtime.removeSocket()
 		defer listener.Close()
 		defer m.Close()
-		if err := m.initialize(bg); err != nil {
-			f.done <- err
+		if result = m.initialize(bg); result != nil {
 			return
 		}
-		f.done <- serveListener(bg, listener, r, m)
+		result = serveListener(bg, listener, r, m)
 	}()
 	return nil
 }
