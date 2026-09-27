@@ -588,9 +588,11 @@ func TestVaultCleanupAndConcurrentWriters(t *testing.T) {
 	for i := 0; i < count; i++ {
 		c := testProfile(t, i)
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
-			for {
+			ctx := t.Context()
+			// Each revision conflict requires another writer to have committed.
+			// Bound retries by the writer count, not disk speed under race-enabled CI;
+			// the go test timeout remains the watchdog for blocked operations.
+			for attempt := 0; attempt < count; attempt++ {
 				p, rev, e := f.repo.Snapshot(ctx)
 				if e != nil {
 					errs <- e
@@ -604,6 +606,7 @@ func TestVaultCleanupAndConcurrentWriters(t *testing.T) {
 				errs <- e
 				return
 			}
+			errs <- fmt.Errorf("writer %s exhausted %d revision attempts", c.Alias, count)
 		})
 	}
 	wg.Wait()

@@ -147,6 +147,12 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		if err != nil {
 			return failure("cannot locate build output")
 		}
+		// macOS may retain directory symlinks in os.Executable's path.
+		// Resolve both sides before checking that the build is a sibling.
+		exe, err = filepath.EvalSymlinks(exe)
+		if err != nil {
+			return failure("cannot resolve build output")
+		}
 		root, err := config.ResolveRoot(*override, exe)
 		if err != nil {
 			return invalid("invalid installation root")
