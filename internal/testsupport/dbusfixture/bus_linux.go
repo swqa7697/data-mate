@@ -5,7 +5,9 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/godbus/dbus/v5"
@@ -15,8 +17,23 @@ type Bus struct{ Address string }
 
 func Start(t *testing.T) *Bus {
 	t.Helper()
+	// Do not load host service directories: every peer belongs to the fixture,
+	// and installed desktop services must not mask activation failures in CI.
+	config := filepath.Join(t.TempDir(), "bus.conf")
+	if err := os.WriteFile(config, []byte(`<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
-	cmd := exec.CommandContext(ctx, "dbus-daemon", "--session", "--nofork", "--print-address=1")
+	cmd := exec.CommandContext(ctx, "dbus-daemon", "--config-file="+config, "--nofork", "--print-address=1")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()

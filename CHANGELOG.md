@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add Linux x86_64 support for Ubuntu 24.04+ user sessions, with Secret Service credential storage, systemd service lifecycle, signed installation and upgrades, and complete uninstall/purge; retain existing CLI/MCP behavior and make zsh optional on Linux.
+- Add Linux x86_64 support for Ubuntu 24.04+ user sessions, with Secret Service credential storage (including running services without activation files), systemd service lifecycle, signed installation and upgrades, and complete uninstall/purge; retain existing CLI/MCP behavior and make zsh optional on Linux.
 - Add `list_objects` and `describe_object` MCP tools for routine source, enum and other type details (including arrays and table-row types), and sequence configuration; expand table descriptions with defaults, indexes, constraints, triggers, view definitions, and row-security policies without evaluating stored expressions.
 - Add `db describe [alias]` with an interactive profile picker, compact color-grouped grids of unquoted enums, tables, views, sequences, indexes, and functions under application schemas, and automatic terminal paging (`--no-pager` to bypass). Exclude system schemas, retain extension objects in application schemas, use singular legend labels including Schema, provide plain group headings without color and complete versioned `--json` metadata, and fail clearly when complete results exceed catalog, byte, or timeout limits.
 

@@ -15,9 +15,10 @@ import (
 
 // The repository's fake KeyProvider cannot exercise native D-Bus decoding,
 // locked collections, or duplicate search results. This boundary scenario uses
-// a private bus and synthetic service; the real keyring remains opt-in.
+// a private bus without host activation files and a synthetic service; the real
+// keyring remains opt-in. A running service must not require an activation file.
 func TestSecretServiceBoundary(t *testing.T) {
-	for _, scenario := range []string{"lifecycle", "locked", "denied", "canceled-prompt", "ambiguous", "oversized", "wrong-session", "session-collection"} {
+	for _, scenario := range []string{"lifecycle", "unavailable", "locked", "denied", "canceled-prompt", "ambiguous", "oversized", "wrong-session", "session-collection"} {
 		t.Run(scenario, func(t *testing.T) {
 			bus := dbusfixture.Start(t)
 			server, err := bus.Connect(t.Context())
@@ -25,8 +26,11 @@ func TestSecretServiceBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer server.Close()
-			if _, err = server.RequestName(secretName, dbus.NameFlagDoNotQueue); err != nil {
-				t.Fatal(err)
+			// No owner or activation file must still fail closed.
+			if scenario != "unavailable" {
+				if reply, err := server.RequestName(secretName, dbus.NameFlagDoNotQueue); err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
+					t.Fatalf("own synthetic service: reply=%v err=%v", reply, err)
+				}
 			}
 			collection := dbus.ObjectPath("/org/freedesktop/secrets/collection/login")
 			item := dbus.ObjectPath(string(collection) + "/one")

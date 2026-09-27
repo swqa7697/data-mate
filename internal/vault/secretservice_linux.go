@@ -80,11 +80,18 @@ func (k SecretService) open(ctx context.Context, account string) (*secretSession
 	if err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.RequestName", 0, "io.github.swqa7697.DataMate.Keyset.k"+account, uint32(4)).Store(&acquired); err != nil || acquired != 1 {
 		return fail(ErrUnavailable)
 	}
-	if err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.StartServiceByName", 0, secretName, uint32(0)).Err; err != nil {
-		return fail(err)
-	}
 	s := &secretSession{conn: conn}
-	if err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetNameOwner", 0, secretName).Store(&s.owner); err != nil {
+	err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetNameOwner", 0, secretName).Store(&s.owner)
+	var busErr dbus.Error
+	if errors.As(err, &busErr) && busErr.Name == "org.freedesktop.DBus.Error.NameHasNoOwner" {
+		// A running service need not have an activation file. Activate only
+		// when absent, then pin the owner for the entire operation.
+		if err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.StartServiceByName", 0, secretName, uint32(0)).Err; err != nil {
+			return fail(err)
+		}
+		err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetNameOwner", 0, secretName).Store(&s.owner)
+	}
+	if err != nil {
 		return fail(err)
 	}
 	if err = s.object(secretRoot).CallWithContext(ctx, secretInterface+"Service.ReadAlias", 0, "default").Store(&s.collection); err != nil {
