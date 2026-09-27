@@ -24,8 +24,8 @@ func (e *CleanupError) Unwrap() error { return e.Cause }
 
 // Uninstall stops owned admission and removes registrations before taking the
 // exclusive state lease. All stages retain lifecycle; external failures leave
-// the binary and retry identity intact. The caller runs outside this root.
-func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyProvider) (result error) {
+// the binary and retry identity intact. Cleanup runs in the current process; Unix permits unlinking its executable.
+func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyProvider, files ...func() error) (result error) {
 	s, err := config.OpenLifecycle(ctx, c.Root)
 	if errors.Is(err, os.ErrNotExist) {
 		// No identity means no authority to delete anything in this directory.
@@ -34,8 +34,12 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 		if inspectErr != nil || len(remaining) != 0 {
 			return &CleanupError{Stage: "missing installation identity", Remaining: remaining, Cause: ErrState}
 		}
-		_, err = c.Stop(ctx)
-		return err
+		for _, cleanup := range files {
+			if err = cleanup(); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if err != nil {
 		return err
@@ -58,19 +62,15 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 		return config.ErrPurging
 	}
 	r, err := readRecord(l.Read, c.Root, l.Identity())
-	if errors.Is(err, os.ErrNotExist) {
-		j, e := c.inspectSelected(ctx)
-		if e != nil {
-			return e
-		}
-		if j.Present {
-			return ErrConflict
-		}
-	} else if err != nil {
-		return err
-	} else if err = c.stopLocked(ctx, l, r); err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err == nil {
+		if err = c.stopLocked(ctx, l, r); err != nil {
+			return err
+		}
+	}
+
 	// Startup may publish runtime identity before its service record. A live
 	// orphan listener or unrecognized runtime contents must remain retryable.
 	stage = "runtime cleanup"
@@ -93,6 +93,17 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 			return err
 		}
 	}
+	stage = "shell and command files"
+	for _, cleanup := range files {
+		if err = cleanup(); err != nil {
+			return err
+		}
+	}
+	if l.Identity().Pending {
+		if err = l.SetDistributionPending(ctx, false); err != nil {
+			return err
+		}
+	}
 	stage = "state drain"
 	state, err := l.CleanupLease(ctx)
 	if err != nil {
@@ -107,7 +118,7 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 		if keys == nil {
 			keys = vault.NewKeyProvider()
 		}
-		if err = vault.New(s, keys).PurgeLocked(ctx, state); err != nil {
+		if err = vault.New(s, keys).PurgeLocked(vault.WithInteraction(ctx, c.Interactive), state); err != nil {
 			return err
 		}
 		stage = "owned files and final identity"
@@ -118,4 +129,38 @@ func (c *Controller) Uninstall(ctx context.Context, purge bool, keys vault.KeyPr
 		return err
 	}
 	return state.TrimBinaryDirectory()
+}
+
+// InstallBinary holds lifecycle across shutdown and publication. With no service
+// record it never contacts a service manager or credential provider.
+func (c *Controller) InstallBinary(ctx context.Context, path string) error {
+	s, err := config.Open(ctx, c.Root, nil)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	l, err := s.Lifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
+	if l.Identity().Purging {
+		return config.ErrPurging
+	}
+	r, err := readRecord(l.Read, c.Root, l.Identity())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		if err = c.stopLocked(ctx, l, r); err != nil {
+			return err
+		}
+	}
+	if err = l.InstallBinary(ctx, filepath.Base(path)); err != nil {
+		return err
+	}
+	if l.Identity().Pending {
+		return l.SetDistributionPending(ctx, false)
+	}
+	return nil
 }

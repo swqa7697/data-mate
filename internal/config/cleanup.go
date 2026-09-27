@@ -13,9 +13,12 @@ import (
 // following links. Missing identity cannot turn retained vault/binary files into
 // a successful uninstall. Unknown files grant no removal authority.
 func RemainingOwned(root Root) ([]string, error) {
-	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, ErrOwnership
+		return nil, err
 	}
 	s := &Store{root: root, dir: os.NewFile(uintptr(fd), root.Path)}
 	defer s.dir.Close()
@@ -130,7 +133,7 @@ func (l *Lease) RemoveBinary() error {
 	if err != nil {
 		return err
 	}
-	if st.Uid != uint32(os.Geteuid()) || (st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFLNK) {
+	if st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFLNK {
 		return ErrOwnership
 	}
 	if err = l.check(); err != nil {
@@ -146,8 +149,7 @@ func (l *Lease) RemoveBinary() error {
 }
 
 // FinishPurge removes owned data before identity and stable locks. The caller
-// has already deleted the exact key and registrations and retains a helper
-// outside the installation. Unknown files, including logs we never created,
+// has already deleted the exact key and registrations. Unknown files, including logs we never created,
 // remain untouched. Missing locks are recoverable only with a purge tombstone.
 func (l *Lease) FinishPurge() error {
 	if l.parent == nil || !l.write || !l.store.identity.Purging {
@@ -197,6 +199,10 @@ func (l *Lease) FinishPurge() error {
 	if err := s.validRoot(); err != nil {
 		return err
 	}
+	var rootStat unix.Stat_t
+	if unix.Lstat(s.root.Path, &rootStat) == nil && rootStat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return nil
+	}
 	err = unix.Rmdir(s.root.Path)
 	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
 		return nil
@@ -225,6 +231,10 @@ func (l *Lease) TrimBinaryDirectory() error {
 	defer d.close()
 	if err = d.check(); err != nil {
 		return err
+	}
+	var binStat unix.Stat_t
+	if unix.Fstatat(int(d.parent.Fd()), "bin", &binStat, unix.AT_SYMLINK_NOFOLLOW) == nil && binStat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return nil
 	}
 	err = unix.Unlinkat(int(d.parent.Fd()), "bin", unix.AT_REMOVEDIR)
 	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {

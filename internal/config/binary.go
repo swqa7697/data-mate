@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 
@@ -34,7 +33,7 @@ func (s *Store) binaryDirectory() (*binaryDirectory, error) {
 	if s.root.Environment.Kind() == Production {
 		path = s.root.Path
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, ErrOwnership
 	}
@@ -43,7 +42,7 @@ func (s *Store) binaryDirectory() (*binaryDirectory, error) {
 		parent.Close()
 		return nil, ErrOwnership
 	}
-	bin, err := unix.Openat(fd, "bin", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	bin, err := unix.Openat(fd, "bin", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		parent.Close()
 		return nil, err
@@ -55,17 +54,14 @@ func (s *Store) binaryDirectory() (*binaryDirectory, error) {
 	}
 	return d, nil
 }
-func checkBinary(fd int, name string, optional bool) (*os.File, error) {
+func checkBinary(fd int, name string) (*os.File, error) {
 	f, e := unix.Openat(fd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
-	if optional && errors.Is(e, unix.ENOENT) {
-		return nil, nil
-	}
 	if e != nil {
 		return nil, ErrOwnership
 	}
 	file := os.NewFile(uintptr(f), name)
 	var st unix.Stat_t
-	if unix.Fstat(f, &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&07777 != 0700 || st.Nlink != 1 || !sameNamed(fd, name, file) {
+	if unix.Fstat(f, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || !sameNamed(fd, name, file) {
 		file.Close()
 		return nil, ErrOwnership
 	}

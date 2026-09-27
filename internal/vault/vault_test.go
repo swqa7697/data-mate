@@ -588,9 +588,11 @@ func TestVaultCleanupAndConcurrentWriters(t *testing.T) {
 	for i := 0; i < count; i++ {
 		c := testProfile(t, i)
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
-			for {
+			ctx := t.Context()
+			// Each revision conflict requires another writer to have committed.
+			// Bound retries by the writer count, not disk speed under race-enabled CI;
+			// the go test timeout remains the watchdog for blocked operations.
+			for attempt := 0; attempt < count; attempt++ {
 				p, rev, e := f.repo.Snapshot(ctx)
 				if e != nil {
 					errs <- e
@@ -604,6 +606,7 @@ func TestVaultCleanupAndConcurrentWriters(t *testing.T) {
 				errs <- e
 				return
 			}
+			errs <- fmt.Errorf("writer %s exhausted %d revision attempts", c.Alias, count)
 		})
 	}
 	wg.Wait()
@@ -637,7 +640,21 @@ func testPurgeRecovery(t *testing.T) {
 	t.Helper()
 	for _, point := range []string{"before-key-delete", "after-key-delete"} {
 		f := newFixture(t)
-		addSecret(t, f, 1)
+		if point == "before-key-delete" {
+			// Initialization can create an OS key before marking SQLite ready. Purge
+			// must delete this intent's key as well, and retain it on interruption.
+			f.repo.fault = func(op string) error {
+				if op == "after-key-create" {
+					return errors.New("interrupted key initialization")
+				}
+				return nil
+			}
+			if err := f.repo.Unlock(t.Context(), true, ""); err == nil || len(f.keys.keys) != 1 {
+				t.Fatal("initialization intent fixture", err)
+			}
+		} else {
+			addSecret(t, f, 1)
+		}
 		hit := false
 		f.repo.fault = func(op string) error {
 			if op == point && !hit {
@@ -661,6 +678,9 @@ func testPurgeRecovery(t *testing.T) {
 		reopened.Close()
 		if err != nil {
 			t.Fatal("purge restart", point, err)
+		}
+		if len(f.keys.keys) != 0 {
+			t.Fatal("purge retained initializing or ready OS key", point)
 		}
 	}
 	for _, path := range []string{"data-mate.db"} {

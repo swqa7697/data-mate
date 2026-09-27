@@ -22,7 +22,7 @@ func peerPathHash(pid int, path *[4096]C.char) string {
 	if n <= 0 {
 		return ""
 	}
-	hash, err := executableHash(C.GoString(&path[0]), false)
+	hash, err := executableHash(C.GoString(&path[0]))
 	if err != nil {
 		return ""
 	}

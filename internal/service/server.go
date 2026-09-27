@@ -94,11 +94,7 @@ func serveListener(parent context.Context, listener *net.UnixListener, r record,
 			if enabled {
 				return nil
 			}
-			root, err := config.ResolveRoot(r.Identity.Root, "")
-			root.Environment = r.Identity.Environment
-			if err != nil {
-				return ErrState
-			}
+			root := config.Root{Path: r.Identity.Root, Digest: r.Identity.Digest, Environment: r.Identity.Environment}
 			runtime, err := openRuntime(root, r.Identity, false)
 			if err != nil {
 				return err

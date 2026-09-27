@@ -23,8 +23,8 @@ func TestRoots(t *testing.T) {
 		if err := os.Symlink(t.TempDir(), filepath.Join(parent, ".local")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ProductionRoot(parent); err == nil {
-			t.Fatal("production followed symlink")
+		if linked, err := ProductionRoot(parent); err != nil || linked != root {
+			t.Fatal("symlink changed production namespace", err)
 		}
 		if err := os.Remove(filepath.Join(parent, ".local")); err != nil {
 			t.Fatal(err)

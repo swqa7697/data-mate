@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 )
 
-// Root identifies a canonical data directory without creating state.
+// Root identifies a stable absolute data path without creating state.
+// User-managed data directory links retain their logical path and namespace.
 type Root struct {
 	Path        string
 	Digest      string
@@ -33,7 +34,8 @@ func ResolveRoot(override, executable string) (Root, error) {
 		}
 		path = filepath.Join(filepath.Dir(filepath.Dir(real)), "data-mate")
 	}
-	real, err := filepath.EvalSymlinks(path)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	real := filepath.Join(parent, filepath.Base(path))
 	if err != nil {
 		return Root{}, errors.New("cannot resolve installation root")
 	}

@@ -19,12 +19,6 @@ private_dir "$project_dir/.dev"
 private_dir "$project_dir/.dev/bin"
 private_dir "$project_dir/.dev/data-mate"
 target="$project_dir/.dev/bin/data-mate"
-if [[ -e "$target" || -L "$target" ]]; then
-  if [[ -L "$target" || ! -f "$target" || ! -O "$target" ]]; then
-    echo 'Installed output is not an owned regular file.' >&2
-    exit 1
-  fi
-fi
 temporary="$(mktemp "$project_dir/.dev/bin/.data-mate.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
 flags="-X main.version=$version -X main.revision=$revision -X main.dirty=$dirty"

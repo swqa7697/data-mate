@@ -28,7 +28,30 @@ func distributionError(err error) error {
 	if errors.As(err, &conflict) {
 		return failure(conflict.Error())
 	}
-	return failure("distribution operation incomplete; rerun the installer or the recorded cleanup helper after resolving ownership, compatibility, or release verification errors")
+	var directory *distribution.DirectoryError
+	if errors.As(err, &directory) {
+		return failure(directory.Error())
+	}
+	var cleanup *service.CleanupError
+	if errors.As(err, &cleanup) {
+		return failure(cleanup.Error() + "; retry uninstall with the same options")
+	}
+	if errors.Is(err, service.ErrUnavailable) {
+		return failure("cannot inspect the per-user service manager for this installation's recorded service; retry when the manager is available")
+	}
+	// Preserve known nonsecret causes without printing wrapped OS, subprocess,
+	// or storage errors, which can contain private data.
+	for _, safe := range []error{distribution.ErrRelease, distribution.ErrConflict, config.ErrOwnership, config.ErrState, config.ErrPending, config.ErrPurging, config.ErrStale, service.ErrState, service.ErrConflict} {
+		if errors.Is(err, safe) {
+			return failure("distribution operation incomplete: " + safe.Error())
+		}
+	}
+
+	var path *os.PathError
+	if errors.As(err, &path) {
+		return failure(fmt.Sprintf("%s %q: %v", path.Op, path.Path, path.Err))
+	}
+	return failure("distribution operation incomplete; retry the command")
 }
 
 func distributionEngine(ctx context.Context, build Build, rootCommand *cobra.Command) (*distribution.Engine, error) {
@@ -57,6 +80,7 @@ func distributionEngine(ctx context.Context, build Build, rootCommand *cobra.Com
 		return nil, err
 	}
 	controller := service.New(root, nativeBuild)
+	controller.Interactive = hasTerminal(rootCommand)
 	engine := &distribution.Engine{Home: home, Root: root, Metadata: distribution.Contract(build.Version), Candidate: exe, ZDotDir: os.Getenv("ZDOTDIR")}
 	engine.Completion = func(shell string) ([]byte, error) {
 		var out bytes.Buffer
@@ -64,8 +88,11 @@ func distributionEngine(ctx context.Context, build Build, rootCommand *cobra.Com
 		return out.Bytes(), err
 	}
 
-	engine.Stop = func(ctx context.Context) error { _, err := controller.Stop(ctx); return err }
-	engine.Cleanup = func(ctx context.Context, purge bool) error { return controller.Uninstall(ctx, purge, nil) }
+	engine.Publish = controller.InstallBinary
+	engine.Warn = func(message string) { fmt.Fprintln(rootCommand.ErrOrStderr(), "Warning: "+message) }
+	engine.Cleanup = func(ctx context.Context, purge bool, files func() error) error {
+		return controller.Uninstall(ctx, purge, nil, files)
+	}
 	return engine, nil
 }
 
@@ -112,7 +139,7 @@ func addDistribution(root *cobra.Command, build Build) {
 		e.NoShell = flag(cmd, "no-shell")
 		e.Shell, err = distribution.LoginShell(cmd.Context())
 		if err != nil {
-			return distributionError(err)
+			e.Warn("cannot determine login shell; configure PATH manually")
 		}
 		if err = e.Install(cmd.Context()); err != nil {
 			return distributionError(err)
@@ -191,7 +218,7 @@ func addDistribution(root *cobra.Command, build Build) {
 				return failure("cannot restore terminal")
 			}
 		}
-		return runCleanupHelper(cmd, e, flag(cmd, "purge"))
+		return cleanupDistribution(cmd, e, flag(cmd, "purge"))
 	}}
 	uninstall.Flags().Bool("yes", false, "Confirm production cleanup")
 	uninstall.Flags().Bool("purge", false, "Also remove saved connections and credentials")
@@ -202,47 +229,31 @@ func addDistribution(root *cobra.Command, build Build) {
 			if err != nil {
 				return distributionError(err)
 			}
-			if name == "__uninstall" {
-				return runCleanupHelper(cmd, e, flag(cmd, "purge"))
-			}
-			if err = e.Uninstall(cmd.Context(), flag(cmd, "purge")); err != nil {
-				targets, _ := e.Preview(cmd.Context())
-				detail := "ownership or cleanup operation failed"
-				var conflict *distribution.ArtifactError
-				var cleanup *service.CleanupError
-				if errors.As(err, &conflict) {
-					detail = conflict.Error()
-				} else if errors.As(err, &cleanup) {
-					detail = cleanup.Error()
-				}
-				return failure(fmt.Sprintf("cleanup incomplete: %s; remaining recorded targets: %q; reconcile conflicts and retry %s __cleanup%s", detail, targets, distribution.Quote(e.Candidate), purgeArg(flag(cmd, "purge"))))
-			}
-			if _, err = fmt.Fprintln(cmd.OutOrStdout(), "Production cleanup complete."); err != nil {
-				return failure("cannot write cleanup result")
-			}
-			return nil
+			return cleanupDistribution(cmd, e, flag(cmd, "purge"))
 		}}
 		cmd.Flags().Bool("purge", false, "Remove saved connections and credentials")
 		root.AddCommand(cmd)
 	}
 }
 
-func purgeArg(purge bool) string {
-	if purge {
-		return " --purge"
+func cleanupDistribution(cmd *cobra.Command, e *distribution.Engine, purge bool) error {
+	if err := e.Uninstall(cmd.Context(), purge); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		retry := "Rerun the installer, then retry uninstall."
+		if _, statErr := os.Stat(config.ExecutablePath(e.Root)); statErr == nil {
+			retry = "Retry: " + distribution.Quote(config.ExecutablePath(e.Root)) + " uninstall --yes"
+			if purge {
+				retry += " --purge"
+			}
+		} else if purge {
+			retry = "Rerun the installer with --uninstall --purge."
+		}
+		return failure(distributionError(err).Error() + "\n" + retry)
 	}
-	return ""
-}
-func runCleanupHelper(cmd *cobra.Command, e *distribution.Engine, purge bool) error {
-	path, err := e.PrepareHelper(cmd.Context())
-	if err != nil {
-		return distributionError(err)
-	}
-	args := []string{"__cleanup"}
-	if purge {
-		args = append(args, "--purge")
-	}
-	return runDistributionChild(cmd, path, args...)
+	_, err := fmt.Fprintln(cmd.OutOrStdout(), "Production cleanup complete.")
+	return err
 }
 func runDistributionChild(cmd *cobra.Command, path string, args ...string) error {
 	child := exec.CommandContext(cmd.Context(), path, args...)

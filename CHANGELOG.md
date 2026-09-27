@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-27
+
+### Changed
+
+- Simplify installation, reinstall, updates and uninstall into retryable file operations with atomic executable replacement; preserve existing directory permissions, directory and shell-config symlinks, and saved credentials without manual repairs or cleanup helpers.
+- Honor standard HTTPS proxy settings for release downloads while verifying checksums and publisher signatures before execution; report shell setup conflicts as warnings without undoing installation.
+
+### Fixed
+
+- Allow fresh installation and unused-installation removal without a service manager or credential store; preserve retry state when actual service, registration or keyset cleanup fails.
+- Fix the piped installer's cleanup trap so a failed download or install retains the original error instead of reporting an unbound staging variable.
+
 ## [0.2.0] - 2026-09-27
 
 ### Added

@@ -79,7 +79,7 @@ var ownedPaths = []string{
 // receives only an operation and owned relative path, never file contents.
 type Fault func(operation, path string) error
 
-// Store pins an owner-checked installation root. Close only after all leases end.
+// Store pins an installation directory and validates private state ownership. Close only after all leases end.
 // Use Open for initialization; merely resolving a root never creates state.
 type Store struct {
 	root     Root
@@ -132,9 +132,9 @@ func openExisting(ctx context.Context, root Root, cleanup bool) (_ *Store, err e
 	if validateRoot(root) != nil {
 		return nil, ErrOwnership
 	}
-	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, ErrOwnership
+		return nil, &os.PathError{Op: "open installation directory", Path: root.Path, Err: err}
 	}
 	s := &Store{root: root, dir: os.NewFile(uintptr(fd), root.Path), local: retainLocks(root.Path)}
 	defer func() {
@@ -171,9 +171,9 @@ func Open(ctx context.Context, root Root, fault Fault) (_ *Store, err error) {
 	if validateRoot(root) != nil {
 		return nil, ErrOwnership
 	}
-	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(root.Path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, ErrOwnership
+		return nil, &os.PathError{Op: "open installation directory", Path: root.Path, Err: err}
 	}
 	s := &Store{root: root, dir: os.NewFile(uintptr(fd), root.Path), fault: fault, local: retainLocks(root.Path)}
 	defer func() {
@@ -369,22 +369,30 @@ func (s *Store) Close() error { releaseLocks(s.root.Path, s.local); return s.dir
 
 func checkFD(fd int, directory bool) error {
 	var st unix.Stat_t
-	if unix.Fstat(fd, &st) != nil || st.Uid != uint32(os.Geteuid()) {
+	if unix.Fstat(fd, &st) != nil {
 		return ErrOwnership
 	}
-	kind, mode := uint32(unix.S_IFREG), uint32(0600)
 	if directory {
-		kind, mode = unix.S_IFDIR, 0700
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return ErrOwnership
+		}
+		return nil
 	}
-	if uint32(st.Mode)&unix.S_IFMT != kind || uint32(st.Mode)&07777 != mode || (!directory && st.Nlink != 1) {
+	if st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&07777 != 0600 || st.Nlink != 1 {
 		return ErrOwnership
 	}
 	return nil
 }
-
 func sameNamed(parent int, name string, file *os.File) bool {
 	var opened, named unix.Stat_t
-	return unix.Fstat(int(file.Fd()), &opened) == nil && unix.Fstatat(parent, name, &named, unix.AT_SYMLINK_NOFOLLOW) == nil && opened.Dev == named.Dev && opened.Ino == named.Ino
+	if unix.Fstat(int(file.Fd()), &opened) != nil {
+		return false
+	}
+	flags := unix.AT_SYMLINK_NOFOLLOW
+	if opened.Mode&unix.S_IFMT == unix.S_IFDIR {
+		flags = 0
+	}
+	return unix.Fstatat(parent, name, &named, flags) == nil && opened.Dev == named.Dev && opened.Ino == named.Ino
 }
 func (s *Store) validRoot() error {
 	if !sameNamed(unix.AT_FDCWD, s.root.Path, s.dir) || checkFD(int(s.dir.Fd()), true) != nil {
@@ -399,7 +407,7 @@ func (s *Store) directory(name string) (*os.File, error) {
 	if err := s.validRoot(); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Openat(int(s.dir.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(s.dir.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, ErrOwnership
 	}

@@ -34,20 +34,7 @@ check_build_deps() {
   printf 'Target: %s/%s; host: %s\n' "$GOOS" "$GOARCH" "$(uname -m)"
 }
 
-# Existing installation directories must be owned private directories, not links.
+# Existing directories, modes and user-managed links are preserved.
 private_dir() {
-  local dir="$1"
-  if [[ -L "$dir" ]]; then
-    printf 'Refusing symlink directory: %s\n' "$dir" >&2
-    exit 1
-  fi
-  if [[ ! -e "$dir" ]]; then mkdir -m 700 "$dir"; fi
-  if [[ ! -d "$dir" || ! -O "$dir" || "$(file_mode "$dir")" != 700 ]]; then
-    printf 'Expected an owned mode-0700 directory: %s\n' "$dir" >&2
-    exit 1
-  fi
-}
-
-file_mode() {
-  if [[ "$GOOS" == darwin ]]; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi
+  mkdir -p -m 700 "$1"
 }

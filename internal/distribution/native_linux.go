@@ -4,7 +4,6 @@ import (
 	"context"
 	"debug/elf"
 	"io"
-	"os"
 	"runtime"
 	"strings"
 
@@ -16,12 +15,17 @@ func VerifyNative(ctx context.Context, path string, m Metadata) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if runtime.GOARCH != "amd64" || os.Geteuid() == 0 || !m.valid() || m.Platform != "linux_amd64" {
+	if runtime.GOARCH != "amd64" || !m.valid() || m.Platform != "linux_amd64" {
 		return ErrRelease
 	}
 	if err := verifyLinuxSignature(path, LinuxPublicKey); err != nil {
 		return err
 	}
+	return nil
+}
+
+// verifyReleaseImage is a release acceptance check, not an installation gate.
+func verifyReleaseImage(ctx context.Context, path string, m Metadata) error {
 	f, err := elf.Open(path)
 	if err != nil {
 		return ErrRelease

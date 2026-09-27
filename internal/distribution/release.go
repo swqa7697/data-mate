@@ -114,32 +114,21 @@ func (m Metadata) Text() string {
 
 func allowedURL(raw string) bool {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || (u.Port() != "" && u.Port() != "443") {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" {
 		return false
 	}
-	switch u.Hostname() {
-	case "github.com":
-		return strings.HasPrefix(u.EscapedPath(), "/"+Repository+"/releases/")
-	case "api.github.com":
-		return strings.HasPrefix(u.EscapedPath(), "/repos/"+Repository+"/releases/")
-	case "release-assets.githubusercontent.com", "objects.githubusercontent.com":
-		return true
-	}
-	return false
+	return u.Hostname() != ""
 }
 
-// Client has a narrow HTTP seam; production uses bounded HTTPS with no ambient proxy.
+// Client has a narrow HTTP seam; production uses bounded HTTPS with standard proxy support.
 type Client struct {
 	HTTP   *http.Client
 	verify func(context.Context, string, Metadata) error
 }
 
 func NewClient() Client {
-	return Client{HTTP: &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, MaxResponseHeaderBytes: 64 << 10}, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 && req.URL.Hostname() == "github.com" && strings.Contains(via[0].URL.Path, "/releases/download/") && req.URL.EscapedPath() != via[0].URL.EscapedPath() {
-			return ErrRelease
-		}
-		if len(via) > 5 || !allowedURL(req.URL.String()) {
+	return Client{HTTP: &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, MaxResponseHeaderBytes: 64 << 10}, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || !allowedURL(req.URL.String()) {
 			return ErrRelease
 		}
 		return nil

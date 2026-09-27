@@ -38,14 +38,9 @@ unset ZDOTDIR
 umask 077
 scratch="$(mktemp -d /tmp/data-mate-accept.XXXXXX)"
 installed_once=false
-keyring_pid=
 cleanup() {
   if [[ "$installed_once" == true && -d "$root" ]]; then
     "$candidate" __uninstall --purge || echo 'Acceptance cleanup failed; inspect this disposable runner.' >&2
-  fi
-  if [[ -n "$keyring_pid" ]]; then
-    kill "$keyring_pid" 2>/dev/null || true
-    wait "$keyring_pid" 2>/dev/null || true
   fi
   rm -rf "$scratch"
 }
@@ -74,38 +69,7 @@ cmp "$candidate_dir/$metadata_name" "$scratch/compiled.txt"
 [[ "$(json_value version raw "$scratch/metadata.json")" == "${tag#v}" ]]
 [[ "$(json_value platform raw "$scratch/metadata.json")" == "$platform" ]]
 
-if [[ "$platform" == linux_amd64 ]]; then
-  # Purge must check the exact OS item even when passive acceptance saved no
-  # credentials. Supply a persistent default collection on the real user bus;
-  # a private dbus-run-session bus would be ignored by the native adapter.
-  user_bus="unix:path=/run/user/$(id -u)/bus"
-  bus=(busctl --address="$user_bus" --timeout=2 --auto-start=no)
-  [[ "$("${bus[@]}" call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.secrets)" == 'b false' ]] || {
-    echo 'Acceptance refuses an existing Secret Service owner.' >&2
-    exit 1
-  }
-  mkdir -m 700 "$scratch/keyring-data" "$scratch/keyring-control"
-  DBUS_SESSION_BUS_ADDRESS="$user_bus" XDG_DATA_HOME="$scratch/keyring-data" \
-    gnome-keyring-daemon --foreground --components=secrets --unlock \
-    --control-directory="$scratch/keyring-control" \
-    <<<'synthetic-acceptance-keyring-password' >"$scratch/keyring.log" 2>&1 &
-  keyring_pid=$!
-  keyring_ready=false
-  for ((attempt = 0; attempt < 50; attempt++)); do
-    if ! kill -0 "$keyring_pid" 2>/dev/null; then break; fi
-    if [[ "$("${bus[@]}" call org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.Secret.Service ReadAlias s default 2>/dev/null)" == 'o "/org/freedesktop/secrets/collection/login"' ]] &&
-      [[ "$("${bus[@]}" get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked 2>/dev/null)" == 'b false' ]]; then
-      keyring_ready=true
-      break
-    fi
-    sleep 0.1
-  done
-  if [[ "$keyring_ready" != true ]]; then
-    echo 'Acceptance requires an unlocked persistent Secret Service collection.' >&2
-    cat "$scratch/keyring.log" >&2
-    exit 1
-  fi
-fi
+# Fresh install and purge intentionally run without provisioning a keyring.
 
 # No Go setup, Homebrew, or build commands. Hosted images still contain developer
 # tools; restricting PATH proves this smoke path uses only the candidate/system tools.

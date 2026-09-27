@@ -147,11 +147,18 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		if err != nil {
 			return failure("cannot locate build output")
 		}
+		// macOS may retain directory symlinks in os.Executable's path.
+		// Resolve both sides before checking that the build is a sibling.
+		exe, err = filepath.EvalSymlinks(exe)
+		if err != nil {
+			return failure("cannot resolve build output")
+		}
 		root, err := config.ResolveRoot(*override, exe)
 		if err != nil {
 			return invalid("invalid installation root")
 		}
-		if filepath.Dir(exe) != filepath.Dir(config.DevelopmentExecutable(root)) {
+		bin, resolveErr := filepath.EvalSymlinks(filepath.Dir(config.DevelopmentExecutable(root)))
+		if resolveErr != nil || filepath.Dir(exe) != bin {
 			return invalid("build output must be an installation sibling")
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 40*time.Second)
@@ -181,14 +188,6 @@ func internalServiceCommands(override *string, build Build, keys vault.KeyProvid
 		c, err := serviceController(*override, build)
 		if err != nil {
 			return err
-		}
-		exe, err := os.Executable()
-		if err != nil {
-			return failure("cannot locate cleanup helper")
-		}
-		rel, err := filepath.Rel(filepath.Dir(c.Root.Path), exe)
-		if err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
-			return invalid("cleanup must run from a helper outside the installation")
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 		defer cancel()
