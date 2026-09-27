@@ -4,17 +4,18 @@
 
 ### Added
 
-- Add `list_objects` and `describe_object` MCP tools for routine source, enum and other type details, and sequence configuration; expand table descriptions with defaults, indexes, constraints, triggers, view definitions, and row-security policies without evaluating stored expressions.
-- Add `db describe [alias]` with an interactive profile picker and versioned `--json` output to list accessible schemas and readable tables/views; fail clearly when complete results exceed catalog, byte, or timeout limits.
+- Add `list_objects` and `describe_object` MCP tools for routine source, enum and other type details (including arrays and table-row types), and sequence configuration; expand table descriptions with defaults, indexes, constraints, triggers, view definitions, and row-security policies without evaluating stored expressions.
+- Add `db describe [alias]` with an interactive profile picker and versioned `--json` output to list catalog-visible schemas and tables/views, including system schemas; fail clearly when complete results exceed catalog, byte, or timeout limits.
 
 ### Changed
 
-- Restrict explicit agent SQL calls to core PostgreSQL routines, retaining functions such as `enum_range` while rejecting application and extension routine calls; preserve indirect reads through permitted views, operators, casts, and policies.
+- Require a live read-only account check before saving every connection addition/edit and before using a newly opened pool; reuse approval only while physical connections remain, and make `db test` always check fresh privileges. Failed saves preserve existing profiles and credentials.
+- Allow system-catalog reads, application and extension routines, `SHOW`, and `EXPLAIN` of read queries; keep schema-qualified table names, read-only transactions, and resource limits. Return catalog-visible definitions and relationships independently of row-access grants.
 - Show one `PASS` or `FAIL` summary per connection in `db test`, with details only for failed checks and green/red terminal status labels that honor `NO_COLOR`; preserve plain redirected output and complete JSON diagnostics.
 
 ### Removed
 
-- Remove configurable database scope, its CLI command and flags, saved profile fields, output labels, and filtering. PostgreSQL privileges now determine application-data access; existing SQL restrictions remain. Old profiles must be removed with the previous executable and recreated with credentials after upgrading; no automatic migration is provided.
+- Remove configurable database scope, its CLI command and flags, saved profile fields, output labels, and filtering. PostgreSQL privileges now determine data access; schema qualification and read-only enforcement remain. Old profiles must be removed with the previous executable and recreated with credentials after upgrading; no automatic migration is provided.
 
 ### Fixed
 

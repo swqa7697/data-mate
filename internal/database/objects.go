@@ -69,7 +69,7 @@ type AggregateDescription struct {
 	InitialCondition   *string `json:"initial_condition"`
 }
 
-// TypeDescription describes explicit types, not automatic arrays or table rows.
+// TypeDescription describes catalog-visible types, including automatic arrays and table rows.
 type TypeDescription struct {
 	Kind        string            `json:"kind"`
 	Category    string            `json:"category"`

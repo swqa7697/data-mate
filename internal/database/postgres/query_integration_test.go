@@ -96,7 +96,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		"SELECT * FROM app.foreign_empty", "SELECT * FROM app.a_view", "SELECT * FROM app.materialized", "SELECT * FROM app.expr_index", "SELECT * FROM app.partial_index", "SELECT * FROM app.generated", "SELECT * FROM app.custom_index", "SELECT * FROM app.custom_collation_table", "SELECT * FROM app.custom_type", "SELECT * FROM app.rls_parts", "SELECT * FROM app.parent",
 		"SELECT count(*) OVER(),id FROM app.items", "SELECT DISTINCT name FROM app.items", "SELECT id FROM app.items a WHERE EXISTS(SELECT 1 FROM app.items b WHERE b.id=a.id)",
 		"SELECT * FROM app.items a,LATERAL(SELECT a.id) b", "SELECT 1 UNION SELECT 2", "WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM x WHERE n<3) SELECT * FROM x",
-		"SELECT * FROM app.indirect", "SELECT id OPERATOR(app.=) 1 FROM app.items",
+		"SELECT * FROM app.indirect", "SELECT id OPERATOR(app.=) 1 FROM app.items", "SELECT * FROM app.read_hidden()", "WITH x AS (SELECT app.sum(1)) SELECT * FROM x", "SELECT * FROM pg_catalog.pg_class", "SHOW search_path", "EXPLAIN SELECT * FROM app.items", "EXPLAIN ANALYZE SELECT * FROM app.items",
 	} {
 		if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: q}); err != nil {
 			t.Fatalf("newly readable %s: %v", q, err)
@@ -146,11 +146,10 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		q    string
 		code contracts.Code
 	}{
-		{"SELECT * FROM pg_catalog.pg_class", contracts.QueryUnsupported},
+
 		{"SELECT secret FROM app.column_grants", contracts.PermissionDenied},
 		{"SELECT app.policy_probe()", contracts.ReadOnlyViolation},
-		{"SELECT * FROM app.read_hidden()", contracts.ReadOnlyViolation},
-		{"WITH x AS (SELECT app.sum(1)) SELECT * FROM x", contracts.ReadOnlyViolation},
+
 		{"DELETE FROM app.items", contracts.ReadOnlyViolation}, {"WITH x AS (DELETE FROM app.items RETURNING *) SELECT * FROM x", contracts.ReadOnlyViolation},
 	} {
 		_, e := d.Query(t.Context(), access, database.QueryRequest{SQL: c.q})

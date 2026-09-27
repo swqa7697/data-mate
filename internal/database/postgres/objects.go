@@ -18,23 +18,19 @@ const objectsSQL = `WITH objects AS (
  'pg_catalog.pg_proc'::regclass::oid AS classid FROM pg_catalog.pg_proc p
  UNION ALL
  SELECT t.oid,t.typnamespace,t.typname,'type','pg_catalog.pg_type'::regclass::oid
- FROM pg_catalog.pg_type t LEFT JOIN pg_catalog.pg_class c ON c.oid=t.typrelid
- WHERE t.typisdefined AND t.typtype<>'p' AND (t.typrelid=0 OR c.relkind='c')
- AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type element WHERE element.typarray=t.oid)
- AND pg_catalog.has_type_privilege(t.oid,'USAGE')
+ FROM pg_catalog.pg_type t WHERE t.typisdefined
  UNION ALL
  SELECT c.oid,c.relnamespace,c.relname,'sequence','pg_catalog.pg_class'::regclass::oid
- FROM pg_catalog.pg_class c WHERE c.relkind='S' AND c.relpersistence<>'t'
- AND (pg_catalog.has_sequence_privilege(c.oid,'SELECT') OR pg_catalog.has_sequence_privilege(c.oid,'USAGE'))
+ FROM pg_catalog.pg_class c WHERE c.relkind='S'
  ) SELECT o.oid,n.nspname::text,o.name::text,o.kind,
  CASE WHEN o.kind='routine' THEN pg_catalog.pg_get_function_identity_arguments(o.oid) END,
  (SELECT e.extname::text FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
  WHERE d.classid=o.classid AND d.objid=o.oid AND d.objsubid=0 AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype='e')
- FROM objects o JOIN pg_catalog.pg_namespace n ON n.oid=o.namespace WHERE ` + accessibleSchemaSQL
+ FROM objects o JOIN pg_catalog.pg_namespace n ON n.oid=o.namespace WHERE true`
 
 func objectKind(k string) bool { return k == "routine" || k == "type" || k == "sequence" }
 
-// ListObjects lists routines, explicit types and sequences in accessible application schemas.
+// ListObjects lists routines, types and sequences visible through PostgreSQL catalogs.
 func (d *Driver) ListObjects(ctx context.Context, a database.Access, req database.ObjectPageRequest) (database.ObjectPage, error) {
 	a, rev, err := normalized(a)
 	if err != nil {
@@ -196,7 +192,7 @@ func describeRoutine(ctx context.Context, tx pgx.Tx, oid uint32) (*database.Rout
 func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget) (*database.TypeDescription, error) {
 	out := &database.TypeDescription{EnumLabels: []string{}, Attributes: []database.Column{}, Constraints: []database.Definition{}}
 	var relation uint32
-	err := tx.QueryRow(ctx, `SELECT CASE typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain' WHEN 'c' THEN 'composite' WHEN 'r' THEN 'range' WHEN 'm' THEN 'multirange' ELSE 'base' END,
+	err := tx.QueryRow(ctx, `SELECT CASE typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain' WHEN 'c' THEN 'composite' WHEN 'r' THEN 'range' WHEN 'm' THEN 'multirange' WHEN 'p' THEN 'pseudo' ELSE 'base' END,
  typcategory::text,CASE WHEN typbasetype<>0 THEN pg_catalog.format_type(typbasetype,typtypmod) END,
  typnotnull,pg_catalog.pg_get_expr(typdefaultbin,0),typrelid FROM pg_catalog.pg_type WHERE oid=$1`, oid).Scan(&out.Kind, &out.Category, &out.BaseType, &out.NotNull, &out.Default, &relation)
 	if err != nil {
@@ -257,7 +253,7 @@ func describeSequence(ctx context.Context, tx pgx.Tx, oid uint32) (*database.Seq
 	err = tx.QueryRow(ctx, `SELECT n.nspname::text,c.relname::text,at.attname::text FROM pg_catalog.pg_depend d
  JOIN pg_catalog.pg_class c ON c.oid=d.refobjid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
  JOIN pg_catalog.pg_attribute at ON at.attrelid=c.oid AND at.attnum=d.refobjsubid
- WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=$1 AND d.refclassid='pg_catalog.pg_class'::regclass AND d.deptype IN ('a','i') AND `+visibleSQL, args...).Scan(&schema, &name, &column)
+ WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=$1 AND d.refclassid='pg_catalog.pg_class'::regclass AND d.deptype IN ('a','i') AND `+relationKindSQL, args...).Scan(&schema, &name, &column)
 	if err == pgx.ErrNoRows {
 		return out, nil
 	}

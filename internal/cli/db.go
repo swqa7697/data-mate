@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
+	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/transport"
 	"github.com/swqa7697/data-mate/internal/vault"
@@ -255,7 +256,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 	if len(patch) > 0 {
 		mutation.Patches = map[string]vault.Patch{profile.ID: vault.Patch(patch)}
 	}
-	request := service.ManagementRequest{Operation: "mutate", Interactive: hasTerminal(cmd), Mutation: &mutation}
+	request := service.ManagementRequest{Operation: "mutate", ProfileID: profile.ID, Interactive: hasTerminal(cmd), Mutation: &mutation}
 	if hostKey != nil {
 		request.Pin = &service.HostPin{Address: hostKey.Address, Key: hostKey.Key.Marshal()}
 	}
@@ -286,6 +287,13 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 }
 
 func storageError(err error, input bool) error {
+	var dbError *database.Error
+	if errors.As(err, &dbError) {
+		if dbError.Code == contracts.Cancelled {
+			return context.Canceled
+		}
+		return failure(dbError.Error())
+	}
 	if input && (errors.Is(err, config.ErrState) || errors.Is(err, config.ErrRecovery) || errors.Is(err, config.ErrObsolete)) {
 		return invalid(err.Error())
 	}

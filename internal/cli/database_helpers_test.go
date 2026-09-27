@@ -5,6 +5,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/vault"
+	"os"
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
@@ -14,6 +15,7 @@ import (
 
 // Shared by command diagnostics and the PTY subprocess; no network or native keys.
 type fixtureDatabase struct {
+	acceptAll     bool
 	tested        []string
 	closed        bool
 	described     []string
@@ -48,7 +50,7 @@ func (d *fixtureDatabase) Test(_ context.Context, a database.Access) (database.R
 	d.tested = append(d.tested, a.Profile.Alias)
 	out := database.Readiness{ServerVersion: 160000, Stage: "read_only"}
 	for _, s := range []string{"config", "dial", "authentication", "version", "read_only"} {
-		if a.Profile.Alias == "bad" && s == "authentication" {
+		if !d.acceptAll && a.Profile.Alias == "bad" && s == "authentication" {
 			out.Stage = s
 			e := database.Fail(contracts.ConnectFailed, "authentication failed", false).(*database.Error)
 			out.Stages = append(out.Stages, database.Stage{Stage: s, Error: &e.Failure})
@@ -69,7 +71,12 @@ type cliDatabase interface {
 }
 type databaseFactory func() (cliDatabase, error)
 
-func defaultDatabase() (cliDatabase, error) { return postgres.New() }
+func defaultDatabase() (cliDatabase, error) {
+	if os.Getenv("DATA_MATE_CLI_REAL_DRIVER") == "1" {
+		return postgres.New()
+	}
+	return &fixtureDatabase{acceptAll: true}, nil
+}
 
 type testDriver struct {
 	database.Driver
@@ -90,7 +97,7 @@ type localManagement struct {
 
 func (c *localManagement) Request(ctx context.Context, q service.ManagementRequest) (service.ManagementReply, error) {
 	r := c.manager.HandleManagement(ctx, q)
-	return r, service.ManagementError(r.Error)
+	return r, r.ResultError()
 }
 func (c *localManagement) Close() { c.manager.Close(); c.store.Close() }
 func newCommand(build Build, keys vault.KeyProvider) *cobra.Command {

@@ -19,12 +19,10 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		// At least one row per schema; the extra row detects overflow without
-		// materializing an unbounded catalog. Relations are filtered in the join
-		// so schemas containing only unreadable relations still appear empty.
+		// materializing an unbounded catalog. A left join preserves empty schemas.
 		rows, err := tx.Query(ctx, `SELECT n.nspname::text, c.relname::text, c.relkind::text
  FROM pg_catalog.pg_namespace n LEFT JOIN pg_catalog.pg_class c
- ON c.relnamespace=n.oid AND `+readableRelationSQL+`
- WHERE `+accessibleSchemaSQL+`
+ ON c.relnamespace=n.oid AND `+relationKindSQL+`
  ORDER BY n.nspname::text COLLATE "C", c.relname::text COLLATE "C" LIMIT 4097`)
 		if err != nil {
 			return err

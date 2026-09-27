@@ -3,8 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 )
@@ -12,8 +12,9 @@ import (
 // Trace belongs to one synchronous operation. It records successful stages only;
 // the caller attaches the final safe failure after transaction cleanup completes.
 type diagnosticTrace struct {
-	stage  string
-	stages []database.Stage
+	stage   string
+	stages  []database.Stage
+	version int
 }
 
 func (t *diagnosticTrace) start(stage string) {
@@ -33,14 +34,47 @@ func (t *diagnosticTrace) pass(stage string) {
 	t.stages = append(t.stages, database.Stage{Stage: stage, OK: true})
 }
 
-// Test verifies connection and read-only transaction readiness, not account grants.
+// Test always audits a fresh short-lived pool, independently of cached approval.
 func (d *Driver) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
+	d.mu.Lock()
+	closed := d.closed
+	d.mu.Unlock()
+	if closed {
+		return database.Readiness{}, database.Fail(contracts.ServiceUnavailable, "database driver is closed", false)
+	}
+	fresh, err := New()
+	if err != nil {
+		return database.Readiness{}, err
+	}
+	defer fresh.Close()
 	trace := &diagnosticTrace{}
 	out := database.Readiness{TLS: a.Profile.Transport.TLS.Mode == "verify-full"}
-	err := d.runObserved(ctx, a, trace, func(ctx context.Context, tx pgx.Tx, version int) error {
-		out.ServerVersion = version
+	err = func() error {
+		trace.start("config")
+		a, rev, err := normalized(a)
+		if err != nil {
+			return err
+		}
+		trace.pass("config")
+		ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
+		defer cancel()
+		trace.start("dial")
+		leave, err := d.admit(ctx)
+		if err != nil {
+			return err
+		}
+		defer leave()
+		_, _, release, err := fresh.checkout(ctx, a, rev, trace)
+		if err != nil {
+			return err
+		}
+		defer release(true)
+		if err = ctx.Err(); err != nil {
+			return safeError(err)
+		}
+		out.ServerVersion = trace.version
 		return nil
-	})
+	}()
 	if err == nil {
 		trace.pass("read_only")
 	} else {

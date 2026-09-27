@@ -170,7 +170,8 @@
             "composite",
             "range",
             "multirange",
-            "base"
+            "base",
+            "pseudo"
           ]
         },
         "category": {

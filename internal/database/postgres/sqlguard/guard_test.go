@@ -13,6 +13,12 @@ import (
 // expression, type and execution semantics are delegated to PostgreSQL.
 func TestQueryGuard(t *testing.T) {
 	positive := []string{
+		"SELECT app.custom(1)", "SELECT * FROM app.read_hidden()", "SELECT 1 WHERE EXISTS(SELECT app.custom(1))",
+		"WITH x AS (SELECT app.custom(1)) SELECT * FROM x", "SELECT app.sum(id) OVER() FROM app.items",
+		"SELECT pg_catalog.count(app.custom(id)) FROM app.items", "SELECT * FROM app.items TABLESAMPLE app.sampler(10)",
+		"SELECT * FROM fixture.app.items", "SELECT * FROM information_schema.tables", "SELECT * FROM pg_catalog.pg_class",
+		"SHOW search_path", "EXPLAIN SELECT 1", "EXPLAIN ANALYZE SELECT * FROM app.items",
+
 		"SELECT 1", "VALUES (1),(2)", "TABLE app.items", "SELECT * FROM ONLY app.items",
 		"SELECT count(*) FROM app.items", "SELECT enum_range(NULL::app.custom)", "SELECT pg_catalog.lower('A')", "SELECT ARRAY[1,NULL], E'escaped\\ntext', $$dollar; quoted$$",
 		"SELECT count(*) OVER(),sum(id) FILTER(WHERE id>1) FROM app.items GROUP BY ROLLUP(id)",
@@ -31,20 +37,15 @@ func TestQueryGuard(t *testing.T) {
 		}
 	}
 	negative := []string{
-		// Explicit user routines must be caught at every expression depth.
-		"SELECT app.custom(1)", "SELECT * FROM app.read_hidden()", "SELECT 1 WHERE EXISTS(SELECT app.custom(1))",
-		"WITH x AS (SELECT app.custom(1)) SELECT * FROM x", "SELECT app.sum(id) OVER() FROM app.items",
-		"SELECT pg_catalog.count(app.custom(id)) FROM app.items", "SELECT * FROM app.items TABLESAMPLE app.sampler(10)",
-		"CALL app.proc()", "DO $$ BEGIN NULL; END $$",
+		// Mutations and transaction escape remain rejected at every depth.
+		"EXPLAIN ANALYZE DELETE FROM app.items", "EXPLAIN SELECT * FROM items", "CALL app.proc()", "DO $$ BEGIN NULL; END $$",
 		"DELETE FROM app.items", "SELECT 1; SELECT 2", "SELECT * INTO app.copy FROM app.items", "SELECT * FROM app.items FOR UPDATE",
 		"WITH x AS (DELETE FROM app.items RETURNING *) SELECT * FROM x", "WITH x AS (UPDATE app.items SET id=1 RETURNING *) SELECT * FROM x",
-		"WITH x AS (INSERT INTO app.items VALUES(1) RETURNING *) SELECT * FROM x", "SET transaction_read_only=off", "COMMIT", "COPY app.items TO STDOUT", "EXPLAIN SELECT 1",
-		"SELECT * FROM items", "SELECT * FROM fixture.app.items", "SELECT * FROM information_schema.tables", "SELECT * FROM pg_catalog.pg_class",
-		"SELECT * FROM app.items a JOIN pg_catalog.pg_class b ON true", "SELECT * FROM app.items WHERE EXISTS(SELECT 1 FROM information_schema.tables)",
+		"WITH x AS (INSERT INTO app.items VALUES(1) RETURNING *) SELECT * FROM x", "SET transaction_read_only=off", "COMMIT", "COPY app.items TO STDOUT",
+		"SELECT * FROM items",
 		"WITH x AS (SELECT * FROM y),y AS (SELECT * FROM app.items) SELECT * FROM x",
 		"SELECT * FROM (WITH x AS (SELECT 1) SELECT * FROM x) q,x",
-		"WITH x AS (SELECT * FROM app.items) SELECT * FROM (WITH x AS (SELECT * FROM information_schema.tables) SELECT * FROM x) q",
-		"WITH RECURSIVE x AS (SELECT * FROM information_schema.tables UNION ALL SELECT * FROM x) SELECT * FROM x",
+
 		"SELECT * FROM (SELECT * FROM app.items FOR SHARE) q",
 		strings.Repeat("(", 65) + "SELECT 1" + strings.Repeat(")", 65), strings.Repeat(" ", 65537), "SELECT " + strings.Repeat("1,", 8192) + "1",
 	}
@@ -52,11 +53,6 @@ func TestQueryGuard(t *testing.T) {
 		if err := Check(q); err == nil {
 			t.Errorf("rejected query accepted: %.200s", q)
 		}
-	}
-	// Authorization must receive nested and sampling names, with duplicates removed.
-	names, err := Inspect("SELECT lower(upper('a')), lower('b'), count(*) FROM app.items TABLESAMPLE SYSTEM(10)")
-	if err != nil || strings.Join(names, ",") != "count,lower,system,upper" {
-		t.Fatalf("routine authorization names: %v %v", names, err)
 	}
 
 	// Application schema names are unrestricted; privileges are checked by PostgreSQL.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,6 +44,7 @@ func liveDiagnostics(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	password := strings.TrimSpace(string(raw))
+	// Seed historical profiles through the isolated fake; use the real driver below.
 	for _, alias := range []string{"bad-auth", "extra-grants", "bad-tls", "good"} {
 		secret := password
 		user := "reader"
@@ -64,6 +66,14 @@ func liveDiagnostics(t *testing.T, path string) {
 		args := []string{"add", "--alias", alias, "--host", "localhost", "--port", strconv.Itoa(fixture.Port), "--database", "fixture", "--username", user, "--password-stdin", "--yes"}
 		command(t, root, keys, secret+"\n", 0, append(args, extra...)...)
 	}
+	t.Setenv("DATA_MATE_CLI_REAL_DRIVER", "1")
+	before := files(t, root)
+	command(t, root, keys, "synthetic-wrong-password\n", 1, "edit", "good", "--password-stdin", "--yes")
+	command(t, root, keys, "", 1, "edit", "extra-grants", "--yes")
+	if !reflect.DeepEqual(before, files(t, root)) {
+		t.Fatal("failed live validation published edit")
+	}
+	command(t, root, keys, "", 0, "edit", "good", "--yes")
 	out, _ := command(t, root, keys, "", 1, "test", "--json")
 	if contracts.Validate("db-test.output", []byte(out)) != nil {
 		t.Fatal("live diagnostic schema")
@@ -76,7 +86,7 @@ func liveDiagnostics(t *testing.T, path string) {
 	}
 	for i, want := range []string{"authentication", "dial", "read_only", "read_only"} {
 		r := report.Results[i]
-		if r.Stage != want || r.OK != (i == 2 || i == 3) {
+		if r.Stage != want || r.OK != (i == 3) {
 			t.Fatalf("stage %d: %+v", i, r)
 		}
 	}

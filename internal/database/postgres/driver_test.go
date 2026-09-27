@@ -271,6 +271,10 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 				var oids []uint32
 				var values [][]byte
 				switch {
+				case strings.Contains(q, "WITH roles AS MATERIALIZED"):
+					names = []string{"reason"}
+					oids = []uint32{25}
+					values = [][]byte{[]byte("")}
 				case strings.Contains(q, "server_version_num"):
 					names = []string{"version", "current_user", "session_user", "read_only"}
 					oids = []uint32{23, 25, 25, 16}

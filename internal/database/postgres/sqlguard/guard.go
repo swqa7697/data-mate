@@ -1,8 +1,7 @@
-// Package sqlguard checks statement kind, direct relation restrictions and explicit calls.
+// Package sqlguard checks read statement kinds and explicit relation schemas.
 package sqlguard
 
 import (
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -19,34 +18,9 @@ func resource() error {
 func readOnly() error {
 	return database.Fail(contracts.ReadOnlyViolation, "only one read query is allowed", false)
 }
-func unsupportedRelation() error {
-	return database.Fail(contracts.QueryUnsupported, "cross-database and system-schema relation references are unsupported", false)
-}
 
-// Check checks syntax and relation references. Callers executing SQL must also authorize the
-// routine names returned by Inspect against the live server catalog.
+// Check bounds and validates one read statement without reproducing PostgreSQL semantics.
 func Check(sql string) error {
-	_, err := Inspect(sql)
-	return err
-}
-
-// Inspect returns distinct pg_catalog routine names requiring live authorization.
-// Indirect execution through database objects remains PostgreSQL's responsibility.
-func Inspect(sql string) ([]string, error) {
-	names := map[string]bool{}
-	err := inspect(sql, names)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(names))
-	for name := range names {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func inspect(sql string, names map[string]bool) error {
 	if len(sql) > 64<<10 {
 		return resource()
 	}
@@ -78,9 +52,20 @@ func inspect(sql string, names map[string]bool) error {
 	if err != nil {
 		return invalid()
 	}
-	if len(tree.Stmts) != 1 || tree.Stmts[0].Stmt.GetSelectStmt() == nil {
+	if len(tree.Stmts) != 1 {
 		return readOnly()
 	}
+	statement := tree.Stmts[0].Stmt
+	if explain := statement.GetExplainStmt(); explain != nil {
+		statement = explain.Query
+		if statement.GetSelectStmt() == nil {
+			return readOnly()
+		}
+	}
+	if statement.GetSelectStmt() == nil && statement.GetVariableShowStmt() == nil {
+		return readOnly()
+	}
+
 	count := 0
 	var walk func(protoreflect.Message, map[string]bool, int) error
 	walk = func(m protoreflect.Message, ctes map[string]bool, depth int) error {
@@ -130,36 +115,13 @@ func inspect(sql string, names map[string]bool) error {
 			ctes = local
 		}
 		if r, ok := m.Interface().(*pg.RangeVar); ok {
-			if r.Catalogname != "" {
-				return unsupportedRelation()
-			}
 			if r.Schemaname == "" {
 				if ctes[r.Relname] {
 					return nil
 				}
 				return database.Fail(contracts.QueryUnsupported, "physical relations must use schema-qualified names", false)
 			}
-			if strings.HasPrefix(r.Schemaname, "pg_") || r.Schemaname == "information_schema" {
-				return unsupportedRelation()
-			}
 			return nil
-		}
-		var parts []*pg.Node
-		switch f := m.Interface().(type) {
-		case *pg.FuncCall:
-			parts = f.Funcname
-		case *pg.RangeTableSample:
-			parts = f.Method
-		}
-		if parts != nil {
-			if len(parts) < 1 || len(parts) > 2 || (len(parts) == 2 && parts[0].GetString_().GetSval() != "pg_catalog") {
-				return database.Fail(contracts.ReadOnlyViolation, "explicit calls require core PostgreSQL routines", false)
-			}
-			name := parts[len(parts)-1].GetString_().GetSval()
-			if name == "" {
-				return invalid()
-			}
-			names[name] = true
 		}
 		var err error
 		m.Range(func(f protoreflect.FieldDescriptor, v protoreflect.Value) bool {

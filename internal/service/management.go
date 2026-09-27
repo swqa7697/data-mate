@@ -51,8 +51,17 @@ type ManagementReply struct {
 	Diagnostic  *DiagnosticResult             `json:"diagnostic,omitempty"`
 	Description *database.DatabaseDescription `json:"description,omitempty"`
 	Error       string                        `json:"error,omitempty"`
+	Failure     *contracts.Failure            `json:"failure,omitempty"`
 	MCPEnabled  bool                          `json:"mcp_enabled"`
 	KeysetState string                        `json:"keyset_state"`
+}
+
+// ResultError decodes the service's redacted database and fixed local failures.
+func (r ManagementReply) ResultError() error {
+	if r.Failure != nil {
+		return &database.Error{Failure: *r.Failure}
+	}
+	return ManagementError(r.Error)
 }
 
 var managementErrors = []error{context.Canceled, context.DeadlineExceeded, config.ErrRevision, config.ErrCommitUnknown, config.ErrObsolete, config.ErrRecovery, config.ErrState, config.ErrOwnership, config.ErrStale, config.ErrPurging, vault.ErrMissing, vault.ErrDenied, vault.ErrLocked, vault.ErrUnavailable, vault.ErrRepair, vault.ErrLimit, vault.ErrBinding, vault.ErrCredentialMissing, transport.ErrChangedHost, transport.ErrKnownHosts, ErrState, ErrConflict, ErrRestart, ErrUnavailable}
@@ -150,7 +159,7 @@ func (c *Controller) Request(ctx context.Context, request ManagementRequest) (Ma
 		}
 		return reply, ErrUnavailable
 	}
-	return reply, ManagementError(reply.Error)
+	return reply, reply.ResultError()
 }
 
 // HandleManagement owns independent admission and service-side input validation.
@@ -173,14 +182,19 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 		m.mu.Unlock()
 		reply.KeysetState = m.keysetState(ctx)
 		if err != nil {
-			reply.Error = safeManagementError(err)
+			var safe *database.Error
+			if errors.As(err, &safe) {
+				reply.Failure = &safe.Failure
+			} else {
+				reply.Error = safeManagementError(err)
+			}
 		}
 	}()
 	switch q.Operation {
 	case "mutate":
 		ctx, finish := context.WithTimeout(ctx, 30*time.Second)
 		defer finish()
-		if q.Mutation == nil || q.ProfileID != "" || q.Expected != "" || q.Alias != "" {
+		if q.Mutation == nil || q.Expected != "" || q.Alias != "" {
 			err = ErrState
 			return
 		}
@@ -191,6 +205,10 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 				return
 			}
 			q.Mutation.HostKey = &transport.HostKey{Address: q.Pin.Address, Key: key}
+		}
+		if err = m.validateMutation(ctx, q); err != nil {
+			reply.Outcome = &vault.Outcome{}
+			return
 		}
 		out, e := m.repo.Apply(ctx, *q.Mutation)
 		reply.Outcome = &out

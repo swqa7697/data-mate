@@ -15,11 +15,11 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
-- Read Only: The MCP service provides only read-only tools and permissions to agents. Explicit calls to application-defined and extension routines are prohibited; core PostgreSQL routines remain available. Indirect execution through permitted database objects remains PostgreSQL's responsibility
-- Database Access: PostgreSQL privileges determine access to application schemas and objects, including newly created ones. Use an operator-managed read-only account with grants limited to the intended data
-- Database Context: Agents can inspect accessible routines and their source, enum and other explicit type details, sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
+- Read Only: The MCP service provides only read-only tools and permissions to agents. Every add/edit and newly opened pool must validate a non-owner read-only account. Pool approval lasts only while physical connections remain; every operation still uses a read-only transaction. Installed code and external capabilities are administrator-trusted; direct and indirect routine execution follows PostgreSQL privileges
+- Database Access: PostgreSQL privileges determine data access, including newly created objects and system schemas. Require schema-qualified physical relations. Permit read statements, SHOW, and EXPLAIN of read queries; keep resource bounds
+- Database Context: Agents can inspect catalog-visible routines and their source, enum and other type details (including arrays and table-row types), sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
 - Query Capacity: Support 20–40-second analytical queries with a 60-second default budget, configurable up to five minutes; allow eight database connections per profile, 16 concurrent requests per MCP session, and 32 active database operations across sessions.
-- Simple Management: Users can conveniently and simply add/remove/modify a DB connection without pain
+- Simple Management: Users can add/remove/modify a DB connection. Confirmed add/edit requires live account validation before saving, including unchanged edits; failed validation preserves saved state. Removal and listing require no database connection
 - Security: Keep nonsecret connection profiles in files, never leak credentials in plain text, and never expose credentials to agents.
 - Full CLI integration: standard + interactive CLI user experience
 
@@ -73,7 +73,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections
-  - `db describe [c-alias(optional)]`: Print accessible application schemas and readable table/view names, including empty schemas. Select one profile interactively when omitted; scripts require an alias. Support versioned `--json`; bound complete results to 4,096 combined schemas/relations and profile byte/time limits, failing without partial output when exceeded
+  - `db describe [c-alias(optional)]`: Print catalog-visible schemas and table/view names, including system and empty schemas. Select one profile interactively when omitted; scripts require an alias. Support versioned `--json`; bound complete results to 4,096 combined schemas/relations and profile byte/time limits, failing without partial output when exceeded
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
 - MCP - One shot
   - `mcp start`: Start the MCP service to expose all available DB connections to all supported agents

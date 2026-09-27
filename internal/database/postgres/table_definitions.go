@@ -28,14 +28,14 @@ func readDefinitions(ctx context.Context, tx pgx.Tx, budget *metadataBudget, sql
 }
 
 func tableDefinitions(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description, budget *metadataBudget) error {
-	// Preserve the existing FK endpoint policy even for deparsed constraints.
+	// Deparse definitions without executing their stored expressions.
 	args := []any{oid}
 	var err error
 	out.Constraints, err = readDefinitions(ctx, tx, budget, `SELECT k.conname::text,
  CASE k.contype WHEN 'p' THEN 'primary' WHEN 'u' THEN 'unique' WHEN 'f' THEN 'foreign' WHEN 'c' THEN 'check' WHEN 'x' THEN 'exclusion' WHEN 'n' THEN 'not_null' ELSE k.contype::text END,
  pg_catalog.pg_get_constraintdef(k.oid)
- FROM pg_catalog.pg_constraint k LEFT JOIN pg_catalog.pg_class c ON c.oid=k.confrelid LEFT JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
- WHERE k.conrelid=$1 AND (k.contype<>'f' OR (`+visibleSQL+`)) ORDER BY k.conname::text COLLATE "C" LIMIT 4097`, args...)
+ FROM pg_catalog.pg_constraint k
+ WHERE k.conrelid=$1 ORDER BY k.conname::text COLLATE "C" LIMIT 4097`, args...)
 	if err != nil {
 		return err
 	}

@@ -49,6 +49,9 @@ func (d *observedDriver) Invalidate(id string) {
 	defer d.mu.Unlock()
 	d.invalidated = append(d.invalidated, id)
 }
+func (d *observedDriver) Test(context.Context, database.Access) (database.Readiness, error) {
+	return database.Readiness{Stage: "read_only"}, nil
+}
 func (d *observedDriver) Close()       { d.mu.Lock(); defer d.mu.Unlock(); d.closed = true }
 func (d *observedDriver) retired() int { d.mu.Lock(); defer d.mu.Unlock(); return len(d.invalidated) }
 func serviceFixture(t *testing.T, environments ...config.Environment) (*config.Store, config.Root) {

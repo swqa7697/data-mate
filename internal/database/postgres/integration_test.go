@@ -132,6 +132,7 @@ func TestPostgresIntegration(t *testing.T) {
 	access := database.NewAccess(p, password)
 	ready, err := d.Test(t.Context(), access)
 	if err != nil {
+
 		t.Fatal(err)
 	}
 	if ready.Stage != "read_only" || len(ready.Stages) != 5 {
@@ -144,6 +145,7 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	t.Logf("server_version_num=%d image=%s", ready.ServerVersion, fixture.Image)
 	readPathMeasurements(t, access, sql)
+	accountAcceptance(t, d, access, ready.ServerVersion, sql)
 	wantMajor := 16
 	if fixture.Image == "postgres:18" {
 		wantMajor = 18
@@ -178,11 +180,10 @@ func TestPostgresIntegration(t *testing.T) {
 	if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "synthetic-wrong-password") {
 		t.Fatal("credential in error")
 	}
-	// Readiness certifies the transaction, not an exhaustive audit of grants.
+	// Fresh diagnostics reject write grants even if an existing pool is approved.
 	sql("GRANT UPDATE ON app.items TO reader")
-	if _, err = d.Test(t.Context(), access); err != nil {
-		t.Fatal("readiness audited grants", err)
-	}
+	_, err = d.Test(t.Context(), access)
+	requireCode(t, err, contracts.ReadOnlyViolation)
 	sql("REVOKE UPDATE ON app.items FROM reader")
 	access = database.NewAccess(p, password)
 	seen := map[string]database.Table{}
@@ -212,7 +213,7 @@ func TestPostgresIntegration(t *testing.T) {
 			firstCursor = req.Cursor
 		}
 	}
-	if len(seen) != 12 || seen["app/a_view"].Kind != "view" || seen["app/custom_type"].Name == "" {
+	if len(seen) < 12 || seen["pg_catalog/pg_class"].Name == "" || seen["app/a_view"].Kind != "view" || seen["app/custom_type"].Name == "" {
 		t.Fatalf("catalog: %#v", seen)
 	}
 
@@ -227,14 +228,16 @@ func TestPostgresIntegration(t *testing.T) {
 	if len(desc.Relationships) != 1 || len(desc.Keys) != 1 || len(desc.Columns) != 5 {
 		t.Fatalf("readable description: %#v", desc)
 	}
-	// Foreign-key endpoints follow current database privileges, including revocation.
+	// Catalog visibility is independent of privileges to read referenced data.
 	sql("REVOKE SELECT ON hidden.target FROM reader")
 	desc, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "app", Name: "items"})
-	if err != nil || len(desc.Relationships) != 0 {
-		t.Fatal("inaccessible foreign-key endpoint exposed", err)
+	if err != nil || len(desc.Relationships) != 1 {
+		t.Fatal("foreign-key endpoint hidden", err)
 	}
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "hidden", Name: "target"})
-	requireCode(t, err, contracts.PermissionDenied)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "hidden", Name: "missing"})
 	requireCode(t, err, contracts.PermissionDenied)
 	sql("GRANT SELECT ON hidden.target TO reader")
@@ -258,6 +261,10 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	sql("REVOKE SELECT ON app.items FROM reader")
 	_, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "app", Name: "items"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT * FROM app.items"})
 	requireCode(t, err, contracts.PermissionDenied)
 	sql("GRANT SELECT ON app.items TO reader")
 	if _, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "DELETE FROM app.rls"}); err == nil {
@@ -273,6 +280,7 @@ func TestPostgresIntegration(t *testing.T) {
 	cliDiagnosticsAcceptance(t, fixture.Root)
 	queryAcceptance(t, d, access, sql)
 	objectAcceptance(t, d, access, admin, sql)
+	poolAccountAcceptance(t, access, admin, sql)
 	executorAcceptance(t, d, access, admin, sql)
 	transportAcceptance(t, p, password, fixture.Root, admin)
 	// Observe eight executing queries before admitting a ninth: the old two-slot
@@ -377,6 +385,9 @@ func TestPostgresIntegration(t *testing.T) {
 	if _, err = d.Test(t.Context(), access); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
+		t.Fatal(err)
+	}
 	// Advance the existing idle timer directly; no five-minute wall-clock sleep.
 	d.mu.Lock()
 	d.pools[p.ID].timer.Reset(0)
@@ -397,7 +408,7 @@ func TestPostgresIntegration(t *testing.T) {
 	for i := range 17 {
 		other := p
 		other.ID = fmt.Sprintf("12345678-1234-1234-1234-%012d", i)
-		if _, err = d.Test(t.Context(), database.NewAccess(other, password)); err != nil {
+		if _, err = d.Query(t.Context(), database.NewAccess(other, password), database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -413,6 +424,183 @@ func TestPostgresIntegration(t *testing.T) {
 }
 
 // Optional measurements extend the owned fixture; ordinary assertions never use timing.
+// Account cases extend the existing real-server privilege scenario (ladder step 2).
+func accountAcceptance(t *testing.T, d *Driver, a database.Access, version int, sql func(string, ...any)) {
+	t.Helper()
+	cases := []struct{ grant, revoke string }{
+		{"GRANT INSERT(id) ON app.items TO reader", "REVOKE INSERT(id) ON app.items FROM reader"},
+		{"GRANT UPDATE ON app.items TO PUBLIC", "REVOKE UPDATE ON app.items FROM PUBLIC"},
+		{"GRANT writer TO reader WITH INHERIT TRUE, SET FALSE", "REVOKE writer FROM reader"},
+		{"GRANT writer TO bridge; GRANT bridge TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE bridge FROM reader; REVOKE writer FROM bridge"},
+		{"GRANT USAGE ON SEQUENCE app.counter TO reader", "REVOKE USAGE ON SEQUENCE app.counter FROM reader"},
+		{"GRANT CREATE ON SCHEMA app TO reader", "REVOKE CREATE ON SCHEMA app FROM reader"},
+		{"GRANT CREATE ON DATABASE fixture TO reader", "REVOKE CREATE ON DATABASE fixture FROM reader"},
+		{"CREATE TABLE app.owned(id int); ALTER TABLE app.owned OWNER TO reader", "DROP TABLE app.owned"},
+		{"ALTER ROLE reader CREATEDB", "ALTER ROLE reader NOCREATEDB"},
+		{"ALTER ROLE reader CREATEROLE", "ALTER ROLE reader NOCREATEROLE"},
+		{"ALTER ROLE reader REPLICATION", "ALTER ROLE reader NOREPLICATION"},
+		{"ALTER ROLE reader SUPERUSER", "ALTER ROLE reader NOSUPERUSER"},
+		{"GRANT pg_write_all_data TO reader", "REVOKE pg_write_all_data FROM reader"},
+		{"GRANT pg_write_server_files TO reader", "REVOKE pg_write_server_files FROM reader"},
+		{"GRANT pg_execute_server_program TO reader", "REVOKE pg_execute_server_program FROM reader"},
+		// SET followed by INHERIT can expose a capability unavailable to the login.
+		{"GRANT pg_write_server_files TO bridge WITH INHERIT TRUE, SET FALSE; GRANT bridge TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE bridge FROM reader; REVOKE pg_write_server_files FROM bridge"},
+		{"GRANT bridge TO reader WITH ADMIN TRUE, INHERIT FALSE, SET FALSE", "REVOKE bridge FROM reader"},
+		{"SELECT lo_create(90001); GRANT UPDATE ON LARGE OBJECT 90001 TO reader", "SELECT lo_unlink(90001)"},
+		{"GRANT ALTER SYSTEM ON PARAMETER work_mem TO reader", "REVOKE ALTER SYSTEM ON PARAMETER work_mem FROM reader"},
+	}
+	if version >= 170000 {
+		cases = append(cases, struct{ grant, revoke string }{"GRANT MAINTAIN ON app.items TO reader", "REVOKE MAINTAIN ON app.items FROM reader"})
+	}
+	for i, tc := range cases {
+		sql(tc.grant)
+		_, err := d.Test(t.Context(), a)
+		sql(tc.revoke)
+		var failure *database.Error
+		if !errors.As(err, &failure) || failure.Code != contracts.ReadOnlyViolation {
+			t.Fatalf("account case %d: %v", i, err)
+		}
+	}
+	// A membership that cannot be inherited or assumed conveys no write capability.
+	sql("GRANT writer TO reader WITH INHERIT FALSE, SET FALSE; GRANT TEMP ON DATABASE fixture TO reader; CREATE TEMP TABLE account_temp(id int); ALTER TABLE account_temp OWNER TO reader")
+	_, err := d.Test(t.Context(), a)
+	sql("REVOKE writer FROM reader; DROP TABLE account_temp")
+	if err != nil {
+		t.Fatal("read-only account with TEMP/unusable membership", err)
+	}
+}
+
+// Observe actual audit executions and physical connection lifetime in the owned
+// fixture, extending pool lifecycle coverage rather than adding timing assertions.
+func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql func(string, ...any)) {
+	t.Helper()
+	d := driver(t)
+	a, rev, err := normalized(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audits := func() int64 {
+		t.Helper()
+		var n int64
+		if err := admin.QueryRow(t.Context(), `SELECT COALESCE(sum(calls),0)::bigint FROM catalog.pg_stat_statements WHERE userid=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname='reader') AND query LIKE 'WITH roles AS MATERIALIZED%'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := audits()
+	releases := make(chan func(bool), 8)
+	failures := make(chan error, 8)
+	for range 8 {
+		go func() {
+			_, _, release, e := d.checkout(t.Context(), a, rev, nil)
+			if e == nil {
+				releases <- release
+			}
+			failures <- e
+		}()
+	}
+	for range 8 {
+		if e := <-failures; e != nil {
+			t.Fatal(e)
+		}
+	}
+	for range 8 {
+		(<-releases)(true)
+	}
+	if audits() != before+1 {
+		t.Fatal("concurrent pool opening repeated or omitted audit")
+	}
+	query := func() error { _, e := d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT 1"}); return e }
+	sql("GRANT UPDATE ON app.items TO reader")
+	if err = query(); err != nil {
+		t.Fatal("warm pool repeated privilege audit", err)
+	}
+	sql(`CREATE FUNCTION app.write_items() RETURNS int LANGUAGE plpgsql AS $$BEGIN UPDATE app.items SET name='changed'; RETURN 1; END$$`)
+	_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT app.write_items()"})
+	requireCode(t, err, contracts.ReadOnlyViolation)
+	sql("DROP FUNCTION app.write_items()")
+	_, err = d.Test(t.Context(), a)
+	requireCode(t, err, contracts.ReadOnlyViolation)
+	if audits() != before+2 {
+		t.Fatal("fresh diagnostic reused pool approval")
+	}
+	d.mu.Lock()
+	p := d.pools[a.Profile.ID]
+	connections := append([]*pgx.Conn(nil), p.idle...)
+	d.mu.Unlock()
+	closeConn(connections[0])
+	if err = query(); err != nil {
+		t.Fatal("partial disconnect lost pool approval", err)
+	}
+	for _, c := range connections {
+		closeConn(c)
+	}
+	err = query()
+	requireCode(t, err, contracts.ReadOnlyViolation)
+	if audits() != before+3 {
+		t.Fatal("empty pool retained approval")
+	}
+	sql("REVOKE UPDATE ON app.items FROM reader")
+	if err = query(); err != nil {
+		t.Fatal("failed validation poisoned retry", err)
+	}
+	if audits() != before+4 {
+		t.Fatal("retry missing audit")
+	}
+	// Indirect and explicit attempted writes still fail at the transaction boundary.
+	for _, q := range []string{"SELECT app.policy_probe()", "SELECT * FROM app.rls"} {
+		_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: q})
+		requireCode(t, err, contracts.ReadOnlyViolation)
+	}
+	var n int
+	if err = admin.QueryRow(t.Context(), "SELECT n FROM hidden.audit").Scan(&n); err != nil || n != 0 {
+		t.Fatal("routine modified persistent data", err)
+	}
+	// Retire a generation while its audit is blocked by an owned catalog lock.
+	d.Invalidate(a.Profile.ID)
+	lock, err := admin.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Rollback(context.Background()) }()
+	if _, err = lock.Exec(t.Context(), "LOCK pg_catalog.pg_largeobject_metadata IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 2)
+	for range 2 {
+		go func() { done <- query() }()
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		d.mu.Lock()
+		p := d.pools[a.Profile.ID]
+		pending := p != nil && p.validation != nil && p.users == 2
+		d.mu.Unlock()
+		if pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("concurrent validation did not start")
+		}
+		runtime.Gosched()
+	}
+	d.Invalidate(a.Profile.ID)
+	if err = lock.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case err = <-done:
+			requireCode(t, err, contracts.Cancelled)
+		case <-time.After(5 * time.Second):
+			t.Fatal("validation waiter not cancelled")
+		}
+	}
+	if err = query(); err != nil {
+		t.Fatal("retired validation poisoned replacement", err)
+	}
+}
+
 func readPathMeasurements(t *testing.T, access database.Access, sql func(string, ...any)) {
 	t.Helper()
 	if os.Getenv("DATA_MATE_MEASURE") != "1" {
@@ -429,6 +617,12 @@ func readPathMeasurements(t *testing.T, access database.Access, sql func(string,
 		if err != nil {
 			t.Fatal(err)
 		}
+		validationStarted := time.Now()
+		if _, err := d.Test(t.Context(), access); err != nil {
+			d.Close()
+			t.Fatal(err)
+		}
+		t.Logf("MEASURE operation=validation trial=%d iteration=0 ns=%d", trial, time.Since(validationStarted).Nanoseconds())
 		for _, operation := range []string{"query", "list"} {
 			for iteration := range 7 {
 				begin := time.Now()
@@ -441,6 +635,9 @@ func readPathMeasurements(t *testing.T, access database.Access, sql func(string,
 				if err != nil {
 					d.Close()
 					t.Fatal(err)
+				}
+				if operation == "query" && iteration == 0 {
+					t.Logf("MEASURE operation=cold-query trial=%d iteration=0 ns=%d", trial, elapsed)
 				}
 				if iteration >= 2 {
 					t.Logf("MEASURE operation=%s trial=%d iteration=%d ns=%d", operation, trial, iteration-2, elapsed)

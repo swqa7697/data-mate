@@ -14,8 +14,8 @@ import (
 )
 
 // Regression ladder 2: extend the existing owned PostgreSQL acceptance fixture.
-// Catalog inspection must not run stored expressions, and explicit calls must
-// fail before even an immutable routine can be evaluated during planning.
+// Catalog inspection must not run stored expressions; explicit execution follows
+// PostgreSQL permissions and read-only transactions.
 func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pgx.Conn, sql func(string, ...any)) {
 	t.Helper()
 	started := time.Now()
@@ -46,7 +46,7 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
  CREATE FUNCTION pg_catalog.fixture_call() RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$BEGIN RAISE EXCEPTION 'must not execute'; END$$;
  CREATE FUNCTION pg_catalog.abs(text) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$BEGIN RAISE EXCEPTION 'must not execute'; END$$;
  GRANT SELECT ON ALL TABLES IN SCHEMA catalog TO reader;
- GRANT USAGE ON ALL SEQUENCES IN SCHEMA catalog TO reader;`)
+ GRANT SELECT ON ALL SEQUENCES IN SCHEMA catalog TO reader;`)
 	defer sql(`DROP FUNCTION pg_catalog.fixture_call(); DROP FUNCTION pg_catalog.abs(text)`)
 	describe := func(kind, name string, signature *string) database.ObjectDescription {
 		t.Helper()
@@ -59,6 +59,11 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 			t.Fatalf("object output contract: %s", raw)
 		}
 		return out
+	}
+	systemType, err := d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "type", Schema: "pg_catalog", Name: "record"})
+	rawType, _ := json.Marshal(systemType)
+	if err != nil || systemType.Type == nil || systemType.Type.Kind != "pseudo" || contracts.Validate("describe_object.output", rawType) != nil {
+		t.Fatal("system pseudo-type metadata", err)
 	}
 	empty := ""
 	routine := describe("routine", "a_probe", &empty)
@@ -119,7 +124,7 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 		req.Cursor = token
 	}
 	req.Kind = "type"
-	_, err := d.ListObjects(t.Context(), access, req)
+	_, err = d.ListObjects(t.Context(), access, req)
 	requireCode(t, err, contracts.StaleCursor)
 	_, err = d.ListTables(t.Context(), access, database.PageRequest{Cursor: token})
 	requireCode(t, err, contracts.StaleCursor)
@@ -137,10 +142,13 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	if err != nil {
 		t.Fatal(err)
 	}
+	automatic, rowType := false, false
 	for _, item := range page.Objects {
-		if item.Name == "items" || strings.HasPrefix(item.Name, "_") {
-			t.Fatal("automatic type exposed", item)
-		}
+		automatic = automatic || item.Name == "_mood"
+		rowType = rowType || item.Name == "items"
+	}
+	if !automatic || !rowType {
+		t.Fatal("automatic or row types hidden")
 	}
 	// Extension membership is catalog metadata, never permission to execute.
 	args := "text, text"
@@ -166,20 +174,23 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	if _, err = d.DescribeTable(t.Context(), access, config.Table{Schema: "catalog", Name: "no_execute"}); err != nil {
 		t.Fatal("metadata evaluated immutable expression", err)
 	}
-	// Explicit calls are rejected without an upstream SQLSTATE, even in dead branches.
-	for _, q := range []string{
-		"SELECT catalog.a_probe()", "SELECT catalog.similarity('a','b')", "SELECT * FROM catalog.pg_stat_statements(true)",
-		"SELECT catalog.pg_stat_statements_reset()", "SELECT pg_catalog.fixture_call()", "SELECT fixture_call()",
-		"SELECT abs(1)", "SELECT pg_catalog.abs(1)", "SELECT CASE WHEN false THEN catalog.a_probe() ELSE 1 END",
-		"SELECT * FROM (SELECT catalog.a_probe()) x", "CALL catalog.procedure_probe()",
+	// PostgreSQL permissions and execution errors now govern explicit routines.
+	for _, tc := range []struct {
+		sql  string
+		code contracts.Code
+	}{
+		{"SELECT catalog.a_probe()", contracts.PermissionDenied},
+		{"SELECT * FROM (SELECT catalog.a_probe()) x", contracts.PermissionDenied},
+		{"SELECT pg_catalog.fixture_call()", contracts.QueryFailed},
+		{"SELECT fixture_call()", contracts.QueryFailed},
+		{"CALL catalog.procedure_probe()", contracts.ReadOnlyViolation},
 	} {
-		_, err = d.Query(t.Context(), access, database.QueryRequest{SQL: q})
-		requireCode(t, err, contracts.ReadOnlyViolation)
-		if err.(*database.Error).SQLState != "" {
-			t.Fatalf("call reached PostgreSQL: %s", q)
-		}
+		_, err = d.Query(t.Context(), access, database.QueryRequest{SQL: tc.sql})
+		requireCode(t, err, tc.code)
 	}
+
 	for _, q := range []string{
+		"SELECT catalog.similarity('a','b')", "SELECT * FROM catalog.pg_stat_statements(true)", "SELECT abs(1),pg_catalog.abs(1)", "SELECT catalog.a_probe(1)",
 		"SELECT enum_range(NULL::catalog.mood)", "SELECT pg_catalog.enum_range(NULL::catalog.mood)",
 		"SELECT lower('A'),count(*) OVER(), int4('1') FROM catalog.items TABLESAMPLE SYSTEM(10)",
 		"SELECT * FROM catalog.pg_stat_statements LIMIT 1", "SELECT * FROM catalog.indirect",
@@ -188,33 +199,16 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 			t.Fatalf("core or indirect query %s: %v", q, err)
 		}
 	}
-	// Current grants apply on every lookup, without caching visibility.
-	sql("REVOKE USAGE ON TYPE catalog.mood FROM PUBLIC,reader")
-	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "type", Schema: "catalog", Name: "mood"})
-	requireCode(t, err, contracts.PermissionDenied)
-	hiddenTypes, listErr := d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Schema: "catalog"}, Kind: "type"})
-	if listErr != nil {
-		t.Fatal(listErr)
+	// Metadata remains readable independently of data/type/schema usage grants.
+	sql("REVOKE USAGE ON TYPE catalog.mood FROM PUBLIC,reader; REVOKE SELECT ON SEQUENCE catalog.counter FROM reader; REVOKE USAGE ON SCHEMA catalog FROM reader")
+	describe("type", "mood", nil)
+	describe("sequence", "counter", nil)
+	describe("routine", "a_probe", &empty)
+	metadata, e := d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Schema: "catalog", PageSize: 1}})
+	if e != nil || len(metadata.Objects) != 1 || metadata.NextCursor == nil {
+		t.Fatal("metadata hidden", e)
 	}
-	for _, item := range hiddenTypes.Objects {
-		if item.Name == "mood" {
-			t.Fatal("revoked type remains listed")
-		}
-	}
-	sql("GRANT USAGE ON TYPE catalog.mood TO reader")
-	sql("REVOKE SELECT,USAGE ON SEQUENCE catalog.counter FROM reader")
-	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "sequence", Schema: "catalog", Name: "counter"})
-	requireCode(t, err, contracts.PermissionDenied)
-	sql("GRANT USAGE ON SEQUENCE catalog.counter TO reader")
-	sql("REVOKE USAGE ON SCHEMA catalog FROM reader")
-	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "routine", Schema: "catalog", Name: "a_probe", IdentityArguments: &empty})
-	requireCode(t, err, contracts.PermissionDenied)
-	// Privilege and schema filters must apply before a one-entry page limit.
-	inaccessiblePage, e := d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Schema: "catalog", PageSize: 1}})
-	if e != nil || len(inaccessiblePage.Objects) != 0 || inaccessiblePage.NextCursor != nil {
-		t.Fatal("inaccessible object page", inaccessiblePage, e)
-	}
-	sql("GRANT USAGE ON SCHEMA catalog TO reader")
+	sql("GRANT USAGE ON SCHEMA catalog TO reader; GRANT USAGE ON TYPE catalog.mood TO reader; GRANT SELECT ON SEQUENCE catalog.counter TO reader")
 	// Enum collections have their own count bound independent of encoded size.
 	labels := make([]string, 4097)
 	for i := range labels {

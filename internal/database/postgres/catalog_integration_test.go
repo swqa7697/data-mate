@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,14 +16,14 @@ import (
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
-// Extends the existing owned fixture with catalog visibility, bounds and future-schema access.
+// Extends the existing owned fixture with catalog metadata, bounds and future-schema access.
 func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password string, sql func(string, ...any)) {
 	t.Helper()
 	sql(`CREATE SCHEMA picker; CREATE SCHEMA picker_empty; GRANT USAGE ON SCHEMA picker,picker_empty TO reader`)
 	defer sql("DROP SCHEMA picker_empty")
 	defer sql("DROP SCHEMA picker CASCADE")
 	// Extend the catalog fixture: descriptions preserve empty schemas, list only
-	// readable relations across all accessible application schemas.
+	// catalog-visible relations independently of data grants.
 	sql(`CREATE SCHEMA describe_denied; CREATE TABLE describe_denied.items(id int);
  GRANT SELECT ON describe_denied.items TO reader;
  CREATE TABLE picker_empty.unreadable(id int);
@@ -51,16 +50,16 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 		foundEmpty, foundPicker := false, false
 		previous := ""
 		for _, s := range description.Schemas {
-			if s.Name <= previous || strings.HasPrefix(s.Name, "pg_") || s.Name == "information_schema" || s.Name == "describe_denied" {
+			if s.Name <= previous {
 				t.Fatalf("schema visibility/order: %+v", s)
 			}
 			previous = s.Name
 			if s.Name == "picker_empty" {
-				foundEmpty = len(s.Tables) == 0
+				foundEmpty = len(s.Tables) == 1 && s.Tables[0].Name == "unreadable"
 			}
 			if s.Name == "picker" {
 				foundPicker = true
-				want := []database.RelationName{{Name: "a_view", Kind: "view"}, {Name: "column_only", Kind: "table"}, {Name: "foreign_table", Kind: "foreign_table"}, {Name: "materialized", Kind: "materialized_view"}, {Name: "partitioned", Kind: "partitioned_table"}}
+				want := []database.RelationName{{Name: "a_view", Kind: "view"}, {Name: "column_only", Kind: "table"}, {Name: "foreign_table", Kind: "foreign_table"}, {Name: "materialized", Kind: "materialized_view"}, {Name: "partitioned", Kind: "partitioned_table"}, {Name: "unreadable", Kind: "table"}}
 				if !reflect.DeepEqual(s.Tables, want) {
 					t.Fatalf("readable relations: %+v", s.Tables)
 				}
@@ -70,7 +69,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			t.Fatal("description omitted accessible or empty schema")
 		}
 		page, err := d.ListTables(t.Context(), a, database.PageRequest{Schema: "picker"})
-		if err != nil || len(page.Tables) != 5 {
+		if err != nil || len(page.Tables) != 6 {
 			t.Fatal("agent catalog omitted readable relations", err)
 		}
 	}
@@ -128,7 +127,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			t.Fatalf("new or renamed catalog relation: %+v %v", page, err)
 		}
 	}
-	t.Log("catalog: empty schemas, privilege filtering, complete-result bounds and new/renamed relations passed")
+	t.Log("catalog: empty schemas, unfiltered metadata, complete-result bounds and new/renamed relations passed")
 
 }
 

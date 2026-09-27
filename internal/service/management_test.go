@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/swqa7697/data-mate/internal/config"
+	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
@@ -59,6 +61,11 @@ func (k *managedKeys) Delete(context.Context, string) error { return nil }
 func (k *managedKeys) calls() int                           { k.mu.Lock(); defer k.mu.Unlock(); return k.loads + k.creates }
 
 type blockedDiagnostics struct {
+	block           atomic.Bool
+	mu              sync.Mutex
+	validationError error
+	validated       []database.Access
+	validationDone  chan struct{}
 	database.Driver
 	entered chan struct{}
 	release chan struct{}
@@ -70,7 +77,21 @@ func (d *blockedDiagnostics) DescribeDatabase(ctx context.Context, a database.Ac
 	_, err := d.Test(ctx, a)
 	return database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}, err
 }
-func (d *blockedDiagnostics) Test(ctx context.Context, _ database.Access) (database.Readiness, error) {
+func (d *blockedDiagnostics) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
+	d.mu.Lock()
+	d.validated = append(d.validated, a)
+	err := d.validationError
+	done := d.validationDone
+	d.mu.Unlock()
+	if done != nil {
+		defer func() { close(done) }()
+	}
+	if err != nil {
+		return database.Readiness{}, err
+	}
+	if !d.block.Load() {
+		return database.Readiness{Stage: "read_only"}, nil
+	}
 	d.entered <- struct{}{}
 	select {
 	case <-ctx.Done():
@@ -102,7 +123,7 @@ func TestPrivateManagement(t *testing.T) {
 	profile := fixtureProfile()
 	p.Connections = append(p.Connections, profile)
 	apply := func(p config.Profiles, rev config.Revision, patch vault.Patch) (ManagementReply, error) {
-		q := ManagementRequest{Operation: "mutate", Mutation: &vault.Mutation{Expected: rev, Profiles: p}}
+		q := ManagementRequest{Operation: "mutate", ProfileID: profile.ID, Mutation: &vault.Mutation{Expected: rev, Profiles: p}}
 		if patch != nil {
 			q.Mutation.Patches = map[string]vault.Patch{profile.ID: patch}
 		}
@@ -131,15 +152,120 @@ func TestPrivateManagement(t *testing.T) {
 	if keys.calls() != calls {
 		t.Fatal("independent clients reloaded OS keyset")
 	}
+	staleRevision := rev
+	// Extend this mutation scenario: validation uses candidate secrets, runs for
+	// unchanged edits, and failures publish neither profiles nor credentials.
+	p, rev, e = config.Preview(t.Context(), c.Root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, failure := range []error{database.Fail(contracts.ReadOnlyViolation, "account is writable", false), database.Fail(contracts.ConnectFailed, "connection unavailable", true)} {
+		driver.mu.Lock()
+		driver.validationError = failure
+		before := len(driver.validated)
+		driver.mu.Unlock()
+		for _, patch := range []vault.Patch{nil, {"password": "synthetic-candidate"}} {
+			r, err := apply(p, rev, patch)
+			var safe *database.Error
+			if !errors.As(err, &safe) || r.Outcome == nil || r.Outcome.ProfilesSaved {
+				t.Fatal("validation failure not propagated", err)
+			}
+		}
+		driver.mu.Lock()
+		count := len(driver.validated)
+		candidate := driver.validated[count-1].Password()
+		driver.mu.Unlock()
+		if count != before+2 || candidate != "synthetic-candidate" {
+			t.Fatal("unchanged edit skipped validation or candidate credentials lost")
+		}
+		_, after, err := config.Preview(t.Context(), c.Root)
+		if err != nil || after != rev {
+			t.Fatal("rejected mutation changed state", err)
+		}
+	}
+	driver.mu.Lock()
+	driver.validationError = nil
+	driver.mu.Unlock()
+	// Both edits can validate without a state lease. Only the first publication
+	// wins; the other must reject its stale snapshot after network work completes.
+	driver.block.Store(true)
+	racing := make(chan error, 2)
+	for _, alias := range []string{"candidate-one", "candidate-two"} {
+		candidate := p
+		candidate.Connections = append([]config.Profile(nil), p.Connections...)
+		candidate.Connections[0].Alias = alias
+		go func() { _, err := apply(candidate, rev, nil); racing <- err }()
+		select {
+		case <-driver.entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("save validation did not start")
+		}
+	}
+	passive, cancelPassive := context.WithTimeout(t.Context(), time.Second)
+	_, unchanged, err := config.Preview(passive, c.Root)
+	cancelPassive()
+	if err != nil || unchanged != rev {
+		t.Fatal("validation held state or published early", err)
+	}
+	driver.release <- struct{}{}
+	if err := <-racing; err != nil {
+		t.Fatal("first validated edit", err)
+	}
+	driver.release <- struct{}{}
+	if err := <-racing; !errors.Is(err, config.ErrRevision) {
+		t.Fatal("stale validated edit published", err)
+	}
+	driver.block.Store(false)
+	p, rev, e = config.Preview(t.Context(), c.Root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p.Connections[0].Alias = profile.Alias
+	if _, e = apply(p, rev, nil); e != nil {
+		t.Fatal(e)
+	}
 	// Describe shares admission and loaded keys but requires the exact selection
 	// revision; malformed/stale requests must never reach the driver or enable MCP.
-	describe := ManagementRequest{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev}
+	describe := ManagementRequest{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias, Expected: staleRevision}
 	if _, e = c.Request(t.Context(), describe); !errors.Is(e, config.ErrRevision) {
 		t.Fatal("description accepted stale selection", e)
 	}
 	_, rev, e = config.Preview(t.Context(), c.Root)
 	if e != nil {
 		t.Fatal(e)
+	}
+	// Disconnect during network validation cannot publish a later save.
+	driver.block.Store(true)
+	validationDone := make(chan struct{})
+	driver.mu.Lock()
+	driver.validationDone = validationDone
+	driver.mu.Unlock()
+	cancelled, stopValidation := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.Request(cancelled, ManagementRequest{Operation: "mutate", ProfileID: profile.ID, Mutation: &vault.Mutation{Expected: rev, Profiles: p}})
+		result <- err
+	}()
+	select {
+	case <-driver.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancellable validation did not start")
+	}
+	stopValidation()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatal("save cancellation", err)
+	}
+	select {
+	case <-validationDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("validation did not observe cancellation")
+	}
+	driver.mu.Lock()
+	driver.validationDone = nil
+	driver.mu.Unlock()
+	_, afterCancel, err := config.Preview(t.Context(), c.Root)
+	if err != nil || afterCancel != rev {
+		t.Fatal("cancelled validation published", err)
 	}
 	describe.Expected = rev
 	for _, bad := range []ManagementRequest{
@@ -152,6 +278,7 @@ func TestPrivateManagement(t *testing.T) {
 	}
 	// Four blocked database management requests consume the entire admission budget;
 	// a fifth must fail promptly instead of waiting behind them.
+	driver.block.Store(true)
 	pending := make(chan error, 4)
 	for i := 0; i < 4; i++ {
 		go func() {
@@ -259,14 +386,14 @@ func TestPrivateManagement(t *testing.T) {
 	if state, e = c.Inspect(t.Context()); e != nil || state.State != "running" || state.MCPEnabled {
 		t.Fatal("denial killed management", state, e)
 	}
-	// Nonsecret edits and deletion still work with a locked keyset.
+	// Edits now require live validation and credentials; deletion remains available while locked.
 	p, rev, e = config.Preview(t.Context(), c.Root)
 	if e != nil {
 		t.Fatal(e)
 	}
 	p.Connections[0].Alias = "renamed"
-	if _, e = apply(p, rev, nil); e != nil {
-		t.Fatal("nonsecret locked edit", e)
+	if _, e = apply(p, rev, nil); !errors.Is(e, vault.ErrDenied) {
+		t.Fatal("locked edit bypassed validation", e)
 	}
 	p, rev, e = config.Preview(t.Context(), c.Root)
 	if e != nil {
