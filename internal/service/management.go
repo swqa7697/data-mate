@@ -481,8 +481,7 @@ func (m *Manager) unlock(ctx context.Context) error {
 
 // validProfile applies driver-specific settings validation before credential access.
 func (m *Manager) validProfile(p config.Profile) bool {
-	validator, ok := m.driver.(interface{ ValidateProfile(config.Profile) error })
-	return !ok || validator.ValidateProfile(p) == nil
+	return m.driver.ValidateProfile(p) == nil
 }
 
 // checkProfile runs one prepared profile's diagnostic or description. Staged
@@ -538,14 +537,8 @@ func (m *Manager) checkProfile(parent context.Context, operation string, expecte
 			}
 		}
 		if operation == "describe" {
-			describer, ok := d.(interface {
-				DescribeDatabase(context.Context, database.Access) (database.DatabaseDescription, error)
-			})
-			if !ok {
-				return ErrUnavailable
-			}
 			var e error
-			*description, e = describer.DescribeDatabase(ctx, a)
+			*description, e = d.DescribeDatabase(ctx, a)
 			return e
 		}
 		result.Stages = append(result.Stages, database.Stage{Stage: "vault", OK: true})

@@ -154,7 +154,7 @@ func executorLimits(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn,
 	if err != nil || !out.Truncated || out.RowCount != 0 {
 		t.Fatal("whole row omission", err)
 	}
-	size, _ := QueryPayloadSize(out)
+	size, _ := database.QueryPayloadSize(out)
 	if size > 1024 {
 		t.Fatal("result exceeded byte cap")
 	}
@@ -167,7 +167,7 @@ func executorLimits(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn,
 	if err != nil || !out.Truncated || out.RowCount != 1 {
 		t.Fatalf("escaped byte budget: rows=%d truncated=%v %v", out.RowCount, out.Truncated, err)
 	}
-	size, _ = QueryPayloadSize(out)
+	size, _ = database.QueryPayloadSize(out)
 	if size > 1024 {
 		t.Fatal("escaped payload overflow")
 	}
@@ -211,7 +211,7 @@ func executorMemory(t *testing.T, d *Driver, a database.Access) {
 		if err != nil || !out.Truncated || out.RowCount < 40 {
 			t.Fatal("maximum result fixture", err)
 		}
-		n, _ := QueryPayloadSize(out)
+		n, _ := database.QueryPayloadSize(out)
 		if n > config.DefaultLimits().MaxResultBytes {
 			t.Fatal("payload overflow")
 		}
@@ -300,7 +300,7 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 			runtime.Gosched()
 		}
 		if mode == "invalidate" {
-			d.Invalidate(p.ID)
+			d.pools.Invalidate(p.ID)
 		} else if mode == "cancel" {
 			cancel()
 		}

@@ -18,7 +18,6 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres"
 	relay "github.com/swqa7697/data-mate/internal/mcp"
 	"golang.org/x/sys/unix"
 )
@@ -105,7 +104,7 @@ func awaitSignal(t *testing.T, ch <-chan struct{}) {
 // wire dispatch, cancellation or relay. This scenario owns that new boundary.
 func TestMCPSessions(t *testing.T) {
 	c, f, store := controllerFixture(t)
-	pg, err := postgres.New()
+	pg, err := NewDriver()
 	if err != nil {
 		t.Fatal(err)
 	}

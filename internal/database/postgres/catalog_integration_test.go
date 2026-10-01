@@ -87,7 +87,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			}
 			if s.Name == "picker" {
 				foundPicker = true
-				if !reflect.DeepEqual(s.Indexes, []database.CatalogName{{Name: "column_idx"}, {Name: "partitioned_idx"}, {Name: "unreadable_pkey"}}) {
+				if !reflect.DeepEqual(s.Indexes, []database.IndexName{{Name: "column_idx"}, {Name: "partitioned_idx"}, {Name: "unreadable_pkey"}}) {
 					t.Fatalf("ordinary, partitioned or constraint index missing: %+v", s.Indexes)
 				}
 				// Overloads collapse to one name, including extension functions;
@@ -135,7 +135,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	for _, s := range description.Schemas {
 		count += len(s.Tables) + len(s.Enums) + len(s.Sequences) + len(s.Indexes) + len(s.Functions)
 	}
-	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(maxCatalogObjects-count) + ` LOOP
+	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(database.MaxCatalogObjects-count) + ` LOOP
  EXECUTE format('CREATE SCHEMA describe_bound%s',i);
  EXECUTE format('GRANT USAGE ON SCHEMA describe_bound%s TO reader',i);
  END LOOP; END $$`)

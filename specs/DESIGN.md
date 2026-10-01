@@ -6,16 +6,16 @@ Data Mate makes saved database connections available to independently launched t
 
 This document defines the implemented architecture and technical contracts for Tink, SQLite, and centralized service-owned credential access, plus the distribution contracts in section 13. The [PRD](PRD.md) defines product requirements, the [README](../README.md) documents implemented setup and usage, and the [changelog](../CHANGELOG.md) records user-visible changes. Implementation plans and validation evidence belong in ignored `.misc`, not in this design. Compatibility with published distribution contracts is required; obsolete development-only vault state must be reported without silently deleting it.
 
-The supported platforms are macOS 15+ on Apple Silicon and Linux x86_64 with glibc 2.39+ (Ubuntu 24.04+), with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax is bounded by the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
+The supported platforms are macOS 15+ on Apple Silicon and Linux x86_64 with glibc 2.39+ (Ubuntu 24.04+), with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. Database drivers support PostgreSQL 16 or later, MySQL 8.4 or later, and MariaDB 10.11 or later, without per-major semantic manifests. PostgreSQL SQL syntax is bounded by the pinned native parser version. The integration matrix is PostgreSQL 16 and 18, MySQL 8.4 and 9.7, and MariaDB 10.11 and 12.3.
 
-Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are implemented under section 13. macOS distribution is published. Linux distribution becomes publicly available when a release containing its signed artifacts passes the existing acceptance gates. Other database drivers, unattended updates, credential export, and key rotation remain deferred. Linux uses Secret Service without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, PostgreSQL migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
+Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are implemented under section 13. macOS distribution is published. Linux distribution becomes publicly available when a release containing its signed artifacts passes the existing acceptance gates. Further database drivers, unattended updates, credential export, and key rotation remain deferred. Linux uses Secret Service without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, database migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
 
 The design follows these principles:
 
 - One background service per installation owns credential access, profile mutations, and shared database operations; MCP exposure is explicitly enabled.
 - SQLite stores nonsecret profiles and encrypted credential bundles in separate records; one Tink keyset lives in OS secure storage.
 - Tink owns encryption, nonce generation, authentication, and ciphertext/keyset formats. Data Mate owns input validation, context binding, persistence, and lifecycle policy.
-- Query and metadata tools use PostgreSQL privileges for application-data access; the query guard enforces statement, relation-reference and explicit-routine restrictions.
+- Query and metadata tools use the database's own privileges for application-data access; each driver's query guard enforces its read statement kinds.
 - Resources, cancellation, ownership, and partial failures have explicit bounds and outcomes.
 - The normal workflow is add a connection, start MCP, and launch an agent normally.
 
@@ -33,8 +33,8 @@ flowchart LR
     Service --> Vault[Tink credential encryption]
     Vault --> Store
     Service --> Store
-    Service --> Driver[Shared PostgreSQL driver and query guard]
-    Driver -->|Direct, SSH, or SOCKS5; optional TLS| DB[(PostgreSQL)]
+    Service --> Driver[Driver router, shared pools and per-driver query guards]
+    Driver -->|Direct, SSH, or SOCKS5; optional TLS| DB[(PostgreSQL, MySQL or MariaDB)]
 ```
 
 The binary has three process roles:
@@ -57,20 +57,23 @@ The service listens on a Unix domain socket in an owner-checked private director
 | `internal/config`                                   | Profile validation, revisions, SQLite transactions/schema, paths, ownership, and locks              |
 | `internal/contracts`                                | Strict public JSON schemas, decoding, examples, and safe error codes                                |
 | `internal/vault`                                    | Tink credential encryption, authenticated context, keyset lifecycle, and OS key providers           |
-| `internal/database`                                 | Shared driver operations and result/access types                                                    |
-| `internal/database/postgres`                        | Connections, pools, catalogs, read-only transactions, execution, and codecs                         |
+| `internal/database`                                 | Driver boundary, router, shared bounds, budgets, diagnostics traces and parameter decoding          |
+| `internal/database/pool`                            | Admission, lazy per-profile pools, account approval, cursor authentication and invalidation         |
+| `internal/database/postgres`                        | PostgreSQL connections, catalogs, read-only transactions, execution, and codecs                     |
 | `internal/database/postgres/sqlguard`               | Bounded statement-kind, relation-reference and explicit-routine checks                              |
+| `internal/database/mysql`                           | MySQL and MariaDB connections, account audit, catalogs, sessions, execution, and codecs             |
+| `internal/database/mysql/sqlguard`                  | Bounded MySQL-dialect lexer and statement-kind checks                                               |
 | `internal/transport`                                | Direct, TLS, SSH, and SOCKS5 connection paths and owned SSH host pins                               |
 | `internal/service`                                  | Lifecycle, identity, separate management/MCP listeners, profile mutations, and request coordination |
 | `internal/mcp`                                      | Tool handlers, session framing/admission, and stdio bridge                                          |
 | `internal/agent`                                    | Client detection, registration inspection, and ownership-safe mutation                              |
 | `internal/devtools`, `scripts`, `.github/workflows` | Developer commands, regression harnesses, and CI                                                    |
 
-Concrete packages implement most behavior. Interfaces represent external seams: the database driver, key provider, lifecycle/client operations, and dialing. `database.Driver` supplies validation, diagnostics, table/object listing, description, query execution, invalidation, and close. PostgreSQL also supplies the CLI database-description operation. Callers hold the profile state lease until driver cleanup and result preparation finish. Credentials travel only through private in-memory access snapshots.
+Concrete packages implement most behavior. Interfaces represent external seams: the database driver, key provider, lifecycle/client operations, and dialing. Each driver implements `database.Operations`: profile and access validation, diagnostics, table/object listing, table/object description, the CLI database description, and query execution. A `database.Router` dispatches each operation on the profile's driver and implements the service-facing `database.Driver`, whose invalidation and close reach one shared `pool.Registry`, so admission, pool and cursor bounds span all drivers. Object pages and descriptions are driver-shaped documents marshaled unchanged by callers. Callers hold the profile state lease until driver cleanup and result preparation finish. Credentials travel only through private in-memory access snapshots.
 
 Agent adapters own compatibility and registration, not database policy. Catalog visibility and query semantics remain driver-aware. Additional drivers must satisfy the credential, visibility, cancellation, and read-only contracts; there is no universal query language or dynamic plugin framework.
 
-Implementation dependencies are pinned in [go.mod](../go.mod) and `go.sum`. The implementation uses pinned `github.com/tink-crypto/tink-go/v2` and `github.com/mattn/go-sqlite3` alongside the CLI, MCP, PostgreSQL, and transport dependencies. Tink provides credential cryptography; the standard library handles JSON, filesystem/process primitives, and non-credential hashing where suitable. Native Keychain access and the PostgreSQL parser require cgo and the macOS SDK. OS adapter selection and native validation are specified in section 6.3.
+Implementation dependencies are pinned in [go.mod](../go.mod) and `go.sum`. The implementation uses pinned `github.com/tink-crypto/tink-go/v2` and `github.com/mattn/go-sqlite3` alongside the CLI, MCP, PostgreSQL, MySQL (`github.com/go-sql-driver/mysql`), and transport dependencies. Tink provides credential cryptography; the standard library handles JSON, filesystem/process primitives, and non-credential hashing where suitable. Native Keychain access and the PostgreSQL parser require cgo and the macOS SDK. OS adapter selection and native validation are specified in section 6.3.
 
 ## 3. CLI contract
 
@@ -98,7 +101,7 @@ Confirmed profile changes start or reuse the management-only service without exp
 
 ### 3.1 Forms and credential input
 
-The basic add form asks for driver, alias, host, port, database, username, and password, in that order. PostgreSQL and port 5432 are defaults. Username remains visible; secret input is hidden. Advanced flags enable their corresponding transport fields. Aliases are unique and editable; stable connection IDs survive renames.
+The basic add form asks for driver, alias, host, port, database, username, and password, in that order. PostgreSQL is the default driver, and the port defaults to the chosen driver's standard port: 5432 for PostgreSQL, 3306 for MySQL and MariaDB. A driver is validated as soon as it is entered. MySQL-family profiles skip the database prompt and reject `--database`; a driver change drops the database (to MySQL or MariaDB) or requires one (to PostgreSQL), and a port still at the previous driver's default follows the change. Username remains visible; secret input is hidden. Advanced flags enable their corresponding transport fields. Aliases are unique and editable; stable connection IDs survive renames.
 
 Previews show only nonsecret settings and whether a secret is configured or changing. Blank edit fields preserve existing values; keeping and clearing a secret are separate actions. Confirmations default to No. Ctrl-C during the form or negative confirmation exits 130 without publishing a connection change. Cancellation after submission follows the transaction-outcome rules below. Omitted edit/remove aliases use selection by number or exact alias.
 
@@ -121,19 +124,19 @@ A profile and its encrypted bundle are removed in the same SQLite transaction. T
 
 ### 3.2 Diagnostics and output
 
-`db describe [alias] [--json] [--no-pager]` selects one saved profile, using the existing terminal picker when the alias is omitted; noninteractive callers must supply an alias. It starts or reuses management-only service access without enabling MCP. The private `describe` request binds profile ID, alias and expected store revision; check the revision again under the database-work lease. The PostgreSQL `DescribeDatabase` capability prepares the catalog under that same snapshot, and finishes driver cleanup before releasing the lease or writing output.
+`db describe [alias] [--json] [--no-pager]` selects one saved profile, using the existing terminal picker when the alias is omitted; noninteractive callers must supply an alias. It starts or reuses management-only service access without enabling MCP. The private `describe` request binds profile ID, alias and expected store revision; check the revision again under the database-work lease. The driver's `DescribeDatabase` operation prepares the catalog under that same snapshot, and finishes driver cleanup before releasing the lease or writing output.
 
-Descriptions show catalog-visible application schemas, including empty schemas, enums, sequences, relations of the supported kinds, ordinary and partitioned indexes (including constraint-backed indexes), and ordinary and window functions. Exclude procedures and aggregates; deduplicate functions by name within each schema before applying result limits. Exclude `information_schema` and every schema prefixed `pg_` within the catalog SQL before fetching results or applying limits; retain extension objects in application schemas. Share relation-kind selection with existing tools; do not impose schema USAGE or object privilege filters on metadata. One ordered catalog statement preserves empty schemas with a left join and C-collated schema/name/kind ordering. This application-only presentation does not change MCP catalog access.
+Descriptions show catalog-visible application schemas, including empty schemas, enums, sequences, relations of the supported kinds, ordinary and partitioned indexes (including constraint-backed indexes), and ordinary and window functions. Exclude procedures and aggregates; deduplicate functions by name within each schema before applying result limits. Exclude `information_schema` and every schema prefixed `pg_` within the catalog SQL before fetching results or applying limits; retain extension objects in application schemas. Share relation-kind selection with existing tools; do not impose schema USAGE or object privilege filters on metadata. One ordered catalog statement preserves empty schemas with a left join and C-collated schema/name/kind ordering. This application-only presentation does not change MCP catalog access. For MySQL and MariaDB, each schema is a visible application database (excluding `information_schema`, `mysql`, `performance_schema` and `sys`), enums are absent, sequences exist only on MariaDB, and index entries carry their table because index names are unique only per table; human output prints them as `table.index`.
 
 Human output shows unquoted database/schema/object names, escaping control and nonprinting characters without losing printable Unicode or punctuation. Under each schema, group names into enums, tables (including partitioned/foreign), views (including materialized), sequences, indexes, and functions, in that order; omit empty groups and show empty catalogs/schemas explicitly. Each group uses an alphabetically ordered row-major grid with per-column display-cell widths, two-space gutters and indentation, and as many columns as fit stdout's terminal width (80 columns when unavailable). Preserve long names in a single column rather than truncating. Terminal stdout uses magenta, green, cyan, yellow, blue, and red respectively. Schema headings use bold default foreground. One compact legend uses matching styles and singular labels: Schema, Enum, Table, View, Sequence, Index, Function; plain output uses a heading per group. Any present `NO_COLOR` value disables color, independently of stdin.
 
 After driver cleanup, lease release, and management-client closure, interactive human output uses `/usr/bin/less -R -F -X` with controlled options, disabled personal key bindings/history, and no shell execution. Short output returns immediately; longer output supports scrolling, searching and normal successful quit. `--no-pager`, JSON, or redirected stdin/stdout bypass paging. Failure to start the pager falls back to direct output; cancellation reaps the child, restores terminal state, and exits 130. Successful early quit tolerates a closed input pipe.
 
-The version-1 JSON envelope contains `version`, `alias`, `database`, and `schemas`; each schema contains `name`, `tables` (entries with `name` and exact relation `kind`, including views), plus `enums`, `sequences`, `indexes`, and `functions` (entries with `name`, without function signatures). Catalog collections are arrays even when empty. This unreleased contract remains version 1; the exact contract is `db-describe.output.json`.
+The version-1 JSON envelope contains `version`, `alias`, `driver`, `database` (PostgreSQL only), and `schemas`; each schema contains `name`, `tables` (entries with `name` and exact relation `kind`, including views), plus `enums`, `sequences`, `indexes` (with an optional `table`), and `functions` (entries with `name`, without function signatures). Catalog collections are arrays even when empty. This unreleased contract remains version 1; the exact contract is `db-describe.output.json`.
 
 Bound descriptions to 4,096 combined schema/object entries (counting each distinct function name once per schema) and the profile's encoded-result-byte cap and query timeout. The byte cap measures the JSON description, without an MCP compatibility envelope. Exceeding either size limit returns `RESOURCE_LIMIT`, never successful truncation; terminal paging does not extend these limits. Connection, credential, timeout, cancellation, stale-selection and configuration failures follow existing safe error/exit contracts and print no partial description to stdout. No application rows, columns, enum values, definitions, counts, or diagnostic-stage output are included.
 
-`db test` submits the selected profiles in one management request. The service unlocks an existing keyset at most once before any check starts, then checks the profiles concurrently, with at most sixteen diagnostics running across the service. Each profile has its own deadline, starting after preparation and once it holds a diagnostic slot, that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `read_only` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange distinguishes authentication failures. The final stage verifies the actual read-only transaction and authenticated identity and performs a fresh account audit through a dedicated short-lived connection. It reads catalogs, never application rows, and never reuses a live pool approval. Success is a point-in-time privilege check, not a permanent authorization.
+`db test` submits the selected profiles in one management request. The service unlocks an existing keyset at most once before any check starts, then checks the profiles concurrently, with at most sixteen diagnostics running across the service. Each profile has its own deadline, starting after preparation and once it holds a diagnostic slot, that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `read_only` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange, or a received MySQL-family greeting followed by any TLS verification, distinguishes authentication failures. The final stage verifies the actual read-only transaction and authenticated identity and performs a fresh account audit through a dedicated short-lived connection. It reads catalogs, never application rows, and never reuses a live pool approval. Success is a point-in-time privilege check, not a permanent authorization.
 
 The terminal `stage` and `ok` fields summarize each result. A failed stage includes a safe error object; later stages are omitted. Ordinary per-profile failures are results and never delay other profiles. Invalid profile state and unknown aliases fail before output because no validated selection exists. Cancellation, a profile changed or removed during the batch, or an undeliverable result stops the command: completed human rows remain, pending rows are omitted, and JSON prints nothing. The service reports each result only after releasing its state lease. Diagnostics run through the management service and may unlock an existing keyset, but do not create or repair secrets, keysets, or database grants.
 
@@ -151,7 +154,7 @@ Setting columns hold nonsecret profile fields: `tls` is `true` or `false`, `prox
 
 Export creates a new owner-only (0600) file without following symlinks. An existing path requires terminal confirmation (default No) or `--yes`, settled before any keyring prompt; without either, export exits 2. Replacement writes and syncs a temporary sibling file, then renames it over the path. Output reports the connection count without echoing the path.
 
-`db import <file.csv>` reads a regular UTF-8 file of at most 8 MiB, ignoring a leading byte-order mark. The header may name any subset of the export columns in any order; `alias`, `host`, `database`, and `username` columns and values are required. Unknown or duplicate columns, malformed records, more than 128 rows, repeated aliases, and invalid cells exit 2 before prompting, key access, or state changes. Diagnostics name lines and fixed column names, never cell values. Setting cells follow the rules of the matching `db add` flags; empty setting cells use add defaults, and integers are decimal. A credential cell holds a secret, `<none>` (store that secret as empty), or nothing (not supplied); a secret that is literally `<none>` must be entered at the prompt. `ssh_key_file` takes an absolute path read like `--ssh-key-file`; `ssh_auth=key` or a key file selects SSH key authentication. Data Mate neither checks nor modifies the CSV; protecting a file that contains secrets is the user's responsibility.
+`db import <file.csv>` reads a regular UTF-8 file of at most 8 MiB, ignoring a leading byte-order mark. The header may name any subset of the export columns in any order; `alias`, `host`, and `username` columns and values are required. PostgreSQL rows also require a `database` value; MySQL and MariaDB rows leave it empty or omit the column. Unknown or duplicate columns, malformed records, more than 128 rows, repeated aliases, and invalid cells exit 2 before prompting, key access, or state changes. Diagnostics name lines and fixed column names, never cell values. Setting cells follow the rules of the matching `db add` flags; empty setting cells use add defaults, and integers are decimal. A credential cell holds a secret, `<none>` (store that secret as empty), or nothing (not supplied); a secret that is literally `<none>` must be entered at the prompt. `ssh_key_file` takes an absolute path read like `--ssh-key-file`; `ssh_auth=key` or a key file selects SSH key authentication. Data Mate neither checks nor modifies the CSV; protecting a file that contains secrets is the user's responsibility.
 
 Existing aliases require a policy, and there is no default. `--on-conflict stop` exits 2 and `skip` leaves those connections untouched. With `update`, each row is authoritative for that connection's nonsecret settings and keeps its ID. Saved secrets are kept unless the row supplies a value or `<none>`, and secrets for transport the row no longer uses are cleared. A row matching the saved profile without credential cells is reported unchanged and not submitted. Without the flag, a terminal asks for `stop`, `skip`, or `update` and re-asks on any other answer; `stop` exits 130. A noninteractive import with existing aliases exits 2 and lists them.
 
@@ -277,7 +280,7 @@ The logical profile representation retains the nonsecret fields described in [pr
 
 `credential_ref` addresses an encrypted SQLite bundle, never an OS credential-store item. It may be omitted when the connection needs no managed credentials. A nonexistent bundle returns `CREDENTIAL_MISSING`; `db edit` can attach credentials. The CLI management protocol is the supported mutation path. Direct editing of SQLite or a legacy `connections.json` file is unsupported; no parallel JSON file overrides or synchronizes with SQLite. `db import` and `db export` (section 3.3) move connection settings through CSV files over this protocol; exporting credential values and importing keysets remain unsupported.
 
-Strict decoding rejects unknown fields/versions, recursive duplicate keys, trailing values, invalid UTF-8, duplicate IDs/aliases/credential references, invalid ports, and embedded secret fields. Profiles are bounded to 1 MiB and 128 connections. Aliases match `^[a-z][a-z0-9_-]{0,62}$`. UUID comparisons normalize case. The PostgreSQL connection object accepts explicit fields, with no DSN or unrestricted option-string passthrough.
+Strict decoding rejects unknown fields/versions, recursive duplicate keys, trailing values, invalid UTF-8, duplicate IDs/aliases/credential references, invalid ports, and embedded secret fields. Profiles are bounded to 1 MiB and 128 connections. Aliases match `^[a-z][a-z0-9_-]{0,62}$`. UUID comparisons normalize case. The connection object accepts explicit fields, with no DSN or unrestricted option-string passthrough. `driver` is `postgres`, `mysql`, or `mariadb`. PostgreSQL profiles require `database`; MySQL-family profiles forbid it, since their accounts reach every database their grants allow. Omitting the field keeps existing PostgreSQL canonical JSON, digests and revisions unchanged.
 
 Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-path}`, optional SSH `{host,port,user,auth:"password"|"key"}`, or optional SOCKS5 `{kind:"socks5",host,port,username?}`. Authentication material stays in the vault. CA files require verified TLS; SSH and SOCKS5 are mutually exclusive.
 
@@ -364,13 +367,15 @@ Pin Tink, the SQLite driver, and any OS binding when implementing; do not assume
 
 ## 7. Catalog visibility
 
-Each profile addresses one database. PostgreSQL enforces row privileges, including newly created or renamed objects. Metadata tools use PostgreSQL catalog access without additional schema, relation, type-USAGE, or sequence-grant filters. System schemas, automatic arrays and table-row types are discoverable. Metadata access does not confer permission to query the described data.
+A PostgreSQL profile addresses one database; a MySQL-family profile addresses an account, whose schemas are the databases its grants expose. The database enforces row privileges, including newly created or renamed objects. Metadata tools use the database's catalog access, PostgreSQL catalogs or MySQL `information_schema`, without additional schema, relation, type-USAGE, or sequence-grant filters. System schemas, automatic arrays and table-row types are discoverable. Metadata access does not confer permission to query the described data.
 
 Catalog tools use parameterized SQL and C-collated keyset pagination. Table descriptions expose actual type names, columns, defaults/generated expressions, keys, foreign-key endpoints, constraints, indexes, triggers, views and row-security policies. Stored expressions are deparsed, never evaluated. There are no `supported` or `reason` fields. Missing description targets return the existing safe `PERMISSION_DENIED` result.
 
 Routine descriptions include exact identity arguments, source, language, volatility and security mode; aggregates include their transition/state and combination metadata. Extension membership is descriptive. Types include enums, domains, composites, ranges, multiranges, arrays, table-row types and pseudo-types. Sequences expose configuration and owner-table/column metadata; ordinary qualified queries may read sequence state, but must not advance it. Definitions and foreign-key endpoints are returned without requiring row access or recursively fetching dependencies.
 
-Authenticated cursors bind version, tool, profile ID/revision, schema/kind filters, position, and process invalidation epoch. Object ordering uses C-collated schema/name/kind followed by OID to distinguish overloads without embedding unbounded signatures in cursors. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600, existing key/relationship collections at 4096 and combined new metadata collections at 4096 entries, with incremental byte accounting, deadlines and final encoded-size accounting. Oversized definitions fail with RESOURCE_LIMIT without partial output. Metadata shares the profile result-byte cap.
+Authenticated cursors bind version, tool, profile ID/revision, schema/kind filters, position, and process invalidation epoch. Object ordering uses C-collated (PostgreSQL) or byte-wise (MySQL family) schema/name/kind followed by a driver tiebreak key, the PostgreSQL OID, to distinguish overloads without embedding unbounded signatures in cursors. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600, existing key/relationship collections at 4096 and combined new metadata collections at 4096 entries, with incremental byte accounting, deadlines and final encoded-size accounting. Oversized definitions fail with RESOURCE_LIMIT without partial output. Metadata shares the profile result-byte cap.
+
+Metadata results are driver-shaped and carry `driver`. PostgreSQL results keep their shapes. MySQL and MariaDB results use native fields instead of PostgreSQL concepts: section 9.5 defines them.
 
 ## 8. Database transport and connection management
 
@@ -385,7 +390,7 @@ Authenticated cursors bind version, tool, profile ID/revision, schema/kind filte
 
 TLS can layer over any route. Failure never falls back to plaintext or direct access, and there is no skip-verification setting. Previews disclose disabled TLS, including a note for non-loopback endpoints. SSH and SOCKS5 are mutually exclusive. Database hostnames resolve at the selected jump host/proxy, while TLS still verifies the original database hostname. Cancellation connections retain the original database endpoint.
 
-Connection configuration uses explicit profile/vault values. Startup removes inherited `PG*` variables before application goroutines; a missed sanitation fails closed. The initialized pgx template uses explicit placeholders and `/dev/null` password/service files, then validated settings and an allowlisted session configuration. Only TCP hostnames/IPs are accepted. No ambient SSH agent/configuration, proxy environment, password/service file, or helper process supplies fallback behavior.
+Connection configuration uses explicit profile/vault values. Startup removes inherited `PG*` variables before application goroutines; a missed sanitation fails closed. The MySQL client reads no environment or option files. The initialized pgx template uses explicit placeholders and `/dev/null` password/service files, then validated settings and an allowlisted session configuration. Only TCP hostnames/IPs are accepted. No ambient SSH agent/configuration, proxy environment, password/service file, or helper process supplies fallback behavior.
 
 SSH enrollment uses interactive `db add/edit --ssh-enroll`: a TTY, explicit SHA-256 fingerprint confirmation, and final default-No profile confirmation are required. `--yes` and stdin credential modes cannot enroll. The probe sends no authentication material. The candidate stays in memory until the confirmed writer rechecks revision and current pin, then atomically publishes mode-0600 `known_hosts` before the profile. Cancellation publishes nothing; a later save failure may leave an unused owned pin.
 
@@ -395,7 +400,7 @@ Each database connection owns its SSH TCP connection and forwarding channel, or 
 
 ### 8.2 Pools, admission, and cleanup
 
-One shared PostgreSQL driver owns lazy pools with no initial idle connections, at most eight connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows 32 active operations, 128 waiters, and a 60-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Service database work has a 365-second outer deadline and then the profile timeout; connection listing has a five-second deadline. The outer deadline is the maximum
+One shared registry owns lazy pools for every driver, with no initial idle connections, at most eight connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows 32 active operations, 128 waiters, and a 60-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Service database work has a 365-second outer deadline and then the profile timeout; connection listing has a five-second deadline. The outer deadline is the maximum
 profile timeout plus the admission allowance and five seconds of overhead. The
 profile budget starts after service admission and profile resolution and includes
 credentials, driver admission, pool waiting, connection setup, execution and
@@ -406,15 +411,15 @@ limit of sixteen concurrent checks, so `db test` never occupies more than half
 of the active admission slots. PostgreSQL statement timeout uses the profile
 budget, while lock timeout remains one second.
 
-Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache account approval only while physical connections remain. PostgreSQL still enforces privileges on each executed operation. PostgreSQL statement and description caches are disabled. Successful operations roll back and run `DISCARD ALL` before pool reuse; cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
+Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache account approval only while physical connections remain. The database still enforces privileges on each executed operation. PostgreSQL statement and description caches are disabled. Successful PostgreSQL operations roll back and run `DISCARD ALL` before pool reuse; MySQL-family cleanup is defined in section 9.5. Cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
 
 Rollback has an independent two-second budget. Uncertain connections are discarded; cleanup failure cannot return success. Deliberate byte truncation closes the connection before returning a complete bounded result instead of draining unread rows. No executing query is automatically retried. Driver cleanup finishes before the caller releases its state lease.
 
-Every PostgreSQL connection, including readiness and catalog connections, caps message bodies at 2 MiB. A constant-memory frame-length observer preserves `RESOURCE_LIMIT` when pgx would otherwise report only a closed connection; it retains no message data.
+Every PostgreSQL connection, including readiness and catalog connections, caps message bodies at 2 MiB. A constant-memory frame-length observer preserves `RESOURCE_LIMIT` when pgx would otherwise report only a closed connection; it retains no message data. MySQL-family connections apply the receive budget in section 9.5 instead.
 
-## 9. Read-only PostgreSQL execution
+## 9. Read-only database execution
 
-Data Mate is a bounded PostgreSQL reader. The guard checks read statement kinds and explicit relation schemas; PostgreSQL owns expression semantics and privilege enforcement.
+Data Mate is a bounded reader. Sections 9.1–9.4 define PostgreSQL, and section 9.5 defines MySQL and MariaDB. For PostgreSQL, the guard checks read statement kinds and explicit relation schemas; PostgreSQL owns expression semantics and privilege enforcement.
 
 ### 9.1 Account admission and server trust
 
@@ -464,6 +469,64 @@ PostgreSQL arrays become nested JSON arrays, retaining null elements, multidimen
 
 `parameters` is an ordered JSON value array. Strings become their contents, numbers preserve their original decimal text, booleans become textual booleans, null becomes SQL NULL, and objects/arrays become compact JSON text. PostgreSQL infers types; explicit casts such as `$1::uuid`, `$2::jsonb` and `$3::text[]` resolve ambiguity. PostgreSQL-array input uses an array-text string. To pass JSON null rather than SQL NULL, pass the string `"null"` and cast to json/jsonb. Parameters are never interpolated into SQL. [Codec fixtures](../internal/database/postgres/testdata/README.md) exercise exact representations.
 
+### 9.5 MySQL and MariaDB
+
+The `mysql` and `mariadb` drivers share one package, with a flavor per server. MySQL 8.4 or later and MariaDB 10.11 or later are required. A server of the other flavor, or one reporting an older version (such as a fork reporting 8.0), fails the version stage with a driver hint.
+
+**Profiles and scope.** A MySQL-family profile names a server account and no database, so connections open without a default database. Each MySQL database is one schema in tool inputs and outputs, and metadata covers every database the account's grants expose. The server enforces no database boundary, and Data Mate adds none; operators scope accounts with grants. Unqualified physical relations fail on the server (error 1046) and are reported as `INVALID_ARGUMENT` with a `database.table` hint.
+
+**Client.** The pinned `go-sql-driver/mysql` client uses an explicit configuration for each physical connection:
+- the transport dialer, and verified TLS without plaintext fallback;
+- no LOCAL INFILE, multiple statements, or client-side interpolation;
+- a no-op logger, because the library's default logger writes upstream text to stderr;
+- utf8mb4, UTC, a fixed maximum packet size, and a ten-second dial.
+
+A library failure on malformed server data is recovered per connection and becomes `CONNECT_FAILED`.
+
+**Account audit.** The auditor parses `SHOW GRANTS` for the account and for every role it can activate.
+- MySQL expands direct and mandatory roles from `information_schema.APPLICABLE_ROLES` through `SHOW GRANTS FOR CURRENT_USER() USING`; the server includes the roles those roles were granted.
+- MariaDB shows a role's grants to an ordinary account only while the role is active. The auditor activates each role granted to the account or to PUBLIC, reads `SHOW GRANTS FOR CURRENT_ROLE`, restores the original role, and reads `SHOW GRANTS FOR PUBLIC`.
+
+The parser is strict: unrecognized lines, and grants the server refuses to show, fail closed. Only USAGE, SELECT, SHOW VIEW, SHOW DATABASES, EXECUTE, PROCESS, LOCK TABLES, replication-monitoring privileges, SHOW_ROUTINE, and SHOW CREATE ROUTINE are accepted, at any level. The auditor rejects any other privilege, ALL, GRANT OPTION, ADMIN OPTION, PROXY, and grantable roles. It rejects CREATE TEMPORARY TABLES because MySQL read-only transactions may write temporary tables and there is no session reset. The audit covers every database, because one query can reference several. Password-hash text is never retained.
+
+**Sessions.** Each operation sets up its session in three steps:
+1. One statement pins these session settings:
+   - the flavor's default `sql_mode` as an explicit literal, never including ANSI_QUOTES or NO_BACKSLASH_ESCAPES;
+   - utf8mb4 character sets and UTC;
+   - the maximum `sql_select_limit` and one-second lock waits;
+   - the remaining budget as `max_execution_time` (MySQL) or `max_statement_time` (MariaDB);
+   - READ COMMITTED isolation and a read-only session default. MariaDB before 11.1 uses the `tx_*` variable names.
+2. `START TRANSACTION READ ONLY`.
+3. A read-back of the mode, character sets, read-only default, and `CURRENT_USER()`, failing closed on any mismatch.
+
+The read-only variable reports the session default, not the current transaction; the explicit `READ ONLY` start under that verified default is the evidence. Cleanup runs `ROLLBACK` and `DO RELEASE_ALL_LOCKS()` within two seconds, and any failure discards the connection. The pinned client cannot send `COM_RESET_CONNECTION`. Instead, the guard rejects session assignments, every operation re-pins its settings, and cleanup releases named locks. Remaining session state can come only from administrator-trusted routines, for example user variables or `LAST_INSERT_ID(expr)` set inside functions.
+
+**Query guard.** A bounded lexer (64 KiB, 8192 tokens, nesting depth 64) reads strings, identifiers, and comments as the server does under the pinned mode. It rejects any input where the two could disagree:
+- executable `/*!` and `/*M!` comments, and `/*+` optimizer hints;
+- `--` followed by an ambiguous control character, and a lone CR in a line comment;
+- a backslash outside strings, and unterminated tokens.
+
+It accepts one SELECT-family statement, SHOW, EXPLAIN or DESCRIBE of a read query or a table, and MariaDB ANALYZE of a SELECT. A WITH clause is checked structurally, so its main statement must be a read query. One trailing semicolon is allowed and stripped before preparation. INTO, FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE, and `:=` are rejected anywhere unless quoted. Server-side prepared statements also reject multiple statements. The audited account and the read-only transaction remain the primary boundary.
+
+**Execution.**
+- Statements are prepared on the server, and the parameter count must match. Rows use the binary protocol. A statement the server cannot prepare (error 1295) runs once through the text protocol, only when no parameters are given.
+- Truncation closes the socket before closing rows, because the client library would otherwise drain them.
+- Each operation may receive at most 8 MiB. The count is taken beneath TLS, because MySQL negotiates TLS inside its own handshake and its packet headers are encrypted; exceeding it returns `RESOURCE_LIMIT`. The library may first allocate one packet buffer of up to 16 MiB per connection.
+- Cancellation closes the socket and sends `KILL QUERY` over a short-lived connection to the same endpoint, route, and account, bounded at two seconds. Server-side work is also bounded by the pinned statement timeout.
+
+**Codecs.**
+- Integers of up to 32 bits and YEAR are JSON numbers. BIGINT, BIGINT UNSIGNED, DECIMAL, and BIT are exact strings. FLOAT keeps 32-bit precision.
+- DATETIME uses `T` without a zone; TIMESTAMP is UTC with `Z`. Zero dates keep their server spelling.
+- Text is UTF-8. Binary, spatial, and unknown values are base64 with `encoding: base64`. MySQL JSON keeps exact numbers.
+- Parameters bind integers and booleans as integers, other numbers as exact decimal text, and JSON values as text.
+
+Type names use MySQL spelling, such as `bigint unsigned`. [Codec fixtures](../internal/database/mysql/testdata/README.md) define the exact representations.
+
+**Catalogs.** Metadata comes from `information_schema`, which shows the objects the account has some privilege on. Byte-wise casts give exact keyset ordering.
+- `list_tables` includes system databases.
+- `describe_table` adds AUTO_INCREMENT, ON UPDATE, and the engine, and reports defaults as SQL expression text. It omits triggers, which MySQL shows only to accounts with the TRIGGER privilege that the audit rejects.
+- Objects are functions and procedures, plus MariaDB sequences, identified by schema, name, and kind without identity arguments. A sequence's configuration is read from its row, which needs SELECT and never advances it.
+
 ## 10. MCP contract
 
 ### 10.1 Tools and results
@@ -496,7 +559,7 @@ Example structured query result:
 }
 ```
 
-Tool failures use `isError` and a safe `{code,message,retryable,sqlstate?}` object. Codes include `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, `RESOURCE_LIMIT`, `READ_ONLY_VIOLATION`, `PERMISSION_DENIED`, `QUERY_FAILED`, `STALE_CURSOR`, `INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`. Unexpected internal failures become `SERVICE_UNAVAILABLE`; invalid tool arguments and protocol errors remain JSON-RPC errors. Raw DSNs, parameters, upstream PostgreSQL details/hints, and decrypted secrets never enter diagnostics.
+Tool failures use `isError` and a safe `{code,message,retryable,sqlstate?}` object. Codes include `CONFIG_INVALID`, `CONNECTION_NOT_FOUND`, `CREDENTIAL_MISSING`, `VAULT_UNAVAILABLE`, `CONNECT_FAILED`, `QUERY_UNSUPPORTED`, `QUERY_TIMEOUT`, `RESOURCE_LIMIT`, `READ_ONLY_VIOLATION`, `PERMISSION_DENIED`, `QUERY_FAILED`, `STALE_CURSOR`, `INVALID_ARGUMENT`, `SERVICE_UNAVAILABLE`, and `CANCELLED`. Unexpected internal failures become `SERVICE_UNAVAILABLE`; invalid tool arguments and protocol errors remain JSON-RPC errors. Raw DSNs, parameters, upstream database details/hints, and decrypted secrets never enter diagnostics.
 
 Database text is untrusted data, not operational instruction. Database privileges control retrieval; permitted text can still contain prompt injection aimed at the consuming agent.
 
@@ -527,7 +590,7 @@ The bridge owns and closes its streams. Cancellable file reads allow service dis
 | `make lint`                | Run go vet and pinned staticcheck                                                                              |
 | `make test`                | Run isolated offline unit/regression tests                                                                     |
 | `make test-race`           | Run the same suite with the race detector                                                                      |
-| `make test-integration`    | Run owned PostgreSQL 16/18 Docker fixtures; excluded from CI                                                   |
+| `make test-integration`    | Run owned PostgreSQL, MySQL or MariaDB Docker fixtures for `DB_DRIVER`; excluded from CI                       |
 | `make clean`               | Default uninstall with purge disabled, even if `PURGE=1` was supplied                                          |
 | `make uninstall`           | Remove service, owned registrations, executable, and runtime artifacts; preserve configuration and credentials |
 | `make uninstall PURGE=1`   | Also remove owned SQLite state/journal, exact OS keyset, host pins, and installation state                     |
@@ -562,15 +625,17 @@ Tests live beside the owning Go packages; reusable fixtures and public examples 
 | MCP and resources       | Initialization, schemas, independent sessions, frame/queue limits, disconnect/cancellation, bounded output, and redaction                                                      |
 | Management and secrets  | Interface separation, peer identity, credential patch semantics, no secret-return endpoint, cancellation without late publication, and no OS access after unlock               |
 | PostgreSQL              | Broad read SQL, schema qualification, cached account admission, server write/permission rejection, codecs, truncation, rollback/reset and connection disposal                  |
+| MySQL and MariaDB       | Lexer guard corpus and fuzzing, grant classification, role expansion, session pins, receive budget, KILL QUERY cancellation, codecs, catalogs and database visibility          |
+| Shared pools            | Admission, saturation, approval single-flight, partial and final disconnects, credential retirement, eviction, idle retirement and cursor authentication                       |
 | Ownership and purge     | Symlink/identity protection, state-reader draining, tombstones/receipts, exact-key deletion, and preservation of unrelated files                                               |
 
 Bounded fuzz seeds exercise decoding and query guard. Race tests cover concurrent behavior. CI uses `ubuntu-latest` and `macos-15` jobs for Format and lint, Test and build, and Race tests, each with `make setup`; Docker integration is excluded.
 
-`make test-integration DB_DRIVER=postgres` owns its Docker containers, networks, credentials, and synthetic data for both PostgreSQL 16 and 18. `DB_IMAGE=postgres:16` or `DB_IMAGE=postgres:18` selects one entry. Image overrides still face version and semantic-readiness checks. The harness never accepts an arbitrary existing database URL and tears down on success, failure, and interruption. Owned local SSH/SOCKS5 fixtures exercise transport paths.
+`make test-integration DB_DRIVER=postgres|mysql|mariadb` owns its Docker containers, networks, credentials, and synthetic data for the driver's matrix: PostgreSQL 16 and 18, MySQL 8.4 and 9.7, or MariaDB 10.11 and 12.3. `DB_IMAGE` selects one entry of that matrix, such as `postgres:16` or `mariadb:12.3`. Image overrides still face version and semantic-readiness checks. The harness never accepts an arbitrary existing database URL and tears down on success, failure, and interruption. Owned local SSH/SOCKS5 fixtures exercise transport paths.
 
 Native Keychain, launchd, registration, and agent round-trip checks have explicit opt-in commands in the README. Those fixtures exercise the centralized storage design; their presence alone does not establish a successful run. Native service fixtures isolate client configuration; actual agent workflows use authenticated clients and unique owned registrations in their current user configuration, with an owned Docker database and temporary installation. These checks cover boundaries that fakes cannot prove. Test availability or a documented acceptance scenario is not a claim of a completed native/integration run; results and environment-dependent skips belong in validation reports.
 
-The end-to-end acceptance workflow is local installation, profile creation through the management-only service, `mcp start`, and independently launched Codex/Claude Code sessions using the six tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, pool-lifetime account validation, bounded read-only execution, and ownership-safe default uninstall/purge across the supported PostgreSQL matrix.
+The end-to-end acceptance workflow is local installation, profile creation through the management-only service, `mcp start`, and independently launched Codex/Claude Code sessions using the six tools. Repeated connection edits after unlock must perform no OS keyset access and preserve atomic state changes, pool-lifetime account validation, bounded read-only execution, and ownership-safe default uninstall/purge across the supported database matrix.
 
 ## 13. Production distribution and terminal integration
 
@@ -664,7 +729,7 @@ Use the pinned [Cobra completion support](https://cobra.dev/docs/how-to-guides/s
 | `data-mate db import ` or `data-mate db export `      | Local `.csv` paths                                   |
 | A flag with a finite value set or explicit local path | Allowed values or appropriately filtered local paths |
 
-Alias completion also applies to remove/rm, test, and describe. It uses the existing passive nonsecret store reader against the fixed production root or the development root selected by its default/explicit `--root`, and never starts a service, creates files, accesses Keychain, or queries PostgreSQL. Bound the lookup to 100 ms, 256 candidates, and 64 KiB of output; unavailable, locked, missing, or invalid state yields no dynamic candidates without terminal diagnostics. Static command/flag completion remains available. Disable arbitrary filename fallback for alias and secret-valued arguments. Omit hidden service/bridge/install commands and suppress schema catalog completion because that would require live database access. Escape shell metacharacters and omit candidates containing control characters; a stored alias is data, never shell code.
+Alias completion also applies to remove/rm, test, and describe. It uses the existing passive nonsecret store reader against the fixed production root or the development root selected by its default/explicit `--root`, and never starts a service, creates files, accesses Keychain, or queries a database. Bound the lookup to 100 ms, 256 candidates, and 64 KiB of output; unavailable, locked, missing, or invalid state yields no dynamic candidates without terminal diagnostics. Static command/flag completion remains available. Disable arbitrary filename fallback for alias and secret-valued arguments. Omit hidden service/bridge/install commands and suppress schema catalog completion because that would require live database access. Escape shell metacharacters and omit candidates containing control characters; a stored alias is data, never shell code.
 
 Install generated scripts and small shell loaders under the owned `shell/` directory. By default, the installer configures the user's supported login shell with one uniquely marked block sourcing its absolute loader path, and records the startup file path. A bootstrap `--no-shell` option installs the executable/completion assets and prints manual activation instructions without modifying shell startup files. Unsupported shells receive manual PATH guidance. Installer output distinguishes successful binary installation from incomplete shell setup.
 
@@ -708,7 +773,7 @@ Extend existing CLI, config, lifecycle, agent, and installed-binary regressions 
 
 Run the repository's ordered code checks when implementation lands. The release workflow builds/signs/notarizes native artifacts and validates the same candidate on a separate fresh macOS 15 arm64 runner, using system tools without a Go setup or build. Acceptance verifies checksums, publisher/notarization and compiled metadata before executing installation, passive listing/status, Bash/zsh completion, same-version reinstall, credential-preserving uninstall, reinstall, and purge. It uses the disposable runner's real account home; no production root override is introduced. The acceptance script refuses ordinary workstation execution.
 
-GitHub-hosted images contain developer tools, so this automated publication gate is narrower than a physically toolchain-free host test. Interactive Keychain access across signed upgrades, actual agents, and PostgreSQL integrations remain isolated opt-in checks; passing automated acceptance does not claim those checks passed. Keep PostgreSQL 16/18 integration local and opt-in as before. Retain workflow signing diagnostics for failed-run investigation, and report native/hosted checks as unverified until an actual successful run. Update README usage and changelog only as behaviors become available.
+GitHub-hosted images contain developer tools, so this automated publication gate is narrower than a physically toolchain-free host test. Interactive Keychain access across signed upgrades, actual agents, and database integrations remain isolated opt-in checks; passing automated acceptance does not claim those checks passed. Keep database integration local and opt-in as before. Retain workflow signing diagnostics for failed-run investigation, and report native/hosted checks as unverified until an actual successful run. Update README usage and changelog only as behaviors become available.
 
 ### 13.9 Linux distribution and release operations
 

@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -19,11 +18,11 @@ var errResultDiscarded = errors.New("bounded result completed; connection discar
 // Query executes one read query in a fresh read-only transaction.
 func (d *Driver) Query(ctx context.Context, a database.Access, req database.QueryRequest) (database.QueryResult, error) {
 	started := time.Now()
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		return database.QueryResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, database.Timeout(a))
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return database.QueryResult{}, safeError(err)
@@ -35,7 +34,7 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 	if req.RowLimit != 0 {
 		limit = req.RowLimit
 	}
-	params, err := queryParameters(req.Parameters)
+	params, err := database.Parameters(req.Parameters)
 	if err != nil {
 		return database.QueryResult{}, err
 	}
@@ -43,19 +42,19 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 		return database.QueryResult{}, err
 	}
 	var out database.QueryResult
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, version int) error {
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, version int) error {
 		description, e := tx.Conn().PgConn().Prepare(ctx, "data_mate_query", req.SQL, nil)
 		if e != nil {
 			return e
 		}
 		if len(description.ParamOIDs) != len(params) {
-			return invalidParameters()
+			return database.InvalidParameters()
 		}
 		types, e := describeTypes(ctx, tx, description.Fields)
 		if e != nil {
 			return e
 		}
-		out, err = executeQuery(ctx, tx, a, description, types, params, limit, started)
+		out, err = executeQuery(ctx, tx, a, description, types, textParameters(params), limit, started)
 		return err
 	})
 	if err != nil {
@@ -64,46 +63,23 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 	return out, nil
 }
 
-// QueryPayloadSize counts the complete tool result, including the duplicated
-// compact JSON text. P9 must use this same envelope, then separately bound its
-// JSON-RPC frame. Values are never converted through floating point here.
-func QueryPayloadSize(result database.QueryResult) (int, error) {
-	b, err := json.Marshal(result)
-	if err != nil {
-		return 0, err
-	}
-	return resultBytes(b), nil
-}
-
-func resultBytes(b []byte) int {
-	quoted, _ := json.Marshal(string(b))
-	return len(`{"content":[{"type":"text","text":`) + len(quoted) + len(`}],"structuredContent":`) + len(b) + len(`}`)
-}
-
 func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description *pgconn.StatementDescription, types resultTypes, values [][]byte, rowLimit int, started time.Time) (out database.QueryResult, err error) {
-	out = database.QueryResult{Connection: a.Profile.Alias, Columns: []database.ResultColumn{}, Rows: [][]any{}}
+	columns := []database.ResultColumn{}
 	for _, f := range description.Fields {
-		if !validResultName(f.Name) {
-			return out, codecError()
+		if !database.ValidResultName(f.Name) {
+			return out, database.UnsupportedValue()
 		}
 		t := types[f.DataTypeOID]
 		encoding, e := types.representation(f.DataTypeOID)
 		if e != nil {
 			return out, e
 		}
-		out.Columns = append(out.Columns, database.ResultColumn{Name: f.Name, Type: t.name, Encoding: encoding})
+		columns = append(columns, database.ResultColumn{Name: f.Name, Type: t.name, Encoding: encoding})
 	}
-	// Reserve maximum field widths; each appended row is counted exactly once.
-	// false is one byte longer than true. RowCount can never exceed the profile.
-	out.RowCount = rowLimit
-	out.ElapsedMS = 1<<63 - 1
-	header, _ := json.Marshal(out)
-	used := resultBytes(header)
-	if used > a.Profile.Limits.MaxResultBytes {
-		return out, database.Fail(contracts.ResourceLimit, "column metadata exceeds result budget", false)
+	result, err := database.NewResult(a, columns, rowLimit, started)
+	if err != nil {
+		return out, err
 	}
-	out.RowCount = 0
-	out.ElapsedMS = 0
 	rr := tx.Conn().PgConn().ExecPrepared(ctx, description.Name, values, nil, []int16{0})
 	// On every early exit, close the socket before closing the reader. Reader.Close
 	// alone drains unread results and could run arbitrarily much remaining work.
@@ -120,7 +96,7 @@ func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description
 	fields := rr.FieldDescriptions()
 	if len(fields) != len(description.Fields) {
 		if len(fields) > 0 {
-			return out, codecError()
+			return out, database.UnsupportedValue()
 		}
 		// Preserve timeout/wire/server errors when no row description arrived.
 		_, e := rr.Close()
@@ -128,27 +104,24 @@ func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description
 		if e != nil {
 			return out, e
 		}
-		return out, codecError()
+		return out, database.UnsupportedValue()
 	}
 	for i, f := range fields {
 		if f.DataTypeOID != description.Fields[i].DataTypeOID || f.Name != description.Fields[i].Name || f.Format != 0 {
-			return out, codecError()
+			return out, database.UnsupportedValue()
 		}
 	}
 	for rr.NextRow() {
 		if err = ctx.Err(); err != nil {
 			return out, err
 		}
-		if len(out.Rows) == rowLimit {
-			out.Truncated = true
-			out.RowCount = len(out.Rows)
-			out.ElapsedMS = time.Since(started).Milliseconds()
+		if !result.Next() {
 			closeConn(tx.Conn())
-			return out, errResultDiscarded
+			return result.Result(), errResultDiscarded
 		}
 		raw := rr.Values()
 		if len(raw) != len(fields) {
-			return out, codecError()
+			return out, database.UnsupportedValue()
 		}
 		row := make([]any, len(raw))
 		for i, b := range raw {
@@ -157,30 +130,16 @@ func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description
 				return out, err
 			}
 		}
-		b, e := json.Marshal(row)
+		added, e := result.Add(row)
 		if e != nil {
-			return out, codecError()
+			return out, e
 		}
-		// Relative to empty [], a row contributes its JSON and its JSON-string
-		// escaped form (without the latter's two quotes), plus two commas after row 1.
-		quoted, _ := json.Marshal(string(b))
-		cost := len(b) + len(quoted) - 2
-		if len(out.Rows) > 0 {
-			cost += 2
-		}
-		if used+cost > a.Profile.Limits.MaxResultBytes {
-			out.Truncated = true
-			out.RowCount = len(out.Rows)
-			out.ElapsedMS = time.Since(started).Milliseconds()
+		if !added {
 			closeConn(tx.Conn())
-			return out, errResultDiscarded
+			return result.Result(), errResultDiscarded
 		}
-		used += cost
-		out.Rows = append(out.Rows, row)
 	}
 	_, err = rr.Close()
 	concluded = true
-	out.RowCount = len(out.Rows)
-	out.ElapsedMS = time.Since(started).Milliseconds()
-	return out, err
+	return result.Result(), err
 }

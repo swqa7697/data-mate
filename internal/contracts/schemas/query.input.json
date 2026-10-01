@@ -11,13 +11,13 @@
       "minLength": 1,
       "pattern": "^[^\\x00]+$",
       "maxLength": 65536,
-      "description": "One PostgreSQL read statement (SELECT, VALUES, TABLE, SHOW, or EXPLAIN of a read query). Physical tables and views require schema-qualified names. System schemas and application routines are permitted; writes and transaction control are rejected."
+      "description": "One read statement: SELECT, VALUES, TABLE, SHOW, or EXPLAIN of a read query; MySQL and MariaDB also accept DESCRIBE. PostgreSQL requires schema-qualified tables and views. MySQL and MariaDB connections have no default database, so name tables as database.table. System schemas and application routines are permitted; writes and transaction control are rejected."
     },
     "parameters": {
       "type": "array",
       "items": {},
       "maxItems": 256,
-      "description": "Ordered JSON values bound separately to $1, $2, etc. PostgreSQL infers types; use SQL casts when needed. Null means SQL NULL. Objects/arrays become JSON text; PostgreSQL array inputs use array-text strings with casts."
+      "description": "Ordered JSON values bound separately to placeholders: $1, $2, etc. for PostgreSQL and ? for MySQL and MariaDB. Null means SQL NULL; objects and arrays become JSON text. PostgreSQL infers types from text; use casts such as $1::uuid, and array-text strings for arrays. MySQL and MariaDB bind integers and booleans as integers and other numbers as exact decimal text; use CAST(? AS JSON) for JSON."
     },
     "row_limit": {
       "type": "integer",

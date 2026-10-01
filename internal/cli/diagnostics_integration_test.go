@@ -21,18 +21,25 @@ func liveDiagnostics(t *testing.T, path string) {
 		t.Fatal("owned integration excluded from CI")
 	}
 	var fixture struct {
-		Port                   int
-		Root, Container, Owner string
+		Port                           int
+		Root, Container, Owner, Driver string
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil || json.Unmarshal(raw, &fixture) != nil {
 		t.Fatal("invalid owned fixture")
 	}
+	// Each driver's fixture has its own ownership prefix, port and admin account.
+	prefix, port, admin := "dm-pg-", "5432/tcp", "postgres"
+	if fixture.Driver == "mysql" || fixture.Driver == "mariadb" {
+		prefix, port, admin = "dm-my-", "3306/tcp", "root"
+	} else if fixture.Driver != "" && fixture.Driver != "postgres" {
+		t.Fatal("unknown fixture driver")
+	}
 	raw, err = exec.Command("docker", "inspect", "--format", `{{index .Config.Labels "com.data-mate.fixture"}}`, fixture.Container).Output()
-	if err != nil || strings.TrimSpace(string(raw)) != fixture.Owner || !strings.HasPrefix(fixture.Owner, "dm-pg-") {
+	if err != nil || strings.TrimSpace(string(raw)) != fixture.Owner || !strings.HasPrefix(fixture.Owner, prefix) {
 		t.Fatal("unowned diagnostic target")
 	}
-	raw, err = exec.Command("docker", "port", fixture.Container, "5432/tcp").Output()
+	raw, err = exec.Command("docker", "port", fixture.Container, port).Output()
 	if err != nil || strings.TrimSpace(string(raw)) != "127.0.0.1:"+strconv.Itoa(fixture.Port) {
 		t.Fatal("diagnostic endpoint mismatch")
 	}
@@ -53,7 +60,7 @@ func liveDiagnostics(t *testing.T, path string) {
 			secret = "synthetic-wrong-password"
 		}
 		if alias == "extra-grants" {
-			user = "postgres"
+			user = admin
 			raw, err = os.ReadFile(filepath.Join(fixture.Root, "admin-password"))
 			if err != nil {
 				t.Fatal(err)
@@ -63,7 +70,12 @@ func liveDiagnostics(t *testing.T, path string) {
 		if alias == "bad-tls" {
 			extra = []string{"--tls", "--tls-ca", filepath.Join(fixture.Root, "bad.crt")}
 		}
-		args := []string{"add", "--alias", alias, "--host", "localhost", "--port", strconv.Itoa(fixture.Port), "--database", "fixture", "--username", user, "--password-stdin", "--yes"}
+		args := []string{"add", "--alias", alias, "--host", "localhost", "--port", strconv.Itoa(fixture.Port), "--username", user, "--password-stdin", "--yes"}
+		if admin == "root" {
+			args = append(args, "--driver", fixture.Driver)
+		} else {
+			args = append(args, "--database", "fixture")
+		}
 		command(t, root, keys, secret+"\n", 0, append(args, extra...)...)
 	}
 	t.Setenv("DATA_MATE_CLI_REAL_DRIVER", "1")

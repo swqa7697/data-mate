@@ -36,7 +36,7 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	t.Helper()
 	limits := config.DefaultLimits()
 	a.Profile.Limits = &limits
-	backend := &wireBackend{d, a}
+	backend := &wireBackend{database.NewRouter(d.pools, map[string]database.Operations{"postgres": d.Operations()}), a}
 	server, client := net.Pipe()
 	done := make(chan error, 1)
 	go func() { done <- protocol.Serve(t.Context(), server, backend, "fixture") }()
@@ -80,7 +80,7 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	}
 	call("list_tables", map[string]any{"connection": "fixture", "cursor": *page.NextCursor}, "")
 	raw = call("describe_table", map[string]any{"connection": "fixture", "schema": "app", "table": "items"}, "")
-	var desc database.Description
+	var desc Description
 	_ = json.Unmarshal(raw, &desc)
 	if len(desc.Relationships) != 1 {
 		t.Fatal("readable cross-schema relationship missing")
@@ -94,7 +94,7 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 
 	call("query", map[string]any{"connection": "fixture", "sql": "select $1::int8,$2::jsonb", "parameters": []any{"9007199254740993", map[string]any{"ok": true}}}, "")
 	// Cursor validity is checked on later calls in the same initialized session.
-	d.Invalidate(a.Profile.ID)
+	d.pools.Invalidate(a.Profile.ID)
 	call("list_tables", map[string]any{"connection": "fixture", "cursor": *page.NextCursor}, contracts.StaleCursor)
 	t.Log("MCP SDK metadata, cross-schema endpoints, cursor invalidation, query and shared read-only rejection passed")
 }

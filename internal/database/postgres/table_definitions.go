@@ -7,7 +7,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
-func readDefinitions(ctx context.Context, tx pgx.Tx, budget *metadataBudget, sql string, args ...any) ([]database.Definition, error) {
+func readDefinitions(ctx context.Context, tx pgx.Tx, budget *database.MetadataBudget, sql string, args ...any) ([]database.Definition, error) {
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
@@ -19,7 +19,7 @@ func readDefinitions(ctx context.Context, tx pgx.Tx, budget *metadataBudget, sql
 		if err = rows.Scan(&v.Name, &v.Kind, &v.Definition); err != nil {
 			return nil, err
 		}
-		if err = budget.add(v); err != nil {
+		if err = budget.Add(v); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -27,7 +27,7 @@ func readDefinitions(ctx context.Context, tx pgx.Tx, budget *metadataBudget, sql
 	return out, rows.Err()
 }
 
-func tableDefinitions(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description, budget *metadataBudget) error {
+func tableDefinitions(ctx context.Context, tx pgx.Tx, oid uint32, out *Description, budget *database.MetadataBudget) error {
 	// Deparse definitions without executing their stored expressions.
 	args := []any{oid}
 	var err error
@@ -51,7 +51,7 @@ func tableDefinitions(ctx context.Context, tx pgx.Tx, oid uint32, out *database.
 	return tablePolicies(ctx, tx, oid, out, budget)
 }
 
-func tableTriggers(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description, budget *metadataBudget) error {
+func tableTriggers(ctx context.Context, tx pgx.Tx, oid uint32, out *Description, budget *database.MetadataBudget) error {
 	rows, err := tx.Query(ctx, `SELECT tgname::text,pg_catalog.pg_get_triggerdef(oid),
  CASE tgenabled WHEN 'O' THEN 'origin' WHEN 'D' THEN 'disabled' WHEN 'R' THEN 'replica' ELSE 'always' END,tgisinternal
  FROM pg_catalog.pg_trigger WHERE tgrelid=$1 ORDER BY tgname::text COLLATE "C" LIMIT 4097`, oid)
@@ -60,11 +60,11 @@ func tableTriggers(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Des
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var v database.Trigger
+		var v Trigger
 		if err = rows.Scan(&v.Name, &v.Definition, &v.Enabled, &v.Internal); err != nil {
 			return err
 		}
-		if err = budget.add(v); err != nil {
+		if err = budget.Add(v); err != nil {
 			return err
 		}
 		out.Triggers = append(out.Triggers, v)
@@ -72,7 +72,7 @@ func tableTriggers(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Des
 	return rows.Err()
 }
 
-func tablePolicies(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description, budget *metadataBudget) error {
+func tablePolicies(ctx context.Context, tx pgx.Tx, oid uint32, out *Description, budget *database.MetadataBudget) error {
 	rows, err := tx.Query(ctx, `SELECT polname::text,
  CASE polcmd WHEN '*' THEN 'all' WHEN 'r' THEN 'select' WHEN 'a' THEN 'insert' WHEN 'w' THEN 'update' ELSE 'delete' END,polpermissive,
  ARRAY(SELECT CASE WHEN role=0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(role)::text END FROM pg_catalog.unnest(polroles) role ORDER BY role),
@@ -83,11 +83,11 @@ func tablePolicies(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Des
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var v database.Policy
+		var v Policy
 		if err = rows.Scan(&v.Name, &v.Command, &v.Permissive, &v.Roles, &v.Using, &v.Check); err != nil {
 			return err
 		}
-		if err = budget.add(v); err != nil {
+		if err = budget.Add(v); err != nil {
 			return err
 		}
 		out.Policies = append(out.Policies, v)

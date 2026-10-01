@@ -41,13 +41,32 @@ type Profile struct {
 	Limits        *Limits    `json:"limits,omitempty"`
 }
 
-// Connection identifies a single PostgreSQL endpoint.
+// Connection identifies one database endpoint and account. PostgreSQL profiles
+// name the one database they reach; MySQL and MariaDB profiles name none, since
+// their accounts reach every database their grants allow.
 type Connection struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
-	Database string `json:"database"`
+	Database string `json:"database,omitempty"`
 	Username string `json:"username"`
 }
+
+// Drivers lists the supported database drivers in presentation order.
+var Drivers = []string{"postgres", "mysql", "mariadb"}
+
+// DefaultPort returns a driver's standard TCP port, or 0 for an unknown driver.
+func DefaultPort(driver string) int {
+	switch driver {
+	case "postgres":
+		return 5432
+	case "mysql", "mariadb":
+		return 3306
+	}
+	return 0
+}
+
+// NamesDatabase reports whether a driver's profiles name a database.
+func NamesDatabase(driver string) bool { return driver == "postgres" }
 
 // Transport selects explicit, optional transport protection.
 type Transport struct {

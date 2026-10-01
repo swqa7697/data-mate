@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add MySQL 8.4+ and MariaDB 10.11+ connections through the `mysql` and `mariadb` drivers, with the same direct, TLS, SSH and SOCKS5 routes, encrypted credentials, staged `db test` diagnostics, `db describe` and MCP tools as PostgreSQL. A MySQL-family connection names a server account and no database: grants choose the reachable databases, which appear as schemas, and queries name tables as `database.table`. Accounts are audited for read-only grants across every role they can activate; sessions run in pinned, verified read-only transactions; cancellation stops server-side work; and results keep exact 64-bit, decimal and binary values.
+- Default the connection port to the chosen driver's standard port and validate the driver as soon as it is entered.
+
+### Changed
+
+- Report the connection's `driver` in `list_tables`, `describe_table`, `list_objects`, `describe_object` and `db describe` results, and shape metadata for each database: PostgreSQL results are otherwise unchanged, while MySQL and MariaDB results use their own object kinds and table attributes. Identifier names may now be up to 64 characters.
+
 ## [0.2.3] - 2026-10-03
 
 ### Added

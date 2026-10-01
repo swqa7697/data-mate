@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"unicode/utf8"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/database/pool"
 )
 
 // All names and signatures are values. No agent input becomes catalog SQL.
@@ -31,33 +31,31 @@ const objectsSQL = `WITH objects AS (
 func objectKind(k string) bool { return k == "routine" || k == "type" || k == "sequence" }
 
 // ListObjects lists routines, types and sequences visible through PostgreSQL catalogs.
-func (d *Driver) ListObjects(ctx context.Context, a database.Access, req database.ObjectPageRequest) (database.ObjectPage, error) {
-	a, rev, err := normalized(a)
+func (d *Driver) ListObjects(ctx context.Context, a database.Access, req database.ObjectPageRequest) (ObjectPage, error) {
+	a, rev, err := database.Normalize(a)
 	if err != nil {
-		return database.ObjectPage{}, err
+		return ObjectPage{}, err
 	}
 	if req.PageSize == 0 {
 		req.PageSize = 100
 	}
 	if req.PageSize < 1 || req.PageSize > 500 || (req.Schema != "" && !validName(req.Schema)) || (req.Kind != "" && !objectKind(req.Kind)) {
-		return database.ObjectPage{}, database.Fail(contracts.InvalidArgument, "invalid object page request", false)
+		return ObjectPage{}, database.Fail(contracts.InvalidArgument, "invalid object page request", false)
 	}
-	d.mu.Lock()
-	epoch := d.epoch
-	d.mu.Unlock()
-	pos := cursor{Version: 1, Tool: "list_objects", ID: a.Profile.ID, Revision: rev, Filter: req.Schema, KindFilter: req.Kind, Epoch: epoch}
+	pos := pool.Cursor{Version: 1, Tool: "list_objects", ID: a.Profile.ID, Revision: rev, Filter: req.Schema, KindFilter: req.Kind, Epoch: d.pools.Epoch()}
 	if req.Cursor != "" {
-		pos, err = d.decodeCursor(req.Cursor, pos)
+		pos, err = d.pools.Decode(req.Cursor, pos, validName)
 		if err != nil {
-			return database.ObjectPage{}, err
+			return ObjectPage{}, err
 		}
-		if !objectKind(pos.Kind) || pos.OID == 0 {
-			return database.ObjectPage{}, database.Fail(contracts.StaleCursor, "metadata cursor is invalid or stale", false)
+		// The tiebreak key is the object OID, which is never zero.
+		if !objectKind(pos.Kind) || pos.Key == 0 || pos.Key > 1<<32-1 {
+			return ObjectPage{}, database.Fail(contracts.StaleCursor, "metadata cursor is invalid or stale", false)
 		}
 	}
-	out := database.ObjectPage{Connection: a.Profile.Alias, Objects: []database.Object{}}
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		args := []any{req.Schema, req.Kind, pos.Schema, pos.Name, pos.Kind, pos.OID, req.PageSize + 1}
+	out := ObjectPage{Connection: a.Profile.Alias, Driver: a.Profile.Driver, Objects: []Object{}}
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, _ int) error {
+		args := []any{req.Schema, req.Kind, pos.Schema, pos.Name, pos.Kind, uint32(pos.Key), req.PageSize + 1}
 		rows, e := tx.Query(ctx, objectsSQL+`
  AND ($1::text='' OR n.nspname=$1) AND ($2::text='' OR o.kind=$2)
  AND (n.nspname::text COLLATE "C",o.name::text COLLATE "C",o.kind COLLATE "C",o.oid) > ($3::text COLLATE "C",$4::text COLLATE "C",$5::text COLLATE "C",$6::oid)
@@ -66,10 +64,10 @@ func (d *Driver) ListObjects(ctx context.Context, a database.Access, req databas
 			return e
 		}
 		defer rows.Close()
-		budget := metadataBudget{limit: a.Profile.Limits.MaxResultBytes}
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
 		more := false
 		for rows.Next() {
-			var item database.Object
+			var item Object
 			var oid uint32
 			if e = rows.Scan(&oid, &item.Schema, &item.Name, &item.Kind, &item.IdentityArguments, &item.Extension); e != nil {
 				return e
@@ -78,49 +76,49 @@ func (d *Driver) ListObjects(ctx context.Context, a database.Access, req databas
 				more = true
 				break
 			}
-			if e = budget.add(item); e != nil {
+			if e = budget.Add(item); e != nil {
 				return e
 			}
 			out.Objects = append(out.Objects, item)
 			pos.Schema = item.Schema
 			pos.Name = item.Name
 			pos.Kind = item.Kind
-			pos.OID = oid
+			pos.Key = uint64(oid)
 		}
 		rows.Close()
 		if e = rows.Err(); e != nil {
 			return e
 		}
 		if more {
-			s := d.encodeCursor(pos)
+			s := d.pools.Encode(pos)
 			out.NextCursor = &s
 		}
-		return payloadBound(out, a)
+		return database.PayloadBound(out, a)
 	})
 	if err != nil {
-		return database.ObjectPage{}, err
+		return ObjectPage{}, err
 	}
 	return out, nil
 }
 
 // DescribeObject looks up the exact visible identity before reading its definition.
-func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req database.ObjectRequest) (database.ObjectDescription, error) {
+func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req database.ObjectRequest) (ObjectDescription, error) {
 	if !objectKind(req.Kind) || !validName(req.Schema) || !validName(req.Name) || (req.Kind == "routine") != (req.IdentityArguments != nil) {
-		return database.ObjectDescription{}, database.Fail(contracts.InvalidArgument, "invalid object identity", false)
+		return ObjectDescription{}, database.Fail(contracts.InvalidArgument, "invalid object identity", false)
 	}
 	signature := ""
 	if req.IdentityArguments != nil {
 		signature = *req.IdentityArguments
 	}
 	if len(signature) > 64<<10 || !utf8.ValidString(signature) || strings.ContainsRune(signature, 0) {
-		return database.ObjectDescription{}, database.Fail(contracts.InvalidArgument, "invalid routine identity", false)
+		return ObjectDescription{}, database.Fail(contracts.InvalidArgument, "invalid routine identity", false)
 	}
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
-		return database.ObjectDescription{}, err
+		return ObjectDescription{}, err
 	}
-	out := database.ObjectDescription{Connection: a.Profile.Alias}
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
+	out := ObjectDescription{Connection: a.Profile.Alias, Driver: a.Profile.Driver}
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		args := []any{req.Schema, req.Name, req.Kind, signature}
 		var oid uint32
 		err := tx.QueryRow(ctx, objectsSQL+` AND n.nspname=$1 AND o.name=$2 AND o.kind=$3
@@ -131,7 +129,7 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 		if err != nil {
 			return err
 		}
-		budget := metadataBudget{limit: a.Profile.Limits.MaxResultBytes}
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
 		switch req.Kind {
 		case "routine":
 			out.Routine, err = describeRoutine(ctx, tx, oid)
@@ -143,32 +141,16 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 		if err != nil {
 			return err
 		}
-		return payloadBound(out, a)
+		return database.PayloadBound(out, a)
 	})
 	if err != nil {
-		return database.ObjectDescription{}, err
+		return ObjectDescription{}, err
 	}
 	return out, nil
 }
 
-// Bound cumulative collections as they are read, before constructing an envelope.
-type metadataBudget struct{ count, bytes, limit int }
-
-func (b *metadataBudget) add(v any) error {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	b.count++
-	b.bytes += len(raw)
-	if b.count > maxCatalogObjects || b.bytes > b.limit {
-		return database.Fail(contracts.ResourceLimit, "metadata exceeds catalog or payload limit", false)
-	}
-	return nil
-}
-
-func describeRoutine(ctx context.Context, tx pgx.Tx, oid uint32) (*database.RoutineDescription, error) {
-	out := &database.RoutineDescription{}
+func describeRoutine(ctx context.Context, tx pgx.Tx, oid uint32) (*RoutineDescription, error) {
+	out := &RoutineDescription{}
 	err := tx.QueryRow(ctx, `SELECT CASE p.prokind WHEN 'f' THEN 'function' WHEN 'p' THEN 'procedure' WHEN 'a' THEN 'aggregate' ELSE 'window' END,
  pg_catalog.pg_get_function_arguments(p.oid),pg_catalog.pg_get_function_result(p.oid),l.lanname::text,
  CASE p.provolatile WHEN 'i' THEN 'immutable' WHEN 's' THEN 'stable' ELSE 'volatile' END,p.prosecdef,
@@ -178,7 +160,7 @@ func describeRoutine(ctx context.Context, tx pgx.Tx, oid uint32) (*database.Rout
 		return nil, err
 	}
 	if out.Kind == "aggregate" {
-		v := &database.AggregateDescription{}
+		v := &AggregateDescription{}
 		err = tx.QueryRow(ctx, `SELECT CASE aggkind WHEN 'n' THEN 'normal' WHEN 'o' THEN 'ordered_set' ELSE 'hypothetical_set' END,
  aggtransfn::regprocedure::text,pg_catalog.format_type(aggtranstype,NULL),
  CASE WHEN aggfinalfn<>0 THEN aggfinalfn::regprocedure::text END,
@@ -189,8 +171,8 @@ func describeRoutine(ctx context.Context, tx pgx.Tx, oid uint32) (*database.Rout
 	return out, err
 }
 
-func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget) (*database.TypeDescription, error) {
-	out := &database.TypeDescription{EnumLabels: []string{}, Attributes: []database.Column{}, Constraints: []database.Definition{}}
+func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *database.MetadataBudget) (*TypeDescription, error) {
+	out := &TypeDescription{EnumLabels: []string{}, Attributes: []Column{}, Constraints: []database.Definition{}}
 	var relation uint32
 	err := tx.QueryRow(ctx, `SELECT CASE typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain' WHEN 'c' THEN 'composite' WHEN 'r' THEN 'range' WHEN 'm' THEN 'multirange' WHEN 'p' THEN 'pseudo' ELSE 'base' END,
  typcategory::text,CASE WHEN typbasetype<>0 THEN pg_catalog.format_type(typbasetype,typtypmod) END,
@@ -209,7 +191,7 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBu
 			if e = rows.Scan(&label); e != nil {
 				return nil, e
 			}
-			if e = budget.add(label); e != nil {
+			if e = budget.Add(label); e != nil {
 				return nil, e
 			}
 			out.EnumLabels = append(out.EnumLabels, label)
@@ -232,7 +214,7 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBu
 		}
 	}
 	if out.Kind == "range" || out.Kind == "multirange" {
-		v := &database.RangeDescription{}
+		v := &RangeDescription{}
 		err = tx.QueryRow(ctx, `SELECT pg_catalog.format_type(rngsubtype,NULL),pg_catalog.format_type(rngtypid,NULL),pg_catalog.format_type(rngmultitypid,NULL),
  CASE WHEN rngcollation<>0 THEN rngcollation::regcollation::text END,
  CASE WHEN rngcanonical<>0 THEN rngcanonical::regprocedure::text END,
@@ -242,8 +224,8 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBu
 	return out, err
 }
 
-func describeSequence(ctx context.Context, tx pgx.Tx, oid uint32) (*database.SequenceDescription, error) {
-	out := &database.SequenceDescription{}
+func describeSequence(ctx context.Context, tx pgx.Tx, oid uint32) (*SequenceDescription, error) {
+	out := &SequenceDescription{}
 	err := tx.QueryRow(ctx, `SELECT pg_catalog.format_type(seqtypid,NULL),seqstart::text,seqincrement::text,seqmin::text,seqmax::text,seqcache::text,seqcycle FROM pg_catalog.pg_sequence WHERE seqrelid=$1`, oid).Scan(&out.DataType, &out.Start, &out.Increment, &out.Min, &out.Max, &out.Cache, &out.Cycle)
 	if err != nil {
 		return nil, err

@@ -26,7 +26,7 @@
               "base64",
               "postgres_text"
             ],
-            "description": "Value representation marker; for PostgreSQL array results, describes the elements."
+            "description": "Value representation marker: base64 for binary values; postgres_text for PostgreSQL values returned in server text form. For PostgreSQL array results it describes the elements."
           }
         },
         "required": [

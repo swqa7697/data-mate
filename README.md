@@ -1,7 +1,7 @@
 <h1 align="center">Data Mate</h1>
 
 <p align="center">
-  <strong>Explore PostgreSQL from Codex or Claude Code.</strong><br />
+  <strong>Explore PostgreSQL, MySQL and MariaDB from Codex or Claude Code.</strong><br />
   A local CLI and <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> (MCP) service for read-only database access on macOS and Linux.
 </p>
 
@@ -29,6 +29,7 @@ Data Mate lets coding agents discover tables, inspect columns, and answer questi
 | Feature               | What it gives you                                                             |
 | --------------------- | ----------------------------------------------------------------------------- |
 | Read-only tools       | List connections and tables, describe tables, and run bounded queries.        |
+| Databases             | Connect to PostgreSQL 16+, MySQL 8.4+, and MariaDB 10.11+.                    |
 | Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
 | Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
 | Agent setup           | Register the service with installed Codex and Claude Code clients.            |
@@ -36,7 +37,7 @@ Data Mate lets coding agents discover tables, inspect columns, and answer questi
 
 ## Get started
 
-Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only PostgreSQL account with access only to the data you intend to share.
+Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+, MySQL 8.4+, or MariaDB 10.11+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only database account with access only to the data you intend to share; see [Read-only accounts](#read-only-accounts).
 
 Install the latest stable release:
 
@@ -52,13 +53,13 @@ data-mate db test analytics
 data-mate mcp start
 ```
 
-`db add` opens a form for the connection details and a hidden password. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
+`db add` opens a form for the driver (`postgres`, `mysql`, or `mariadb`), connection details, and a hidden password. The port defaults to the driver's standard port: 5432 for PostgreSQL and 3306 for MySQL and MariaDB. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
 
 ## Manage connections
 
 | Command                          | Purpose                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------- |
-| `data-mate db add`               | Save a PostgreSQL connection.                                             |
+| `data-mate db add`               | Save a PostgreSQL, MySQL, or MariaDB connection.                          |
 | `data-mate db list`              | View aliases and nonsecret settings.                                      |
 | `data-mate db describe [alias]`  | List application enums, tables, views, sequences, indexes, and functions. |
 | `data-mate db test [alias]`      | Test one connection, or all connections if omitted.                       |
@@ -75,6 +76,30 @@ Run `data-mate db add --help` for connection options. Passwords go through the f
 
 To copy connections to another machine, run `data-mate db export connections.csv`, then `data-mate db import connections.csv` there. Import asks for any passwords the file leaves empty.
 
+A PostgreSQL connection names one database. A MySQL or MariaDB connection names only a server account: it has no database setting, and agents reach every database the account's grants allow. In tool results, a MySQL or MariaDB database appears as a schema, and queries name tables as `database.table`.
+
+## Read-only accounts
+
+Data Mate checks the account's privileges when you save a connection, on every `db test`, and before a new connection pool is used. It rejects accounts that can write data, change definitions, manage accounts or roles, or write files. The server's own privileges decide what agents can see and query, so grant only what you intend to share.
+
+PostgreSQL:
+
+```sql
+CREATE ROLE analytics_reader LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE analytics TO analytics_reader;
+GRANT USAGE ON SCHEMA app TO analytics_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA app TO analytics_reader;
+```
+
+MySQL or MariaDB, where grants choose the reachable databases:
+
+```sql
+CREATE USER 'analytics_reader'@'%' IDENTIFIED BY '...';
+GRANT SELECT, SHOW VIEW ON analytics.* TO 'analytics_reader'@'%';
+```
+
+For MySQL and MariaDB, read-only privileges include `SELECT`, `SHOW VIEW`, `SHOW DATABASES`, `EXECUTE`, `PROCESS`, `LOCK TABLES`, replication monitoring, and `SHOW_ROUTINE` (MySQL) or `SHOW CREATE ROUTINE` (MariaDB) to read routine source. Any other privilege is rejected, including `CREATE TEMPORARY TABLES`, as are roles that hold one. Never grant `SELECT` on the `mysql` system database, which exposes password hashes. Use TLS or SSH for connections beyond the local machine.
+
 ## What agents can do
 
 | MCP tool           | Capability                                                                            |
@@ -85,6 +110,11 @@ To copy connections to another machine, run `data-mate db export connections.csv
 | `list_objects`     | Browse routines, types, and sequences.                                                |
 | `describe_object`  | Read routine source, enum labels, type details, and sequence configuration.           |
 | `query`            | Run one read statement with optional parameters.                                      |
+
+Results follow each connection's database, reported by `list_connections`:
+
+- PostgreSQL lists routines, types, and sequences, and reports identity columns, triggers, and row-security policies. Queries use `$1` placeholders and schema-qualified table names.
+- MySQL and MariaDB list functions and procedures, and MariaDB also lists sequences. Table descriptions report `AUTO_INCREMENT`, `ON UPDATE`, and the storage engine. MySQL shows triggers only to accounts with the `TRIGGER` privilege, which read-only accounts lack, so they are omitted. Queries use `?` placeholders and `database.table` names.
 
 MCP tools cannot edit connections or retrieve saved passwords.
 

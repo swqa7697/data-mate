@@ -12,20 +12,48 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$"
           },
           "driver": {
-            "const": "postgres"
+            "type": "string",
+            "enum": [
+              "postgres",
+              "mysql",
+              "mariadb"
+            ]
           },
           "database": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^[^\\x00]+$"
+            "pattern": "^[^\\x00]+$",
+            "description": "PostgreSQL only: the profile's database. MySQL and MariaDB connections reach every database their grants allow."
           }
         },
         "required": [
           "alias",
-          "driver",
-          "database"
+          "driver"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "postgres"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "database"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "database"
+                ]
+              }
+            }
+          }
+        ]
       },
       "maxItems": 128
     }

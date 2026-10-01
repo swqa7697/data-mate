@@ -128,7 +128,7 @@ func transportAcceptance(t *testing.T, p config.Profile, password, fixtureRoot s
 			t.Fatal("route did not recover", err)
 		}
 		// Idle transports and credentials must be retired with their pool.
-		d.Invalidate(profile.ID)
+		d.pools.Invalidate(profile.ID)
 		deadline := time.NewTimer(3 * time.Second)
 		for peer.Active() != 0 {
 			select {
@@ -138,7 +138,7 @@ func transportAcceptance(t *testing.T, p config.Profile, password, fixtureRoot s
 			}
 		}
 		deadline.Stop()
-		d.Close()
+		d.pools.Close()
 		peer.Close()
 		t.Logf("P6 %s: plaintext/TLS query, read-only rejection, bad CA/hostname, database cancellation and idle retirement passed", kind)
 	}
