@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/database/pool"
 )
 
 func profile() config.Profile {
@@ -25,12 +27,18 @@ func profile() config.Profile {
 }
 func driver(t *testing.T) *Driver {
 	t.Helper()
-	d, err := New()
+	return driverWith(t, pool.Options{})
+}
+
+// driverWith binds a driver to its own registry, closed when the test ends.
+func driverWith(t *testing.T, o pool.Options) *Driver {
+	t.Helper()
+	r, err := pool.New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(d.Close)
-	return d
+	t.Cleanup(r.Close)
+	return New(r)
 }
 func requireCode(t *testing.T, err error, code contracts.Code) {
 	t.Helper()
@@ -252,7 +260,7 @@ func TestPostgresIntegration(t *testing.T) {
 	fresh := driver(t)
 	_, err = fresh.ListTables(t.Context(), access, database.PageRequest{Cursor: firstCursor})
 	requireCode(t, err, contracts.StaleCursor)
-	d.Invalidate(p.ID)
+	d.pools.Invalidate(p.ID)
 	_, err = d.ListTables(t.Context(), access, database.PageRequest{Cursor: firstCursor})
 	requireCode(t, err, contracts.StaleCursor)
 	sql("CREATE TABLE app.future(id int); GRANT SELECT ON app.future TO reader")
@@ -313,11 +321,8 @@ func TestPostgresIntegration(t *testing.T) {
 		ninth <- err
 	}()
 	for {
-		d.mu.Lock()
-		pool := d.pools[p.ID]
-		queued := pool != nil && pool.users == 9 && len(pool.slots) == 8
-		d.mu.Unlock()
-		if queued {
+		s := d.pools.Stats(p.ID)
+		if s.Users == 9 && s.Slots == 8 {
 			break
 		}
 		select {
@@ -340,10 +345,8 @@ func TestPostgresIntegration(t *testing.T) {
 	if _, err := d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 		t.Fatal("pool reuse after saturation", err)
 	}
-	d.mu.Lock()
-	pool := d.pools[p.ID]
-	connections, users := len(pool.idle), pool.users
-	d.mu.Unlock()
+	stats := d.pools.Stats(p.ID)
+	connections, users := stats.Idle, stats.Users
 	if connections == 0 || connections > 8 || users != 0 {
 		t.Fatal("pool leak")
 	}
@@ -375,7 +378,7 @@ func TestPostgresIntegration(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("operation did not start")
 	}
-	d.Invalidate(p.ID)
+	d.pools.Invalidate(p.ID)
 	select {
 	case err := <-finished:
 		requireCode(t, err, contracts.Cancelled)
@@ -388,18 +391,13 @@ func TestPostgresIntegration(t *testing.T) {
 	if _, err = d.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
 		t.Fatal(err)
 	}
-	// Advance the existing idle timer directly; no five-minute wall-clock sleep.
-	d.mu.Lock()
-	d.pools[p.ID].timer.Reset(0)
-	d.mu.Unlock()
+	// A short idle TTL retires an unused pool without a five-minute wall-clock sleep.
+	idle := driverWith(t, pool.Options{IdleTTL: 10 * time.Millisecond})
+	if _, err = idle.Query(t.Context(), access, database.QueryRequest{SQL: "SELECT 1"}); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		d.mu.Lock()
-		_, present := d.pools[p.ID]
-		d.mu.Unlock()
-		if !present {
-			break
-		}
+	for idle.pools.Stats(p.ID).Present {
 		if time.Now().After(deadline) {
 			t.Fatal("idle pool not retired")
 		}
@@ -412,13 +410,10 @@ func TestPostgresIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d.mu.Lock()
-	countPools := len(d.pools)
-	d.mu.Unlock()
-	if countPools != 16 {
+	if d.pools.Len() != 16 {
 		t.Fatal("idle pool eviction failed")
 	}
-	d.Close()
+	d.pools.Close()
 	_, err = d.Test(t.Context(), access)
 	requireCode(t, err, contracts.ServiceUnavailable)
 }
@@ -475,7 +470,14 @@ func accountAcceptance(t *testing.T, d *Driver, a database.Access, version int, 
 func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql func(string, ...any)) {
 	t.Helper()
 	d := driver(t)
-	a, rev, err := normalized(a)
+	var openedMu sync.Mutex
+	var opened []*pgx.Conn
+	d.connected = func(c *pgx.Conn) {
+		openedMu.Lock()
+		opened = append(opened, c)
+		openedMu.Unlock()
+	}
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +494,7 @@ func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql
 	failures := make(chan error, 8)
 	for range 8 {
 		go func() {
-			_, _, release, e := d.checkout(t.Context(), a, rev, nil)
+			_, _, release, e := d.checkout(t.Context(), d.pools, a, rev, nil)
 			if e == nil {
 				releases <- release
 			}
@@ -524,10 +526,10 @@ func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql
 	if audits() != before+2 {
 		t.Fatal("fresh diagnostic reused pool approval")
 	}
-	d.mu.Lock()
-	p := d.pools[a.Profile.ID]
-	connections := append([]*pgx.Conn(nil), p.idle...)
-	d.mu.Unlock()
+	// The first eight connections opened belong to the pool; close them client-side.
+	openedMu.Lock()
+	connections := append([]*pgx.Conn(nil), opened...)
+	openedMu.Unlock()
 	closeConn(connections[0])
 	if err = query(); err != nil {
 		t.Fatal("partial disconnect lost pool approval", err)
@@ -557,7 +559,7 @@ func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql
 		t.Fatal("routine modified persistent data", err)
 	}
 	// Retire a generation while its audit is blocked by an owned catalog lock.
-	d.Invalidate(a.Profile.ID)
+	d.pools.Invalidate(a.Profile.ID)
 	lock, err := admin.Begin(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -572,11 +574,8 @@ func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		d.mu.Lock()
-		p := d.pools[a.Profile.ID]
-		pending := p != nil && p.validation != nil && p.users == 2
-		d.mu.Unlock()
-		if pending {
+		s := d.pools.Stats(a.Profile.ID)
+		if s.Validating && s.Users == 2 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -584,7 +583,7 @@ func poolAccountAcceptance(t *testing.T, a database.Access, admin *pgx.Conn, sql
 		}
 		runtime.Gosched()
 	}
-	d.Invalidate(a.Profile.ID)
+	d.pools.Invalidate(a.Profile.ID)
 	if err = lock.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -613,13 +612,14 @@ func readPathMeasurements(t *testing.T, access database.Access, sql func(string,
 	defer sql("DROP SCHEMA measurement CASCADE")
 	started := time.Now()
 	for trial := range 5 {
-		d, err := New()
+		r, err := pool.New(pool.Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
+		d := New(r)
 		validationStarted := time.Now()
 		if _, err := d.Test(t.Context(), access); err != nil {
-			d.Close()
+			r.Close()
 			t.Fatal(err)
 		}
 		t.Logf("MEASURE operation=validation trial=%d iteration=0 ns=%d", trial, time.Since(validationStarted).Nanoseconds())
@@ -633,7 +633,7 @@ func readPathMeasurements(t *testing.T, access database.Access, sql func(string,
 				}
 				elapsed := time.Since(begin).Nanoseconds()
 				if err != nil {
-					d.Close()
+					r.Close()
 					t.Fatal(err)
 				}
 				if operation == "query" && iteration == 0 {
@@ -644,7 +644,7 @@ func readPathMeasurements(t *testing.T, access database.Access, sql func(string,
 				}
 			}
 		}
-		d.Close()
+		r.Close()
 		if trial >= 2 && time.Since(started) > 4*time.Minute {
 			break
 		}

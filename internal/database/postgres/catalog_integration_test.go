@@ -87,7 +87,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			}
 			if s.Name == "picker" {
 				foundPicker = true
-				if !reflect.DeepEqual(s.Indexes, []database.CatalogName{{Name: "column_idx"}, {Name: "partitioned_idx"}, {Name: "unreadable_pkey"}}) {
+				if !reflect.DeepEqual(s.Indexes, []database.IndexName{{Name: "column_idx"}, {Name: "partitioned_idx"}, {Name: "unreadable_pkey"}}) {
 					t.Fatalf("ordinary, partitioned or constraint index missing: %+v", s.Indexes)
 				}
 				// Overloads collapse to one name, including extension functions;

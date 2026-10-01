@@ -12,12 +12,12 @@ import (
 // DescribeDatabase lists the role-accessible catalog for the user,
 // with one statement that preserves empty schemas and a consistent catalog.
 func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		return database.DatabaseDescription{}, err
 	}
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		// A left join preserves empty schemas in the same catalog snapshot.
 		rows, err := tx.Query(ctx, `WITH schemas AS MATERIALIZED (
  SELECT oid,nspname FROM pg_catalog.pg_namespace
@@ -46,7 +46,7 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 				return err
 			}
 			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
-				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}, Functions: []database.CatalogName{}})
+				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.IndexName{}, Functions: []database.CatalogName{}})
 			}
 			if name != nil {
 				i := len(out.Schemas) - 1
@@ -56,7 +56,7 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 				case "S":
 					out.Schemas[i].Sequences = append(out.Schemas[i].Sequences, database.CatalogName{Name: *name})
 				case "i", "I":
-					out.Schemas[i].Indexes = append(out.Schemas[i].Indexes, database.CatalogName{Name: *name})
+					out.Schemas[i].Indexes = append(out.Schemas[i].Indexes, database.IndexName{Name: *name})
 				case "function":
 					out.Schemas[i].Functions = append(out.Schemas[i].Functions, database.CatalogName{Name: *name})
 				default:

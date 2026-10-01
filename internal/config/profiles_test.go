@@ -62,11 +62,14 @@ func TestProfiles(t *testing.T) {
 		"alias uppercase":     func(c map[string]any) { c["alias"] = "Analytics" },
 		"alias leading digit": func(c map[string]any) { c["alias"] = "1bad" },
 		"invalid uuid":        func(c map[string]any) { c["id"] = "no" },
-		"unknown driver":      func(c map[string]any) { c["driver"] = "mysql" },
-		"port zero":           func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
-		"port high":           func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
-		"embedded secret":     func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
-		"removed scope":       func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
+		"unknown driver":      func(c map[string]any) { c["driver"] = "oracle" },
+		// PostgreSQL profiles name one database; MySQL-family accounts name none.
+		"postgres without database": func(c map[string]any) { delete(c["connection"].(map[string]any), "database") },
+		"mysql with database":       func(c map[string]any) { c["driver"] = "mysql" },
+		"port zero":                 func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
+		"port high":                 func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
+		"embedded secret":           func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
+		"removed scope":             func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
 		"tls ca disabled": func(c map[string]any) {
 			c["transport"].(map[string]any)["tls"] = map[string]any{"mode": "disabled", "ca_file": "/tmp/test.pem"}
 		},
@@ -101,6 +104,19 @@ func TestProfiles(t *testing.T) {
 				t.Fatal("secret in error")
 			}
 		})
+	}
+	for _, driver := range []string{"mysql", "mariadb"} {
+		var v map[string]any
+		if err := json.Unmarshal(original, &v); err != nil {
+			t.Fatal(err)
+		}
+		c := v["connections"].([]any)[0].(map[string]any)
+		c["driver"] = driver
+		delete(c["connection"].(map[string]any), "database")
+		b, _ := json.Marshal(v)
+		if p, _, err := DecodeProfiles(bytes.NewReader(b)); err != nil || p.Connections[0].Connection.Database != "" {
+			t.Fatalf("%s profile without database: %v", driver, err)
+		}
 	}
 	for _, b := range []string{string(original) + "{}", strings.Replace(string(original), `"version": 1`, `"version": 1, "version": 1`, 1), strings.Repeat(" ", MaxProfileBytes+1)} {
 		if _, _, err := DecodeProfiles(strings.NewReader(b)); err == nil {

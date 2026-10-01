@@ -94,18 +94,19 @@ type blockedDiagnostics struct {
 	release chan struct{}
 }
 
-func (d *blockedDiagnostics) Invalidate(string) {}
-func (d *blockedDiagnostics) Close()            {}
+func (d *blockedDiagnostics) Invalidate(string)                    {}
+func (d *blockedDiagnostics) Close()                               {}
+func (d *blockedDiagnostics) ValidateProfile(config.Profile) error { return nil }
 func (d *blockedDiagnostics) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
 	_, err := d.Test(ctx, a)
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	if d.largeDescription.Load() {
 		functions := make([]database.CatalogName, 140000)
 		prefix := strings.Repeat("x", 56)
 		for i := range functions {
 			functions[i].Name = prefix + strconv.Itoa(i)
 		}
-		out.Schemas = append(out.Schemas, database.SchemaDescription{Name: "wide", Functions: functions, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}})
+		out.Schemas = append(out.Schemas, database.SchemaDescription{Name: "wide", Functions: functions, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.IndexName{}})
 	}
 	return out, err
 }

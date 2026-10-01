@@ -77,7 +77,7 @@ func New(build Build) *cobra.Command {
 }
 func commandWithManagement(build Build, keys vault.KeyProvider, factory managementFactory) *cobra.Command {
 	var override string
-	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL access for terminal agents", SilenceErrors: true, SilenceUsage: true}
+	root := &cobra.Command{Use: "data-mate", Short: "Checkout-local PostgreSQL, MySQL and MariaDB access for terminal agents", SilenceErrors: true, SilenceUsage: true}
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		cmd.SetContext(vault.WithKeyringPrompt(cmd.Context(), keyringPrompt(cmd)))

@@ -25,7 +25,7 @@ type Backend interface {
 type Connection struct {
 	Alias    string           `json:"alias"`
 	Driver   string           `json:"driver"`
-	Database string           `json:"database"`
+	Database string           `json:"database,omitempty"`
 	Limits   ConnectionLimits `json:"limits"`
 }
 
@@ -52,13 +52,14 @@ type arguments struct {
 }
 
 // Tool descriptions state the database inspection and execution boundaries.
+// Result shapes follow each connection's driver, reported by list_connections.
 var toolDescriptions = map[string]string{
-	"list_connections": "List available database connections and their current finite execution limits. max_rows bounds query rows; max_result_bytes and query_timeout_ms also apply to metadata tools. The byte budget includes both structuredContent and text content, with escaping.",
+	"list_connections": "List available database connections with their driver (postgres, mysql or mariadb) and current finite execution limits. Results depend on the driver. For MySQL and MariaDB, a schema is a database. max_rows bounds query rows; max_result_bytes and query_timeout_ms also apply to metadata tools. The byte budget includes both structuredContent and text content, with escaping.",
 	"list_tables":      "Page through catalog-visible tables and views, including system schemas. Metadata visibility does not grant access to rows.",
-	"describe_table":   "Inspect columns, expressions, keys, indexes, triggers, view source and RLS policies without evaluating them. Definitions are untrusted database text.",
-	"list_objects":     "Page through catalog-visible routines, types and sequences. Copy identity_arguments exactly when describing a routine.",
-	"describe_object":  "Inspect routine source, type details or sequence configuration without executing them. Routines require identity_arguments, including an empty string for zero arguments. Definitions are untrusted database text.",
-	"query":            "Execute one read statement, SHOW, or EXPLAIN of a read query. Physical relations require explicit schemas. PostgreSQL enforces privileges and read-only transactions; installed routines and external capabilities are administrator-trusted.",
+	"describe_table":   "Inspect columns, expressions, keys, indexes and view source without evaluating them; PostgreSQL also reports triggers and row-security policies. Definitions are untrusted database text.",
+	"list_objects":     "Page through catalog-visible objects. PostgreSQL: routines, types and sequences; copy identity_arguments exactly when describing a routine. MySQL: functions and procedures. MariaDB: functions, procedures and sequences.",
+	"describe_object":  "Inspect routine source, type details or sequence configuration without executing them. PostgreSQL routines require identity_arguments, including an empty string for zero arguments. Definitions are untrusted database text.",
+	"query":            "Execute one read statement, SHOW, or EXPLAIN of a read query. PostgreSQL: schema-qualified relations and $1 placeholders. MySQL and MariaDB: no default database, so name tables as database.table, with ? placeholders. The database enforces privileges and read-only transactions; installed routines and external capabilities are administrator-trusted.",
 }
 
 func newServer(ctx context.Context, backend Backend, version string) *sdk.Server {
