@@ -12,12 +12,12 @@ import (
 // DescribeDatabase lists the role-accessible catalog for the user,
 // with one statement that preserves empty schemas and a consistent catalog.
 func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		return database.DatabaseDescription{}, err
 	}
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		// At least one row per schema; the extra row detects overflow without
 		// materializing an unbounded catalog. A left join preserves empty schemas.
 		rows, err := tx.Query(ctx, `WITH schemas AS MATERIALIZED (
@@ -49,7 +49,7 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 			}
 			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
 				count++
-				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}, Functions: []database.CatalogName{}})
+				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.IndexName{}, Functions: []database.CatalogName{}})
 			}
 			if name != nil {
 				count++
@@ -60,14 +60,14 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 				case "S":
 					out.Schemas[i].Sequences = append(out.Schemas[i].Sequences, database.CatalogName{Name: *name})
 				case "i", "I":
-					out.Schemas[i].Indexes = append(out.Schemas[i].Indexes, database.CatalogName{Name: *name})
+					out.Schemas[i].Indexes = append(out.Schemas[i].Indexes, database.IndexName{Name: *name})
 				case "function":
 					out.Schemas[i].Functions = append(out.Schemas[i].Functions, database.CatalogName{Name: *name})
 				default:
 					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: *name, Kind: kind(*relationKind)})
 				}
 			}
-			if count > maxCatalogObjects {
+			if count > database.MaxCatalogObjects {
 				return database.Fail(contracts.ResourceLimit, "database description exceeds 4096 schemas and objects", false)
 			}
 		}

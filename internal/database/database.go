@@ -1,4 +1,5 @@
-// Package database defines the shared driver boundary used by CLI and MCP.
+// Package database defines the shared driver boundary used by CLI and MCP, and
+// the driver-neutral bounds, codecs and diagnostics every driver implements.
 package database
 
 import (
@@ -76,10 +77,12 @@ type Stage struct {
 
 // DatabaseDescription is the complete, bounded user-facing catalog. It is never
 // an MCP result; it includes empty application schemas but excludes system schemas.
+// MySQL-family profiles have no database; their schemas are the visible databases.
 type DatabaseDescription struct {
 	Version  int                 `json:"version"`
 	Alias    string              `json:"alias"`
-	Database string              `json:"database"`
+	Driver   string              `json:"driver"`
+	Database string              `json:"database,omitempty"`
 	Schemas  []SchemaDescription `json:"schemas"`
 }
 
@@ -89,7 +92,7 @@ type SchemaDescription struct {
 	Tables    []RelationName `json:"tables"`
 	Enums     []CatalogName  `json:"enums"`
 	Sequences []CatalogName  `json:"sequences"`
-	Indexes   []CatalogName  `json:"indexes"`
+	Indexes   []IndexName    `json:"indexes"`
 	Functions []CatalogName  `json:"functions"`
 }
 
@@ -98,13 +101,20 @@ type CatalogName struct {
 	Name string `json:"name"`
 }
 
+// IndexName identifies an index; Table is set where index names are only
+// unique per table, as in MySQL and MariaDB.
+type IndexName struct {
+	Name  string `json:"name"`
+	Table string `json:"table,omitempty"`
+}
+
 // RelationName describes a relation without reading its columns or rows.
 type RelationName struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
 }
 
-// Table identifies a catalog-visible relation.
+// Table identifies a catalog-visible relation; Kind uses the driver's vocabulary.
 type Table struct {
 	Schema string `json:"schema"`
 	Name   string `json:"name"`
@@ -121,18 +131,19 @@ type PageRequest struct {
 // TablePage is the bounded list_tables result.
 type TablePage struct {
 	Connection string  `json:"connection"`
+	Driver     string  `json:"driver"`
 	Tables     []Table `json:"tables"`
 	NextCursor *string `json:"next_cursor"`
 }
 
-// Column exposes type metadata and stored expressions without evaluating them.
+// Column holds the column fields every driver describes; drivers embed it to add
+// their native attributes. Stored expressions are exposed, never evaluated.
 type Column struct {
 	Name      string  `json:"name"`
 	Type      string  `json:"type"`
 	Nullable  bool    `json:"nullable"`
 	Default   *string `json:"default"`
 	Generated *string `json:"generated"`
-	Identity  string  `json:"identity"`
 }
 
 // Key contains a primary or unique key without its server definition.
@@ -148,22 +159,24 @@ type Relationship struct {
 	TargetColumns []string     `json:"target_columns"`
 }
 
-// Description is the bounded describe_table result.
-type Description struct {
-	Connection       string         `json:"connection"`
-	Schema           string         `json:"schema"`
-	Table            string         `json:"table"`
-	Kind             string         `json:"kind"`
-	Columns          []Column       `json:"columns"`
-	Keys             []Key          `json:"keys"`
-	Relationships    []Relationship `json:"relationships"`
-	Constraints      []Definition   `json:"constraints"`
-	Indexes          []Definition   `json:"indexes"`
-	Triggers         []Trigger      `json:"triggers"`
-	Policies         []Policy       `json:"policies"`
-	ViewDefinition   *string        `json:"view_definition"`
-	RowSecurity      bool           `json:"row_security"`
-	ForceRowSecurity bool           `json:"force_row_security"`
+// RelationCore holds the describe_table fields every driver returns; drivers
+// embed it in their driver-shaped descriptions.
+type RelationCore struct {
+	Connection     string         `json:"connection"`
+	Driver         string         `json:"driver"`
+	Schema         string         `json:"schema"`
+	Table          string         `json:"table"`
+	Kind           string         `json:"kind"`
+	Keys           []Key          `json:"keys"`
+	Relationships  []Relationship `json:"relationships"`
+	Constraints    []Definition   `json:"constraints"`
+	Indexes        []Definition   `json:"indexes"`
+	ViewDefinition *string        `json:"view_definition"`
+}
+
+// NewRelationCore starts a description with empty, never-null collections.
+func NewRelationCore(a Access, schema, table string) RelationCore {
+	return RelationCore{Connection: a.Profile.Alias, Driver: a.Profile.Driver, Schema: schema, Table: table, Keys: []Key{}, Relationships: []Relationship{}, Constraints: []Definition{}, Indexes: []Definition{}}
 }
 
 // ResultColumn preserves result labels and optional value encoding.
@@ -191,15 +204,26 @@ type QueryResult struct {
 	ElapsedMS  int64          `json:"elapsed_ms"`
 }
 
-// Driver never accepts agent-controlled credentials or connection strings.
-type Driver interface {
+// Operations are the read-only operations one driver implements. Object pages
+// and descriptions are driver-shaped documents marshaled unchanged by callers;
+// only the owning driver reads their fields. No operation accepts
+// agent-controlled credentials or connection strings.
+type Operations interface {
+	ValidateProfile(config.Profile) error
 	Validate(Access) error
 	Test(context.Context, Access) (Readiness, error)
 	ListTables(context.Context, Access, PageRequest) (TablePage, error)
-	ListObjects(context.Context, Access, ObjectPageRequest) (ObjectPage, error)
-	DescribeObject(context.Context, Access, ObjectRequest) (ObjectDescription, error)
-	DescribeTable(context.Context, Access, config.Table) (Description, error)
+	ListObjects(context.Context, Access, ObjectPageRequest) (any, error)
+	DescribeObject(context.Context, Access, ObjectRequest) (any, error)
+	DescribeTable(context.Context, Access, config.Table) (any, error)
+	DescribeDatabase(context.Context, Access) (DatabaseDescription, error)
 	Query(context.Context, Access, QueryRequest) (QueryResult, error)
+}
+
+// Driver is the service boundary: driver operations plus the lifecycle of
+// shared pools, transports and cursors.
+type Driver interface {
+	Operations
 	Invalidate(string)
 	Close()
 }

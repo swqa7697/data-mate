@@ -43,7 +43,7 @@ test: ## Run isolated offline unit and regression tests
 test-race: ## Run the same suite with Go's race detector
 	@./scripts/test.sh -race
 
-test-integration: ## Run owned PostgreSQL 16/18 Docker fixtures (never in CI)
+test-integration: ## Run owned Docker fixtures for DB_DRIVER=postgres|mysql|mariadb (never in CI)
 	@./scripts/test-integration.sh
 
 release: ## Build signed production artifacts; macOS also notarizes (signing settings required)

@@ -36,7 +36,7 @@ func addCompletion(root *cobra.Command, override *string, build Build) {
 			callback := cobra.NoFileCompletions
 			switch f.Name {
 			case "driver":
-				callback = cobra.FixedCompletions([]string{"postgres"}, cobra.ShellCompDirectiveNoFileComp)
+				callback = cobra.FixedCompletions(config.Drivers, cobra.ShellCompDirectiveNoFileComp)
 			case "tls-ca":
 				callback = cobra.FixedCompletions([]string{"pem", "crt", "cer"}, cobra.ShellCompDirectiveFilterFileExt)
 			case "ssh-key-file":

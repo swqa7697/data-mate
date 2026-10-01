@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/swqa7697/data-mate/internal/config"
-	"github.com/swqa7697/data-mate/internal/database/postgres"
 	"github.com/swqa7697/data-mate/internal/mcp"
 	"github.com/swqa7697/data-mate/internal/vault"
 )
@@ -38,7 +37,7 @@ func serve(ctx context.Context, root config.Root, build Build, nonce string, key
 	if err != nil || !matching(job, r) || job.PID != os.Getpid() {
 		return ErrConflict
 	}
-	d, err := postgres.New()
+	d, err := NewDriver()
 	if err != nil {
 		return ErrStartup
 	}

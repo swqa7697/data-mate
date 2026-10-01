@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"github.com/swqa7697/data-mate/internal/vault"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -37,9 +38,12 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 		name, label string
 		value       *string
 	}{
-		{"driver", "Driver", &profile.Driver}, {"alias", "Alias", &profile.Alias}, {"host", "Host", &profile.Connection.Host},
+		{"driver", "Driver (" + strings.Join(config.Drivers, ", ") + ")", &profile.Driver}, {"alias", "Alias", &profile.Alias}, {"host", "Host", &profile.Connection.Host},
 		{"port", "Port", nil}, {"database", "Database", &profile.Connection.Database}, {"username", "Username", &profile.Connection.Username},
 	} {
+		if field.name == "database" && !config.NamesDatabase(profile.Driver) {
+			continue
+		}
 		missing := field.value != nil && *field.value == ""
 		if (fullForm && !changed(cmd, field.name)) || missing {
 			f, err := getForm()
@@ -62,6 +66,11 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 				profile.Connection.Port = n
 			} else {
 				*field.value = value
+			}
+		}
+		if field.name == "driver" {
+			if err := applyDriver(cmd, action, &profile, original); err != nil {
+				return profile, nil, err
 			}
 		}
 	}
@@ -168,4 +177,26 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 	}
 
 	return profile, patch, nil
+}
+
+// applyDriver validates the chosen driver and applies its defaults before the
+// remaining fields are collected. A port left at the previous driver's default
+// follows a driver change; MySQL-family profiles name no database, because
+// their accounts reach every database their grants allow.
+func applyDriver(cmd *cobra.Command, action string, p *config.Profile, original config.Profile) error {
+	if !slices.Contains(config.Drivers, p.Driver) {
+		return invalid("driver must be one of " + strings.Join(config.Drivers, ", "))
+	}
+	if !changed(cmd, "port") {
+		if p.Connection.Port == 0 || (action == "edit" && p.Driver != original.Driver && p.Connection.Port == config.DefaultPort(original.Driver)) {
+			p.Connection.Port = config.DefaultPort(p.Driver)
+		}
+	}
+	if !config.NamesDatabase(p.Driver) {
+		if changed(cmd, "database") {
+			return invalid(p.Driver + " profiles have no database; grants select the reachable databases and queries name tables as database.table")
+		}
+		p.Connection.Database = ""
+	}
+	return nil
 }

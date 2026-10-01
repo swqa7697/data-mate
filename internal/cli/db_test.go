@@ -377,6 +377,9 @@ func TestConnectionInputs(t *testing.T) {
 		{"fractional millisecond timeout", "", []string{"--passwordless", "--query-timeout", "1.5ms"}},
 		{"invalid limit", "", []string{"--passwordless", "--max-rows", "0"}},
 		{"no alias nonTTY", "", []string{"--passwordless", "--alias", ""}},
+		// MySQL-family accounts reach databases through grants; profiles name none.
+		{"mysql database", "", []string{"--passwordless", "--driver", "mysql"}},
+		{"unknown driver", "", []string{"--passwordless", "--driver", "oracle"}},
 	} {
 		root := privateRoot(t)
 		keys := &testKeys{}
@@ -411,6 +414,35 @@ func TestConnectionInputs(t *testing.T) {
 	if s.SSHPrivateKey != "" || s.ProxyPassword != "proxy-secret" {
 		t.Fatal("transport switch failed")
 	}
+	// Driver changes apply that driver's port and database rules.
+	command(t, root, keys, "", 0, "add", "--alias", "shop", "--host", "localhost", "--username", "reader", "--driver", "mysql", "--passwordless", "--yes")
+	shop := func() config.Connection {
+		t.Helper()
+		for _, c := range snapshot(t, root).Connections {
+			if c.Alias == "shop" {
+				return c.Connection
+			}
+		}
+		t.Fatal("shop profile missing")
+		return config.Connection{}
+	}
+	if c := shop(); c.Port != 3306 || c.Database != "" {
+		t.Fatalf("mysql defaults: %+v", c)
+	}
+	command(t, root, keys, "", 2, "edit", "shop", "--driver", "postgres", "--yes")
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "postgres", "--database", "app", "--yes")
+	if c := shop(); c.Port != 5432 || c.Database != "app" {
+		t.Fatalf("postgres switch: %+v", c)
+	}
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "mariadb", "--yes")
+	if c := shop(); c.Port != 3306 || c.Database != "" {
+		t.Fatalf("mariadb switch: %+v", c)
+	}
+	out, _ := command(t, root, keys, "", 0, "list", "--json")
+	if contracts.Validate("db-list.output", []byte(out)) != nil || strings.Contains(out, `"database":""`) {
+		t.Fatal("database-less listing contract", out)
+	}
+	command(t, root, keys, "", 0, "remove", "shop", "--yes")
 	// Change config as the preview is written: the confirmed stale mutation fails.
 	cmd := newCommand(Build{}, keys)
 	cmd.SetIn(strings.NewReader(""))

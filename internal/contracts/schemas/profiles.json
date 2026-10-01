@@ -19,7 +19,12 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$"
           },
           "driver": {
-            "const": "postgres"
+            "type": "string",
+            "enum": [
+              "postgres",
+              "mysql",
+              "mariadb"
+            ]
           },
           "connection": {
             "type": "object",
@@ -48,7 +53,6 @@
             "required": [
               "host",
               "port",
-              "database",
               "username"
             ],
             "additionalProperties": false
@@ -198,7 +202,38 @@
           "connection",
           "transport"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "postgres"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "connection": {
+                  "required": [
+                    "database"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "connection": {
+                  "not": {
+                    "required": [
+                      "database"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
       },
       "maxItems": 128
     }

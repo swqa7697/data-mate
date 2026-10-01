@@ -11,15 +11,15 @@ import (
 )
 
 // Approval is published only after this isolated transaction has been cleaned up.
-func validateAccountConnection(ctx context.Context, c *pgx.Conn, a database.Access, trace *diagnosticTrace) (result error) {
+func validateAccountConnection(ctx context.Context, c *pgx.Conn, a database.Access, trace *database.Trace) (result error) {
 	defer func() {
 		if exceeded(c) {
-			result = database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
+			result = messageLimit()
 		}
 	}()
-	trace.pass("dial")
-	trace.pass("authentication")
-	trace.start("version")
+	trace.Pass("dial")
+	trace.Pass("authentication")
+	trace.Start("version")
 	tx, err := c.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return safeError(err)
@@ -49,7 +49,7 @@ func validateAccountConnection(ctx context.Context, c *pgx.Conn, a database.Acce
 }
 
 // This inexpensive check remains per transaction; account audits belong to pools.
-func checkReadOnlyObserved(ctx context.Context, tx pgx.Tx, expected string, trace *diagnosticTrace) (int, error) {
+func checkReadOnlyObserved(ctx context.Context, tx pgx.Tx, expected string, trace *database.Trace) (int, error) {
 	var version int
 	var actual, session string
 	var readOnly bool
@@ -61,10 +61,10 @@ func checkReadOnlyObserved(ctx context.Context, tx pgx.Tx, expected string, trac
 		return 0, database.Fail(contracts.QueryUnsupported, "PostgreSQL 16 or newer is required", false)
 	}
 	if trace != nil {
-		trace.version = version
+		trace.Version = version
 	}
-	trace.pass("version")
-	trace.start("read_only")
+	trace.Pass("version")
+	trace.Start("read_only")
 	if actual != expected || session != expected {
 		return 0, database.Fail(contracts.PermissionDenied, "authenticated role does not match the configured account", false)
 	}

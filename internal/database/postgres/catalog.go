@@ -2,9 +2,6 @@ package postgres
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"unicode/utf8"
@@ -13,9 +10,8 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/database/pool"
 )
-
-const maxCatalogObjects = 4096
 
 // Catalog reads use PostgreSQL catalog permissions, independent of row grants.
 const relationKindSQL = `c.relkind IN ('r','p','v','m','f')`
@@ -39,53 +35,9 @@ func kind(s string) string {
 	return "other"
 }
 
-type cursor struct {
-	Version    int
-	Tool       string
-	KindFilter string
-	Kind       string
-	OID        uint32
-	ID         string
-	Revision   config.Revision
-	Filter     string
-	Schema     string
-	Name       string
-	Epoch      uint64
-}
-
-func (d *Driver) encodeCursor(c cursor) string {
-	b, _ := json.Marshal(c)
-	mac := hmac.New(sha256.New, d.key[:])
-	mac.Write(b)
-	return base64.RawURLEncoding.EncodeToString(append(b, mac.Sum(nil)...))
-}
-func (d *Driver) decodeCursor(s string, want cursor) (cursor, error) {
-	bad := func() (cursor, error) {
-		return cursor{}, database.Fail(contracts.StaleCursor, "metadata cursor is invalid or stale", false)
-	}
-	if len(s) > 2048 {
-		return bad()
-	}
-	b, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil || len(b) < 33 {
-		return bad()
-	}
-	body, sig := b[:len(b)-32], b[len(b)-32:]
-	mac := hmac.New(sha256.New, d.key[:])
-	mac.Write(body)
-	if !hmac.Equal(sig, mac.Sum(nil)) {
-		return bad()
-	}
-	var c cursor
-	if json.Unmarshal(body, &c) != nil || c.Version != 1 || c.Tool != want.Tool || c.KindFilter != want.KindFilter || c.ID != want.ID || c.Revision != want.Revision || c.Filter != want.Filter || c.Epoch != want.Epoch || !validName(c.Schema) || !validName(c.Name) {
-		return bad()
-	}
-	return c, nil
-}
-
 // ListTables returns a keyset page.
 func (d *Driver) ListTables(ctx context.Context, a database.Access, req database.PageRequest) (database.TablePage, error) {
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		return database.TablePage{}, err
 	}
@@ -95,17 +47,14 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	if req.PageSize < 1 || req.PageSize > 500 || (req.Schema != "" && !validName(req.Schema)) {
 		return database.TablePage{}, database.Fail(contracts.InvalidArgument, "invalid metadata page request", false)
 	}
-	d.mu.Lock()
-	epoch := d.epoch
-	d.mu.Unlock()
-	pos := cursor{Version: 1, Tool: "list_tables", ID: a.Profile.ID, Revision: rev, Filter: req.Schema, Epoch: epoch}
+	pos := pool.Cursor{Version: 1, Tool: "list_tables", ID: a.Profile.ID, Revision: rev, Filter: req.Schema, Epoch: d.pools.Epoch()}
 	if req.Cursor != "" {
-		pos, err = d.decodeCursor(req.Cursor, pos)
+		pos, err = d.pools.Decode(req.Cursor, pos, validName)
 		if err != nil {
 			return database.TablePage{}, err
 		}
 	}
-	out := database.TablePage{Connection: a.Profile.Alias, Tables: []database.Table{}}
+	out := database.TablePage{Connection: a.Profile.Alias, Driver: a.Profile.Driver, Tables: []database.Table{}}
 	err = d.run(ctx, a, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		args := []any{req.Schema, pos.Schema, pos.Name, req.PageSize + 1}
 		rows, err := tx.Query(ctx, `SELECT n.nspname,c.relname,c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE `+relationKindSQL+`
@@ -137,10 +86,10 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 			last := out.Tables[len(out.Tables)-1]
 			pos.Schema = last.Schema
 			pos.Name = last.Name
-			s := d.encodeCursor(pos)
+			s := d.pools.Encode(pos)
 			out.NextCursor = &s
 		}
-		return payloadBound(out, a)
+		return database.PayloadBound(out, a)
 	})
 	if err != nil {
 		return database.TablePage{}, err
@@ -148,7 +97,7 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	return out, nil
 }
 
-func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget) ([]database.Column, error) {
+func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *database.MetadataBudget) ([]Column, error) {
 	rows, err := tx.Query(ctx, `SELECT a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),NOT a.attnotnull,
  CASE WHEN a.attgenerated='' THEN pg_catalog.pg_get_expr(d.adbin,d.adrelid) END,
  CASE WHEN a.attgenerated<>'' THEN pg_catalog.pg_get_expr(d.adbin,d.adrelid) END,a.attidentity::text
@@ -157,13 +106,13 @@ func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget)
 		return nil, err
 	}
 	defer rows.Close()
-	out := []database.Column{}
+	out := []Column{}
 	for rows.Next() {
-		var c database.Column
+		var c Column
 		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable, &c.Default, &c.Generated, &c.Identity); err != nil {
 			return nil, err
 		}
-		if err := budget.add(c); err != nil {
+		if err := budget.Add(c); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -175,16 +124,16 @@ func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget)
 }
 
 // DescribeTable reads stored definitions including foreign-key endpoints.
-func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name config.Table) (database.Description, error) {
+func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name config.Table) (Description, error) {
 	if !validName(name.Schema) || !validName(name.Name) {
-		return database.Description{}, database.Fail(contracts.InvalidArgument, "invalid relation name", false)
+		return Description{}, database.Fail(contracts.InvalidArgument, "invalid relation name", false)
 	}
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
-		return database.Description{}, err
+		return Description{}, err
 	}
-	out := database.Description{Connection: a.Profile.Alias, Schema: name.Schema, Table: name.Name, Columns: []database.Column{}, Keys: []database.Key{}, Relationships: []database.Relationship{}, Constraints: []database.Definition{}, Indexes: []database.Definition{}, Triggers: []database.Trigger{}, Policies: []database.Policy{}}
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
+	out := Description{RelationCore: database.NewRelationCore(a, name.Schema, name.Name), Columns: []Column{}, Triggers: []Trigger{}, Policies: []Policy{}}
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		args := []any{name.Schema, name.Name}
 		var oid uint32
 		var k string
@@ -195,7 +144,7 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 		if err != nil {
 			return err
 		}
-		budget := metadataBudget{limit: a.Profile.Limits.MaxResultBytes}
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
 		cols, err := columns(ctx, tx, oid, &budget)
 		if err != nil {
 			return err
@@ -208,14 +157,14 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 		if err = tableDefinitions(ctx, tx, oid, &out, &budget); err != nil {
 			return err
 		}
-		return payloadBound(out, a)
+		return database.PayloadBound(out, a)
 	})
 	if err != nil {
-		return database.Description{}, err
+		return Description{}, err
 	}
 	return out, nil
 }
-func constraints(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description) error {
+func constraints(ctx context.Context, tx pgx.Tx, oid uint32, out *Description) error {
 	args := []any{oid}
 	rows, err := tx.Query(ctx, `SELECT k.contype::text,
  ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=x.num ORDER BY x.ord),
@@ -231,7 +180,7 @@ func constraints(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Descr
 	budget := 0
 	for rows.Next() {
 		count++
-		if count > maxCatalogObjects {
+		if count > database.MaxCatalogObjects {
 			return database.Fail(contracts.ResourceLimit, "constraint count exceeds limit", false)
 		}
 		var k, s, n string

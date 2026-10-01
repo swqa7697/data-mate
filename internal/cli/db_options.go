@@ -20,12 +20,12 @@ import (
 func profileFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	for _, flag := range []struct{ name, value, help string }{
-		{"driver", "postgres", "Database driver"}, {"alias", "", "Connection alias"}, {"host", "", "Database host"}, {"database", "", "Database name"}, {"username", "", "Database username"},
+		{"driver", "postgres", "Database driver: postgres, mysql or mariadb"}, {"alias", "", "Connection alias"}, {"host", "", "Database host"}, {"database", "", "Database name (postgres only)"}, {"username", "", "Database username"},
 		{"tls-ca", "", "Absolute CA certificate path"}, {"ssh-host", "", "SSH jump host"}, {"ssh-user", "", "SSH username"}, {"ssh-key-file", "", "Import private key into the vault"}, {"proxy", "", "SOCKS5 endpoint without credentials"}, {"proxy-user", "", "Proxy username"},
 	} {
 		f.String(flag.name, flag.value, flag.help)
 	}
-	f.Int("port", 5432, "Database port")
+	f.Int("port", 0, "Database port (default 5432 for postgres, 3306 for mysql and mariadb)")
 	f.Int("ssh-port", 22, "SSH port")
 	f.Bool("ssh-enroll", false, "Interactively verify and save an SSH host fingerprint")
 	f.Duration("query-timeout", config.DefaultQueryTimeout, "Query timeout (1ms to 5m)")

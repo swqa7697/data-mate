@@ -11,25 +11,28 @@
       "enum": [
         "routine",
         "type",
-        "sequence"
+        "sequence",
+        "function",
+        "procedure"
       ]
     },
     "schema": {
       "type": "string",
       "minLength": 1,
       "pattern": "^[^\\x00]+$",
-      "maxLength": 63
+      "maxLength": 64
     },
     "name": {
       "type": "string",
       "minLength": 1,
       "pattern": "^[^\\x00]+$",
-      "maxLength": 63
+      "maxLength": 64
     },
     "identity_arguments": {
       "type": "string",
       "maxLength": 65536,
-      "pattern": "^[^\\x00]*$"
+      "pattern": "^[^\\x00]*$",
+      "description": "PostgreSQL routines only: the exact identity_arguments from list_objects, including an empty string for zero arguments."
     }
   },
   "required": [
@@ -55,7 +58,9 @@
         "kind": {
           "enum": [
             "type",
-            "sequence"
+            "sequence",
+            "function",
+            "procedure"
           ]
         }
       },

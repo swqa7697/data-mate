@@ -9,6 +9,14 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,62}$"
     },
+    "driver": {
+      "type": "string",
+      "enum": [
+        "postgres",
+        "mysql",
+        "mariadb"
+      ]
+    },
     "database": {
       "type": "string",
       "minLength": 1
@@ -22,7 +30,7 @@
           "name": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 63,
+            "maxLength": 64,
             "pattern": "^[^\\x00]+$"
           },
           "tables": {
@@ -34,7 +42,7 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 63,
+                  "maxLength": 64,
                   "pattern": "^[^\\x00]+$"
                 },
                 "kind": {
@@ -43,7 +51,8 @@
                     "partitioned_table",
                     "view",
                     "materialized_view",
-                    "foreign_table"
+                    "foreign_table",
+                    "system_versioned_table"
                   ]
                 }
               },
@@ -63,7 +72,7 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 63,
+                  "maxLength": 64,
                   "pattern": "^[^\\x00]+$"
                 }
               },
@@ -82,7 +91,7 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 63,
+                  "maxLength": 64,
                   "pattern": "^[^\\x00]+$"
                 }
               },
@@ -101,8 +110,14 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 63,
+                  "maxLength": 64,
                   "pattern": "^[^\\x00]+$"
+                },
+                "table": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
                 }
               },
               "required": [
@@ -120,7 +135,7 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 63,
+                  "maxLength": 64,
                   "pattern": "^[^\\x00]+$"
                 }
               },
@@ -146,8 +161,31 @@
   "required": [
     "version",
     "alias",
-    "database",
+    "driver",
     "schemas"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "driver": {
+            "const": "postgres"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "database"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "database"
+          ]
+        }
+      }
+    }
+  ]
 }

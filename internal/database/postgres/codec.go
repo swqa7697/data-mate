@@ -1,62 +1,18 @@
 package postgres
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"math"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
 var decimalText = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
-
-func codecError() error {
-	return database.Fail(contracts.QueryUnsupported, "result value has an unsupported representation", false)
-}
-
-// JSON is retained as bounded RawMessage: exact numbers and duplicate object
-// members survive, without allocating a potentially huge Go object graph.
-func jsonValue(b []byte) (json.RawMessage, error) {
-	if len(b) > 1<<20 {
-		return nil, database.Fail(contracts.ResourceLimit, "JSON value exceeds size limit", false)
-	}
-	depth := 0
-	quoted, escaped := false, false
-	for _, c := range b {
-		if quoted {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				quoted = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			quoted = true
-		case '[', '{':
-			depth++
-			if depth > 64 {
-				return nil, database.Fail(contracts.ResourceLimit, "JSON value exceeds nesting limit", false)
-			}
-		case ']', '}':
-			depth--
-		}
-	}
-	if !utf8.Valid(b) || !json.Valid(b) {
-		return nil, codecError()
-	}
-	return append(json.RawMessage(nil), b...), nil
-}
 
 func specialNumber(s string) bool { return s == "NaN" || s == "Infinity" || s == "-Infinity" }
 
@@ -65,7 +21,7 @@ func decodeValue(typ uint32, b []byte) (any, error) {
 		return nil, nil
 	}
 	if !utf8.Valid(b) {
-		return nil, codecError()
+		return nil, database.UnsupportedValue()
 	}
 	s := string(b)
 	switch typ {
@@ -118,7 +74,7 @@ func decodeValue(typ uint32, b []byte) (any, error) {
 			}
 		}
 	case 114, 3802:
-		return jsonValue(b)
+		return database.JSONValue(b)
 	case 1114, 1184:
 		if s == "infinity" || s == "-infinity" {
 			return s, nil
@@ -136,7 +92,7 @@ func decodeValue(typ uint32, b []byte) (any, error) {
 		}
 		if typ == 1184 {
 			if !strings.HasSuffix(clock, "+00") {
-				return nil, codecError()
+				return nil, database.UnsupportedValue()
 			}
 			clock = strings.TrimSuffix(clock, "+00") + "Z"
 		}
@@ -144,46 +100,17 @@ func decodeValue(typ uint32, b []byte) (any, error) {
 	case 25, 1042, 1043, 2950, 1082, 1083:
 		return s, nil
 	}
-	return nil, codecError()
+	return nil, database.UnsupportedValue()
 }
 
-func invalidParameters() error {
-	return database.Fail(contracts.InvalidArgument, "invalid query parameter type or value", false)
-}
-
-// queryParameters preserves JSON number text and leaves type inference to PostgreSQL.
-func queryParameters(input []json.RawMessage) ([][]byte, error) {
-	if len(input) > 256 {
-		return nil, invalidParameters()
-	}
-	out := make([][]byte, len(input))
-	total := 0
-	for i, p := range input {
-		total += len(p)
-		if len(p) > 64<<10 || total > 256<<10 {
-			return nil, invalidParameters()
-		}
-		raw, err := jsonValue(p)
-		if err != nil {
-			return nil, invalidParameters()
-		}
-		raw = bytes.TrimSpace(raw)
-		if bytes.Equal(raw, []byte("null")) {
-			continue
-		}
-		if raw[0] == '"' {
-			var value string
-			if json.Unmarshal(raw, &value) != nil || strings.ContainsRune(value, 0) {
-				return nil, invalidParameters()
-			}
-			out[i] = []byte(value)
-		} else {
-			var b bytes.Buffer
-			if json.Compact(&b, raw) != nil {
-				return nil, invalidParameters()
-			}
-			out[i] = b.Bytes()
+// textParameters encodes shared parameters in PostgreSQL text format. Number
+// text keeps its original spelling and PostgreSQL infers every type.
+func textParameters(params []database.Parameter) [][]byte {
+	out := make([][]byte, len(params))
+	for i, p := range params {
+		if p.Kind != database.NullParameter {
+			out[i] = []byte(p.Text)
 		}
 	}
-	return out, nil
+	return out
 }

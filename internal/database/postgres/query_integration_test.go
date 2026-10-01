@@ -155,7 +155,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 		_, e := d.Query(t.Context(), access, database.QueryRequest{SQL: c.q})
 		requireCode(t, e, c.code)
 		if c.code == contracts.PermissionDenied {
-			if safeSQLState(e.(*database.Error).SQLState) == "" {
+			if database.SafeSQLState(e.(*database.Error).SQLState) == "" {
 				t.Fatal("missing SQLSTATE")
 			}
 		}
@@ -193,7 +193,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 	func() {
 		sql("ALTER ROLE reader SET standard_conforming_strings=off")
 		defer sql("ALTER ROLE reader RESET standard_conforming_strings")
-		d.Invalidate(access.Profile.ID)
+		d.pools.Invalidate(access.Profile.ID)
 		r, e := d.Query(t.Context(), access, database.QueryRequest{SQL: `SELECT 'a\b'::text`})
 		if e != nil || r.Rows[0][0] != `a\b` {
 			t.Fatal("startup literal rules", r.Rows, e)
@@ -204,7 +204,7 @@ func queryAcceptance(t *testing.T, d *Driver, access database.Access, sql func(s
 
 func normalizedFixture(t *testing.T, a database.Access) database.Access {
 	t.Helper()
-	out, _, err := normalized(a)
+	out, _, err := database.Normalize(a)
 	if err != nil {
 		t.Fatal(err)
 	}

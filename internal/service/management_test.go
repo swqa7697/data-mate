@@ -89,8 +89,9 @@ type blockedDiagnostics struct {
 	release chan struct{}
 }
 
-func (d *blockedDiagnostics) Invalidate(string) {}
-func (d *blockedDiagnostics) Close()            {}
+func (d *blockedDiagnostics) Invalidate(string)                    {}
+func (d *blockedDiagnostics) Close()                               {}
+func (d *blockedDiagnostics) ValidateProfile(config.Profile) error { return nil }
 func (d *blockedDiagnostics) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
 	_, err := d.Test(ctx, a)
 	return database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}, err

@@ -3,16 +3,9 @@ package postgres
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,368 +14,100 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/transport"
+	"github.com/swqa7697/data-mate/internal/database/pool"
 )
 
-const idleTTL = 5 * time.Minute
-
-const maxConnectionsPerProfile = 8
-
-type pool struct {
-	fingerprint string
-	slots       chan struct{}
-	idle        []*pgx.Conn
-	users       int
-	ctx         context.Context
-	cancel      context.CancelFunc
-	timer       *time.Timer
-	live        map[*pgx.Conn]bool
-	approved    bool
-	generation  uint64
-	validation  *poolValidation
-}
-
-type poolValidation struct {
-	done chan struct{}
-	err  error
-}
-
-// forgetClosed runs under Driver.mu. Waiting operations never extend approval.
-func (p *pool) forgetClosed() {
-	for c := range p.live {
-		select {
-		case <-c.PgConn().CleanupDone():
-			delete(p.live, c)
-		default:
-		}
-	}
-	if len(p.live) == 0 && p.approved {
-		p.approved = false
-		p.generation++
-	}
-}
-
-func (d *Driver) approvePool(ctx context.Context, p *pool, c *pgx.Conn, a database.Access, trace *diagnosticTrace) error {
-	d.mu.Lock()
-	p.forgetClosed()
-	if p.live == nil {
-		p.live = make(map[*pgx.Conn]bool)
-	}
-	p.live[c] = true
-	if p.approved {
-		d.mu.Unlock()
-		return nil
-	}
-	if pending := p.validation; pending != nil {
-		d.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return safeError(ctx.Err())
-		case <-pending.done:
-			return pending.err
-		}
-	}
-	pending := &poolValidation{done: make(chan struct{})}
-	p.validation = pending
-	generation := p.generation
-	d.mu.Unlock()
-	err := validateAccountConnection(ctx, c, a, trace)
-	d.mu.Lock()
-	p.forgetClosed()
-	if err == nil && (d.closed || d.pools[a.Profile.ID] != p || p.ctx.Err() != nil || ctx.Err() != nil || generation != p.generation || c.IsClosed()) {
-		err = database.Fail(contracts.Cancelled, "account validation was cancelled", false)
-	}
-	p.approved = err == nil
-	pending.err = err
-	p.validation = nil
-	close(pending.done)
-	d.mu.Unlock()
-	return err
-}
-
-// Driver owns process-local admission, lazy eight-connection pools and cursor keys.
-// A service should share one Driver across profiles. No request result is cached.
+// Driver implements PostgreSQL operations over the service's shared registry,
+// which owns admission, pools and cursor keys. No request result is cached.
 type Driver struct {
-	mu      sync.Mutex
-	pools   map[string]*pool
-	active  chan struct{}
-	waiting chan struct{}
-	key     [32]byte
-	closed  bool
-	epoch   uint64
+	pools *pool.Registry
+	// connected observes each new physical connection. Tests use it to close
+	// connections client-side; production leaves it nil.
+	connected func(*pgx.Conn)
 }
 
-var _ database.Driver = (*Driver)(nil)
+// New binds PostgreSQL operations to a shared registry without contacting any database.
+func New(pools *pool.Registry) *Driver { return &Driver{pools: pools} }
 
-// New creates an idle driver without contacting any database.
-func New() (*Driver, error) {
-	d := &Driver{pools: make(map[string]*pool), active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations)}
-	if _, err := rand.Read(d.key[:]); err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-func (d *Driver) admit(ctx context.Context) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, safeError(err)
-	}
-	select {
-	case d.active <- struct{}{}:
-		return func() { <-d.active }, nil
-	default:
-	}
-	select {
-	case d.waiting <- struct{}{}:
-	default:
-		return nil, database.Fail(contracts.ResourceLimit, "database queue is full", true)
-	}
-	defer func() { <-d.waiting }()
-	timer := time.NewTimer(database.AdmissionTimeout)
-	defer timer.Stop()
-	select {
-	case d.active <- struct{}{}:
-		return func() { <-d.active }, nil
-	case <-ctx.Done():
-		return nil, safeError(ctx.Err())
-	case <-timer.C:
-		return nil, database.Fail(contracts.ResourceLimit, "database queue deadline exceeded", true)
-	}
-}
+// session adapts one pgx connection to the shared pool.
+type session struct{ conn *pgx.Conn }
+
+func (s *session) Reusable() bool          { return !s.conn.IsClosed() && s.conn.PgConn().TxStatus() == 'I' }
+func (s *session) Closed() <-chan struct{} { return s.conn.PgConn().CleanupDone() }
+func (s *session) Close()                  { closeConn(s.conn) }
+
 func closeConn(c *pgx.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = c.Close(ctx)
 }
-func closePool(p *pool) {
-	for _, c := range p.idle {
-		closeConn(c)
-	}
-}
-func (d *Driver) retireLocked(id string) *pool {
-	p := d.pools[id]
-	if p != nil {
-		delete(d.pools, id)
-		p.approved = false
-		p.generation++
-		p.cancel()
-		if p.timer != nil {
-			p.timer.Stop()
-		}
-	}
-	if p != nil {
-		retired := &pool{idle: p.idle}
-		p.idle = nil
-		return retired
-	}
-	return nil
+
+func messageLimit() error {
+	return database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
 }
 
-// Invalidate retires credentials, transports and cursors after a profile change.
-// Active operations are canceled; their owners finish cleanup before releasing leases.
-func (d *Driver) Invalidate(id string) {
-	d.mu.Lock()
-	d.epoch++
-	p := d.retireLocked(id)
-	d.mu.Unlock()
-	if p != nil {
-		closePool(p)
-	}
-}
-
-// Close stops admission at checkout and retires all pools and active operations.
-func (d *Driver) Close() {
-	d.mu.Lock()
-	d.closed = true
-	var all []*pool
-	for id := range d.pools {
-		all = append(all, d.retireLocked(id))
-	}
-	d.mu.Unlock()
-	for _, p := range all {
-		closePool(p)
-	}
-}
-func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Revision, trace *diagnosticTrace) (*pgx.Conn, context.Context, func(bool), error) {
-	mac := hmac.New(sha256.New, d.key[:])
-	secrets, hosts := a.TransportCredentials()
-	// Hash exact length-framed bytes, including private transport credentials.
-	// JSON would replace invalid UTF-8 and could alias distinct credential inputs.
-	for _, value := range []string{string(rev), a.Password(), secrets.SSHPassword, secrets.SSHPrivateKey, secrets.SSHKeyPassphrase, secrets.ProxyPassword, string(hosts)} {
-		var size [8]byte
-		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
-		mac.Write(size[:])
-		mac.Write([]byte(value))
-	}
-	fp := hex.EncodeToString(mac.Sum(nil))
-	id := a.Profile.ID
-	d.mu.Lock()
-	if d.closed {
-		d.mu.Unlock()
-		return nil, nil, nil, database.Fail(contracts.ServiceUnavailable, "database driver is closed", false)
-	}
-	var retired *pool
-	p := d.pools[id]
-	if p != nil && p.fingerprint != fp {
-		retired = d.retireLocked(id)
-		p = nil
-	}
-	if p == nil {
-		if len(d.pools) >= 16 {
-			for old, v := range d.pools {
-				if v.users == 0 {
-					retired = d.retireLocked(old)
-					break
-				}
-			}
-		}
-		if len(d.pools) >= 16 {
-			d.mu.Unlock()
-			return nil, nil, nil, database.Fail(contracts.ResourceLimit, "database pool limit reached", true)
-		}
-		pc, cancel := context.WithCancel(context.Background())
-		p = &pool{fingerprint: fp, slots: make(chan struct{}, maxConnectionsPerProfile), ctx: pc, cancel: cancel}
-		d.pools[id] = p
-	}
-	p.users++
-	if p.timer != nil {
-		p.timer.Stop()
-	}
-	d.mu.Unlock()
-	if retired != nil {
-		closePool(retired)
-	}
-	op, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(p.ctx, cancel)
-	var c *pgx.Conn
-	acquired := false
-	release := func(healthy bool) {
-		stop()
-		cancel()
-		if c != nil && (!healthy || c.IsClosed() || c.PgConn().TxStatus() != 'I') {
-			// A discarded connection cannot retain approval while socket cleanup
-			// finishes asynchronously and another caller opens a replacement.
-			d.mu.Lock()
-			delete(p.live, c)
-			p.forgetClosed()
-			d.mu.Unlock()
-			closeConn(c)
-			c = nil
-		}
-		d.mu.Lock()
-		p.forgetClosed()
-		if c != nil && d.pools[id] == p && !d.closed {
-			p.idle = append(p.idle, c)
-			c = nil
-		}
-		p.users--
-		if p.users == 0 && d.pools[id] == p {
-			p.timer = time.AfterFunc(idleTTL, func() {
-				d.mu.Lock()
-				var old *pool
-				if d.pools[id] == p && p.users == 0 {
-					old = d.retireLocked(id)
-				}
-				d.mu.Unlock()
-				if old != nil {
-					closePool(old)
-				}
-			})
-		}
-		d.mu.Unlock()
-		if c != nil {
-			closeConn(c)
-		}
-		if acquired {
-			<-p.slots
-		}
-	}
-	select {
-	case p.slots <- struct{}{}:
-		acquired = true
-	case <-op.Done():
-		release(false)
-		return nil, nil, nil, safeError(op.Err())
-	}
-	d.mu.Lock()
-	p.forgetClosed()
-	for len(p.idle) > 0 {
-		n := len(p.idle) - 1
-		c = p.idle[n]
-		p.idle = p.idle[:n]
-		if !c.IsClosed() {
-			break
-		}
-		delete(p.live, c)
-		p.forgetClosed()
-		c = nil
-	}
-	d.mu.Unlock()
-	if c == nil {
+// checkout acquires an approved connection from r, opening and auditing a new
+// physical connection when the pool has no idle one.
+func (d *Driver) checkout(ctx context.Context, r *pool.Registry, a database.Access, rev config.Revision, trace *database.Trace) (*pgx.Conn, context.Context, func(bool), error) {
+	open := func(ctx context.Context) (*session, error) {
 		cfg, err := connectionConfig(a)
 		if err != nil {
-			release(false)
-			return nil, nil, nil, err
+			return nil, err
 		}
-		var errDial error
-		c, errDial = pgx.ConnectConfig(op, cfg)
-		if errDial != nil {
+		c, err := pgx.ConnectConfig(ctx, cfg)
+		if err != nil {
 			var pg *pgconn.PgError
-			if cfg.Tracer.(*wireState).authStarted.Load() || (errors.As(errDial, &pg) && (strings.HasPrefix(pg.Code, "28") || pg.Code == "3D000")) {
-				trace.pass("dial")
-				trace.start("authentication")
+			if cfg.Tracer.(*wireState).authStarted.Load() || (errors.As(err, &pg) && (strings.HasPrefix(pg.Code, "28") || pg.Code == "3D000")) {
+				trace.Pass("dial")
+				trace.Start("authentication")
 			}
-			release(false)
 			if cfg.Tracer.(*wireState).exceeded.Load() {
-				return nil, nil, nil, database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
+				return nil, messageLimit()
 			}
-			return nil, nil, nil, safeError(errDial)
+			return nil, safeError(err)
 		}
+		if d.connected != nil {
+			d.connected(c)
+		}
+		return &session{c}, nil
 	}
-	if err := d.approvePool(op, p, c, a, trace); err != nil {
-		release(false)
+	approve := func(ctx context.Context, s *session) error { return validateAccountConnection(ctx, s.conn, a, trace) }
+	s, op, release, err := pool.Checkout(ctx, r, a, rev, open, approve)
+	if err != nil {
 		return nil, nil, nil, err
 	}
-	return c, op, release, nil
+	return s.conn, op, release, nil
 }
 
 // run keeps admission through rollback and bounded payload preparation. Every
 // operation rechecks transaction state; account approval belongs to the live pool.
 func (d *Driver) run(ctx context.Context, a database.Access, fn func(context.Context, pgx.Tx, int) error) error {
-	return d.runObserved(ctx, a, nil, fn)
-}
-func (d *Driver) runObserved(ctx context.Context, a database.Access, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) error {
-	trace.start("config")
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		return err
 	}
-	trace.pass("config")
-	return d.runNormalized(ctx, a, rev, trace, fn)
+	return d.runNormalized(ctx, a, rev, fn)
 }
 
-// runNormalized accepts only the snapshot and revision returned by normalized in
+// runNormalized accepts only the snapshot and revision returned by Normalize in
 // this request. Query can reuse its pre-parse validation without caching access.
-func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev config.Revision, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) (result error) {
-	trace.start("dial")
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
+func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev config.Revision, fn func(context.Context, pgx.Tx, int) error) (result error) {
+	ctx, cancel := context.WithTimeout(ctx, database.Timeout(a))
 	defer cancel()
-	leave, err := d.admit(ctx)
+	leave, err := d.pools.Admit(ctx)
 	if err != nil {
 		return err
 	}
 	defer leave()
-	c, ctx, release, err := d.checkout(ctx, a, rev, trace)
+	c, ctx, release, err := d.checkout(ctx, d.pools, a, rev, nil)
 	if err != nil {
 		return err
 	}
-	trace.pass("dial")
-	trace.pass("authentication")
-	trace.start("version")
 	healthy := false
 	discarded := false
 	defer func() {
 		if exceeded(c) {
-			result = database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
+			result = messageLimit()
 		}
 	}()
 	defer func() { release(healthy) }()
@@ -411,7 +136,7 @@ func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev confi
 	if err != nil {
 		return safeError(err)
 	}
-	version, err := checkReadOnlyObserved(ctx, tx, a.Profile.Connection.Username, trace)
+	version, err := checkReadOnlyObserved(ctx, tx, a.Profile.Connection.Username, nil)
 	if err != nil {
 		return err
 	}
@@ -426,28 +151,21 @@ func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev confi
 	return nil
 }
 
+// Test always audits a fresh short-lived pool, independently of cached approval.
+func (d *Driver) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
+	return pool.Diagnose(ctx, d.pools, a, func(ctx context.Context, fresh *pool.Registry, a database.Access, rev config.Revision, trace *database.Trace) (func(bool), error) {
+		_, _, release, err := d.checkout(ctx, fresh, a, rev, trace)
+		return release, err
+	})
+}
+
 func safeError(err error) error {
-	var known *database.Error
-	if errors.As(err, &known) {
-		return known
-	}
-	for _, safe := range []error{transport.ErrUnknownHost, transport.ErrChangedHost, transport.ErrKnownHosts} {
-		if errors.Is(err, safe) {
-			return database.Fail(contracts.ConnectFailed, safe.Error(), false)
-		}
-	}
-	if errors.Is(err, transport.ErrConfiguration) {
-		return database.Fail(contracts.ConfigInvalid, "invalid transport configuration or credentials", false)
-	}
-	if errors.Is(err, context.Canceled) {
-		return database.Fail(contracts.Cancelled, "database operation canceled", true)
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return database.Fail(contracts.QueryTimeout, "database operation timed out", true)
+	if safe := database.CommonError(err); safe != nil {
+		return safe
 	}
 	var size *pgproto3.ExceededMaxBodyLenErr
 	if errors.As(err, &size) {
-		return database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
+		return messageLimit()
 	}
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) {
@@ -465,35 +183,7 @@ func safeError(err error) error {
 		if strings.HasPrefix(pg.Code, "28") || strings.HasPrefix(pg.Code, "08") && pg.Code != "08P01" || pg.Code == "3D000" || pg.Code == "57P01" {
 			code, message, retry = contracts.ConnectFailed, "PostgreSQL connection failed", true
 		}
-		return &database.Error{Failure: contracts.Failure{Code: code, Message: message, Retryable: retry, SQLState: safeSQLState(pg.Code)}}
-
+		return &database.Error{Failure: contracts.Failure{Code: code, Message: message, Retryable: retry, SQLState: database.SafeSQLState(pg.Code)}}
 	}
 	return database.Fail(contracts.ConnectFailed, "PostgreSQL operation failed; check endpoint, TLS and credentials", true)
-}
-func payloadBound(v any, a database.Access) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	limit := config.DefaultLimits().MaxResultBytes
-	if a.Profile.Limits != nil {
-		limit = a.Profile.Limits.MaxResultBytes
-	} // reserve JSON escaping plus duplicated compatibility representation
-	if len(b)*3+1024 > limit {
-		return database.Fail(contracts.ResourceLimit, "metadata result exceeds payload budget; request a smaller page", false)
-	}
-	return nil
-}
-
-// SQLSTATE is public; no other upstream diagnostic field crosses the boundary.
-func safeSQLState(code string) string {
-	if len(code) != 5 {
-		return ""
-	}
-	for _, c := range code {
-		if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z') {
-			return ""
-		}
-	}
-	return code
 }

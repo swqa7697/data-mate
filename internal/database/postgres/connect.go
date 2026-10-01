@@ -1,10 +1,7 @@
 package postgres
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -26,26 +23,6 @@ func SanitizeEnvironment() {
 			_ = os.Unsetenv(k)
 		}
 	}
-}
-
-func normalized(a database.Access) (database.Access, config.Revision, error) {
-	b, err := json.Marshal(config.Profiles{Version: 1, Connections: []config.Profile{a.Profile}})
-	if err != nil {
-		return a, "", database.Fail(contracts.ConfigInvalid, "invalid profile", false)
-	}
-	p, rev, err := config.DecodeProfiles(bytes.NewReader(b))
-	if err != nil {
-		return a, "", database.Fail(contracts.ConfigInvalid, "invalid profile", false)
-	}
-	a.Profile = p.Connections[0]
-	host := a.Profile.Connection.Host
-	if len(host) > 253 || (net.ParseIP(host) == nil && strings.ContainsAny(host, "/\\:@, \t\r\n")) {
-		return a, "", database.Fail(contracts.ConfigInvalid, "host must be one TCP hostname or IP address", false)
-	}
-	if len(a.Password()) > 128<<10 || strings.ContainsRune(a.Password(), 0) {
-		return a, "", database.Fail(contracts.ConfigInvalid, "invalid credential", false)
-	}
-	return a, rev, nil
 }
 
 func connectionConfig(a database.Access) (*pgx.ConnConfig, error) {
@@ -93,13 +70,13 @@ func connectionConfig(a database.Access) (*pgx.ConnConfig, error) {
 
 // ValidateProfile checks driver-specific nonsecret settings before vault access.
 func (d *Driver) ValidateProfile(p config.Profile) error {
-	_, _, err := normalized(database.NewAccess(p, ""))
+	_, _, err := database.Normalize(database.NewAccess(p, ""))
 	return err
 }
 
 // Validate checks the profile and explicit transport without dialing.
 func (d *Driver) Validate(a database.Access) error {
-	a, _, err := normalized(a)
+	a, _, err := database.Normalize(a)
 	if err != nil {
 		return err
 	}

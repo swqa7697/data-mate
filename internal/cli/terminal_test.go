@@ -55,7 +55,7 @@ func TestConnectionTerminal(t *testing.T) {
 		// honor output width/colors, exit on q, and restore modes on cancellation.
 		if strings.HasPrefix(mode, "catalog") {
 			command(t, root, keys, "", 0, append(basicAdd, "--passwordless")...)
-			schema := database.SchemaDescription{Name: "public", Tables: []database.RelationName{}, Enums: []database.CatalogName{{Name: "status"}}, Sequences: []database.CatalogName{{Name: "items_id_seq"}}, Indexes: []database.CatalogName{{Name: "alpha_idx"}}, Functions: []database.CatalogName{{Name: "lookup"}}}
+			schema := database.SchemaDescription{Name: "public", Tables: []database.RelationName{}, Enums: []database.CatalogName{{Name: "status"}}, Sequences: []database.CatalogName{{Name: "items_id_seq"}}, Indexes: []database.IndexName{{Name: "alpha_idx"}}, Functions: []database.CatalogName{{Name: "lookup"}}}
 			for _, name := range []string{"alpha", "beta", "delta", "gamma"} {
 				schema.Tables = append(schema.Tables, database.RelationName{Name: name, Kind: "table"})
 			}

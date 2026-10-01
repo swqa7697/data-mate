@@ -335,14 +335,11 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		result.Stages = append(result.Stages, database.Stage{Stage: stage, Error: result.Error})
 		return result, nil
 	}
-	validator, validates := m.driver.(interface{ ValidateProfile(config.Profile) error })
-	if validates {
-		if e := validator.ValidateProfile(*p); e != nil {
-			result.Stage = "config"
-			result.Error = &contracts.Failure{Code: contracts.ConfigInvalid, Message: "invalid driver profile settings; repair with db edit"}
-			result.Stages = []database.Stage{{Stage: "config", Error: result.Error}}
-			return result, nil
-		}
+	if e := m.driver.ValidateProfile(*p); e != nil {
+		result.Stage = "config"
+		result.Error = &contracts.Failure{Code: contracts.ConfigInvalid, Message: "invalid driver profile settings; repair with db edit"}
+		result.Stages = []database.Stage{{Stage: "config", Error: result.Error}}
+		return result, nil
 	}
 	if p.CredentialRef != "" {
 		prep, prepared := context.WithTimeout(parent, vault.PreparationTimeout)
@@ -368,14 +365,8 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 			}
 		}
 		if q.Operation == "describe" {
-			describer, ok := d.(interface {
-				DescribeDatabase(context.Context, database.Access) (database.DatabaseDescription, error)
-			})
-			if !ok {
-				return ErrUnavailable
-			}
 			var e error
-			*description, e = describer.DescribeDatabase(ctx, a)
+			*description, e = d.DescribeDatabase(ctx, a)
 			return e
 		}
 		result.Stages = append(result.Stages, database.Stage{Stage: "vault", OK: true})

@@ -165,7 +165,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		if err != nil {
 			return failure("cannot generate connection identity")
 		}
-		profile = config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
+		profile = config.Profile{ID: id, Driver: "postgres", Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
 	} else {
 		profile = profiles.Connections[index]
 		original = profile
@@ -332,7 +332,11 @@ func previewProfile(w io.Writer, action string, p config.Profile, secretsChanged
 	}
 	transport, _ := json.Marshal(p.Transport)
 	limits, _ := json.Marshal(p.Limits)
-	_, err := fmt.Fprintf(w, "%s\nAlias: %s\nDriver: %s\nHost: %q\nPort: %d\nDatabase: %q\nUsername: %q\nTransport: %s\nLimits: %s\nCredentials: %s\n", title, p.Alias, p.Driver, p.Connection.Host, p.Connection.Port, p.Connection.Database, p.Connection.Username, transport, limits, secretState)
+	database := ""
+	if config.NamesDatabase(p.Driver) {
+		database = fmt.Sprintf("Database: %q\n", p.Connection.Database)
+	}
+	_, err := fmt.Fprintf(w, "%s\nAlias: %s\nDriver: %s\nHost: %q\nPort: %d\n%sUsername: %q\nTransport: %s\nLimits: %s\nCredentials: %s\n", title, p.Alias, p.Driver, p.Connection.Host, p.Connection.Port, database, p.Connection.Username, transport, limits, secretState)
 	if err != nil {
 		return failure("cannot write preview")
 	}
@@ -363,7 +367,11 @@ func listProfiles(cmd *cobra.Command, p config.Profiles) error {
 		}
 	}
 	for _, e := range entries {
-		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %q:%d  database=%q\n", e.Alias, e.Driver, e.Connection.Host, e.Connection.Port, e.Connection.Database); err != nil {
+		database := ""
+		if config.NamesDatabase(e.Driver) {
+			database = fmt.Sprintf("  database=%q", e.Connection.Database)
+		}
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %q:%d%s\n", e.Alias, e.Driver, e.Connection.Host, e.Connection.Port, database); err != nil {
 			return failure("cannot write output")
 		}
 	}

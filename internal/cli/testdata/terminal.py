@@ -86,7 +86,7 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
             if mode != "enroll-no":
                 send_after("Save changes? [y/N]:", "y\r" if mode == "enroll" else "n\r")
         else:
-            send_after("Driver [postgres]:", "\r")
+            send_after("Driver (postgres, mysql, mariadb) [postgres]:", "\r")
             send_after("Alias:", "analytics\r")
             send_after("Host:", "localhost\r")
             send_after("Port [5432]:", "\r")
@@ -116,7 +116,7 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
             if mode == "happy":
                 send_after("Save changes? [y/N]:", "n\r")
                 send_after("Connection number or alias:", "1\r")
-                send_after("Driver [postgres]:", "\r")
+                send_after("Driver (postgres, mysql, mariadb) [postgres]:", "\r")
                 send_after("Alias [analytics]:", "renamed\r")
                 send_after("Host [localhost]:", "\r")
                 send_after("Port [5432]:", "\r")

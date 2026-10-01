@@ -8,10 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -139,72 +137,6 @@ func TestConnectionBoundary(t *testing.T) {
 	requireCode(t, err, contracts.ReadOnlyViolation)
 	t.Setenv("PGPASSWORD", "unexpected-after-startup")
 	requireCode(t, d.Validate(database.NewAccess(profile(), "")), contracts.ConfigInvalid)
-}
-
-// This scenario owns admission/cursor algorithms that cannot be reliably saturated
-// through network timing. Synchronization is explicit rather than latency assertions.
-func TestAdmissionAndCursorLifecycle(t *testing.T) {
-	d := driver(t)
-	var leave []func()
-	for range 32 {
-		f, err := d.admit(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		leave = append(leave, f)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	results := make(chan error, 128)
-	var wg sync.WaitGroup
-	for range 128 {
-		wg.Go(func() {
-			f, err := d.admit(ctx)
-			if err == nil {
-				f()
-			}
-			results <- err
-		})
-	}
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-	for len(d.waiting) < 128 {
-		select {
-		case <-deadline.C:
-			t.Fatal("waiters did not enter queue")
-		default:
-			runtime.Gosched()
-		}
-	}
-	_, err := d.admit(t.Context())
-	requireCode(t, err, contracts.ResourceLimit)
-	cancel()
-	wg.Wait()
-	close(results)
-	for err := range results {
-		requireCode(t, err, contracts.Cancelled)
-	}
-	for _, f := range leave {
-		f()
-	}
-	if len(d.active) != 0 || len(d.waiting) != 0 {
-		t.Fatal("admission leaked")
-	}
-	c := cursor{Version: 1, ID: "id", Revision: "revision", Schema: "a", Name: "b"}
-	token := d.encodeCursor(c)
-	if _, err = d.decodeCursor(token, c); err != nil {
-		t.Fatal(err)
-	}
-	for _, bad := range []string{token + "x", strings.Repeat("x", 2049), "!!!"} {
-		_, err = d.decodeCursor(bad, c)
-		requireCode(t, err, contracts.StaleCursor)
-	}
-	changed := c
-	changed.Revision = "other"
-	_, err = d.decodeCursor(token, changed)
-	requireCode(t, err, contracts.StaleCursor)
-	d2 := driver(t)
-	_, err = d2.decodeCursor(token, c)
-	requireCode(t, err, contracts.StaleCursor)
 }
 
 // Extend readiness protocol coverage for versions and actual read-only state.
@@ -365,7 +297,7 @@ func diagnosticProtocolAcceptance(t *testing.T) {
 		if ready.Stage != test.stage {
 			t.Fatalf("%s: expected %s, got %s: %v", test.name, test.stage, ready.Stage, err)
 		}
-		d.Close()
+		d.pools.Close()
 		listener.Close()
 		cancel()
 		select {

@@ -1,359 +1,648 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Table or view description. The shape follows the connection's driver: PostgreSQL adds identity, triggers and row-security policies; MySQL and MariaDB add AUTO_INCREMENT, ON UPDATE and engine, and omit triggers because MySQL shows them only to accounts with the TRIGGER privilege.",
   "type": "object",
-  "properties": {
-    "connection": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
-    },
-    "schema": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^[^\\x00]+$",
-      "maxLength": 63
-    },
-    "table": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^[^\\x00]+$",
-      "maxLength": 63
-    },
-    "kind": {
-      "type": "string",
-      "enum": [
-        "table",
-        "partitioned_table",
-        "view",
-        "materialized_view",
-        "foreign_table",
-        "other"
-      ]
-    },
-    "columns": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
-          },
-          "type": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$"
-          },
-          "nullable": {
-            "type": "boolean"
-          },
-          "default": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "generated": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "identity": {
-            "type": "string",
-            "enum": [
-              "",
-              "a",
-              "d"
-            ]
-          }
+  "required": [
+    "driver"
+  ],
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "driver": {
+          "const": "postgres"
         },
-        "required": [
-          "name",
-          "type",
-          "nullable",
-          "default",
-          "generated",
-          "identity"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "keys": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "kind": {
-            "type": "string",
-            "enum": [
-              "primary",
-              "unique"
-            ]
-          },
-          "columns": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[^\\x00]+$",
-              "maxLength": 63
-            },
-            "minItems": 1
-          }
+        "connection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
         },
-        "required": [
-          "kind",
-          "columns"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "relationships": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "columns": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[^\\x00]+$",
-              "maxLength": 63
-            },
-            "minItems": 1
-          },
-          "target": {
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00]+$",
+          "maxLength": 64
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00]+$",
+          "maxLength": 64
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "table",
+            "partitioned_table",
+            "view",
+            "materialized_view",
+            "foreign_table",
+            "other"
+          ]
+        },
+        "columns": {
+          "type": "array",
+          "items": {
             "type": "object",
             "properties": {
-              "schema": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^[^\\x00]+$",
-                "maxLength": 63
-              },
               "name": {
                 "type": "string",
                 "minLength": 1,
                 "pattern": "^[^\\x00]+$",
-                "maxLength": 63
+                "maxLength": 64
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
+              },
+              "nullable": {
+                "type": "boolean"
+              },
+              "default": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "generated": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "identity": {
+                "type": "string",
+                "enum": [
+                  "",
+                  "a",
+                  "d"
+                ]
               }
             },
             "required": [
-              "schema",
-              "name"
+              "name",
+              "type",
+              "nullable",
+              "default",
+              "generated",
+              "identity"
             ],
             "additionalProperties": false
-          },
-          "target_columns": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[^\\x00]+$",
-              "maxLength": 63
+          }
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "primary",
+                  "unique"
+                ]
+              },
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
+                },
+                "minItems": 1
+              }
             },
-            "minItems": 1
+            "required": [
+              "kind",
+              "columns"
+            ],
+            "additionalProperties": false
           }
         },
-        "required": [
-          "columns",
-          "target",
-          "target_columns"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "constraints": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
-          },
-          "kind": {
-            "type": "string"
-          },
-          "definition": {
-            "type": "string"
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
+                },
+                "minItems": 1
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$",
+                    "maxLength": 64
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$",
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "schema",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "target_columns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "columns",
+              "target",
+              "target_columns"
+            ],
+            "additionalProperties": false
           }
         },
-        "required": [
-          "name",
-          "kind",
-          "definition"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "indexes": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
-          },
-          "kind": {
-            "type": "string"
-          },
-          "definition": {
-            "type": "string"
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
+              },
+              "kind": {
+                "type": "string"
+              },
+              "definition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "definition"
+            ],
+            "additionalProperties": false
           }
         },
-        "required": [
-          "name",
-          "kind",
-          "definition"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "triggers": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
-          },
-          "definition": {
-            "type": "string"
-          },
-          "enabled": {
-            "enum": [
-              "origin",
-              "disabled",
-              "replica",
-              "always"
-            ]
-          },
-          "internal": {
-            "type": "boolean"
+        "indexes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
+              },
+              "kind": {
+                "type": "string"
+              },
+              "definition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "definition"
+            ],
+            "additionalProperties": false
           }
         },
-        "required": [
-          "name",
-          "definition",
-          "enabled",
-          "internal"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "policies": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$",
-            "maxLength": 63
-          },
-          "command": {
-            "enum": [
-              "all",
-              "select",
-              "insert",
-              "update",
-              "delete"
-            ]
-          },
-          "permissive": {
-            "type": "boolean"
-          },
-          "roles": {
-            "type": "array",
-            "items": {
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
+              },
+              "definition": {
+                "type": "string"
+              },
+              "enabled": {
+                "enum": [
+                  "origin",
+                  "disabled",
+                  "replica",
+                  "always"
+                ]
+              },
+              "internal": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "definition",
+              "enabled",
+              "internal"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
+              },
+              "command": {
+                "enum": [
+                  "all",
+                  "select",
+                  "insert",
+                  "update",
+                  "delete"
+                ]
+              },
+              "permissive": {
+                "type": "boolean"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "using": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "check": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "command",
+              "permissive",
+              "roles",
+              "using",
+              "check"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "view_definition": {
+          "anyOf": [
+            {
               "type": "string"
+            },
+            {
+              "type": "null"
             }
-          },
-          "using": {
-            "anyOf": [
-              {
-                "type": "string"
+          ]
+        },
+        "row_security": {
+          "type": "boolean"
+        },
+        "force_row_security": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "driver",
+        "connection",
+        "schema",
+        "table",
+        "kind",
+        "columns",
+        "keys",
+        "relationships",
+        "constraints",
+        "indexes",
+        "triggers",
+        "policies",
+        "view_definition",
+        "row_security",
+        "force_row_security"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+        },
+        "driver": {
+          "enum": [
+            "mysql",
+            "mariadb"
+          ]
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00]+$",
+          "maxLength": 64
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00]+$",
+          "maxLength": 64
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "table",
+            "view",
+            "system_view",
+            "system_versioned_table",
+            "other"
+          ]
+        },
+        "engine": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "columns": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "check": {
-            "anyOf": [
-              {
-                "type": "string"
+              "type": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$"
               },
-              {
-                "type": "null"
+              "nullable": {
+                "type": "boolean"
+              },
+              "default": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "generated": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "auto_increment": {
+                "type": "boolean"
+              },
+              "on_update": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
-            ]
+            },
+            "required": [
+              "name",
+              "type",
+              "nullable",
+              "default",
+              "generated",
+              "auto_increment",
+              "on_update"
+            ],
+            "additionalProperties": false
           }
         },
-        "required": [
-          "name",
-          "command",
-          "permissive",
-          "roles",
-          "using",
-          "check"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "view_definition": {
-      "anyOf": [
-        {
-          "type": "string"
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "primary",
+                  "unique"
+                ]
+              },
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "kind",
+              "columns"
+            ],
+            "additionalProperties": false
+          }
         },
-        {
-          "type": "null"
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
+                },
+                "minItems": 1
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$",
+                    "maxLength": 64
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\x00]+$",
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "schema",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "target_columns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]+$",
+                  "maxLength": 64
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "columns",
+              "target",
+              "target_columns"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
+              },
+              "kind": {
+                "type": "string"
+              },
+              "definition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "definition"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "indexes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00]+$",
+                "maxLength": 64
+              },
+              "kind": {
+                "type": "string"
+              },
+              "definition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "definition"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "view_definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      ]
-    },
-    "row_security": {
-      "type": "boolean"
-    },
-    "force_row_security": {
-      "type": "boolean"
+      },
+      "required": [
+        "connection",
+        "driver",
+        "schema",
+        "table",
+        "kind",
+        "engine",
+        "columns",
+        "keys",
+        "relationships",
+        "constraints",
+        "indexes",
+        "view_definition"
+      ],
+      "additionalProperties": false
     }
-  },
-  "required": [
-    "connection",
-    "schema",
-    "table",
-    "kind",
-    "columns",
-    "keys",
-    "relationships",
-    "constraints",
-    "indexes",
-    "triggers",
-    "policies",
-    "view_definition",
-    "row_security",
-    "force_row_security"
-  ],
-  "additionalProperties": false
+  ]
 }
