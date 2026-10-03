@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow custom MCP client settings and explicitly reenabled Codex registrations without reporting registration conflicts; preserve user settings during status and start and retain modified registrations during uninstall.
+
 ## [0.2.2] - 2026-09-27
 
 ### Added

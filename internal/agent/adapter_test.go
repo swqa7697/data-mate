@@ -185,6 +185,63 @@ func TestRegistrationOwnership(t *testing.T) {
 	if err != nil || len(o.Entries) != 2 || o.Entries[0].Phase != "owned" {
 		t.Fatal(o, err)
 	}
+	// Ladder 2: extend this lifecycle scenario. User edits must not turn a usable
+	// registration into a conflict or authorize removal of the edited entry.
+	for _, a := range m.adapters {
+		s, err := a.inspect(Name(m.root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := "mcp_servers"
+		if a.name == "claude" {
+			key = "mcpServers"
+		}
+		s.other["fixture_foreign"] = map[string]any{"trust": "user-edited"}
+		servers, _ := s.other[key].(map[string]any)
+		if servers == nil {
+			servers = map[string]any{}
+		}
+		servers["user-server"] = map[string]any{"command": "/user/server"}
+		servers[Name(m.root)] = s.entry
+		s.other[key] = servers
+		writeDocument(t, a, s.other)
+		inspect("ready")
+		s.entry["env"] = map[string]any{"USER_SETTING": "custom"}
+		if a.name == "codex" {
+			s.entry["enabled"] = true
+			s.entry["startup_timeout_sec"] = 30
+		}
+		writeDocument(t, a, s.other)
+		before, err := os.ReadFile(a.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inspect("ready")
+		states, err = m.Ensure(t.Context(), l)
+		if err != nil || states[0].State != "ready" || states[1].State != "ready" || *calls != 2 {
+			t.Fatal("user settings blocked start", states, err)
+		}
+		after, err := os.ReadFile(a.path)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatal("user settings rewritten", err)
+		}
+		if err = m.RemoveOwned(t.Context(), l); !errors.Is(err, ErrConflict) {
+			t.Fatal("customized registration removed", err)
+		}
+	}
+	// Restore only the owned entries; unrelated user edits survive the lifecycle.
+	for _, a := range m.adapters {
+		s, err := a.inspect(Name(m.root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := "mcp_servers"
+		if a.name == "claude" {
+			key = "mcpServers"
+		}
+		s.other[key].(map[string]any)[Name(m.root)] = m.desired(a, l.Identity().Executable)
+		writeDocument(t, a, s.other)
+	}
 	// Disabled policy survives repeated starts and removal refuses the edited hash.
 	a := m.adapters[0]
 	s, _ := a.inspect(Name(m.root))

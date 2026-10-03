@@ -148,9 +148,6 @@ func (m *Manager) ensure(ctx context.Context, l *config.LifecycleLease, o *owner
 	if state == "ready" {
 		// Matching unowned registrations are usable but never adopted for removal.
 		if i >= 0 {
-			if o.Entries[i].Fingerprint != fingerprint(before.entry) {
-				return "conflict", ErrConflict
-			}
 			if o.Entries[i].Phase == "owned" {
 				return "ready", nil
 			}
