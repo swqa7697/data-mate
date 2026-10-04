@@ -153,19 +153,27 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 		}
 		patch["proxy_password"] = ""
 	}
+	if err := validateCandidate(profile, patch); err != nil {
+		return profile, nil, err
+	}
+	return profile, patch, nil
+}
+
+// validateCandidate applies the CLI's secret and endpoint rules shared by
+// interactive, scripted and CSV-imported connections.
+func validateCandidate(profile config.Profile, patch secretPatch) error {
 	for key, value := range patch {
 		if len(value) > vault.MaxSecretBytes || !utf8.ValidString(value) {
-			return profile, nil, invalid("credential exceeds its UTF-8 byte limit")
+			return invalid("credential exceeds its UTF-8 byte limit")
 		}
 		if value != "" && ((strings.HasPrefix(key, "ssh_") && profile.Transport.SSH == nil) || (key == "proxy_password" && profile.Transport.Proxy == nil)) {
-			return profile, nil, invalid("credential requires its matching transport")
+			return invalid("credential requires its matching transport")
 		}
 	}
 	for _, host := range []string{profile.Connection.Host, sshHost(&profile), proxyHost(&profile)} {
 		if strings.ContainsAny(host, "/@?=#\\\r\n\t ") {
-			return profile, nil, invalid("endpoint must be a hostname or IP address")
+			return invalid("endpoint must be a hostname or IP address")
 		}
 	}
-
-	return profile, patch, nil
+	return nil
 }

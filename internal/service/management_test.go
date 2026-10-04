@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -388,33 +390,90 @@ func TestPrivateManagement(t *testing.T) {
 	if err != nil || afterCancel != rev {
 		t.Fatal("cancelled validation published", err)
 	}
+	// A second, passwordless profile lets one test batch span several targets.
+	driver.block.Store(false)
+	second := fixtureProfile()
+	second.Alias = "second"
+	if second.ID, e = config.NewID(); e != nil {
+		t.Fatal(e)
+	}
+	p.Connections = append(p.Connections, second)
+	if _, e = apply(p, rev, nil); e != nil {
+		t.Fatal("add batch profile", e)
+	}
+	if _, rev, e = config.Preview(t.Context(), c.Root); e != nil {
+		t.Fatal(e)
+	}
 	describe.Expected = rev
+	target := ProfileTarget{ProfileID: profile.ID, Alias: profile.Alias}
 	for _, bad := range []ManagementRequest{
 		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias},
 		{Operation: "browse", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev},
+		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias, Expected: rev, Targets: []ProfileTarget{target}},
+		{Operation: "test", ProfileID: profile.ID, Alias: profile.Alias},
+		{Operation: "test", ProfileID: profile.ID, Targets: []ProfileTarget{target}},
+		{Operation: "test", Targets: []ProfileTarget{target, target}},
+		{Operation: "test", Targets: []ProfileTarget{{Alias: profile.Alias}}},
+		{Operation: "credential-presence"},
+		{Operation: "credential-presence", Expected: rev, Targets: []ProfileTarget{target}},
+		{Operation: "credential-presence", Expected: rev, ProfileID: profile.ID},
+		{Operation: "credential-presence", Expected: rev, Mutation: &vault.Mutation{Expected: rev, Profiles: p}},
 	} {
 		if _, e = c.Request(t.Context(), bad); !errors.Is(e, ErrState) {
-			t.Fatal("invalid description request", e)
+			t.Fatal("invalid database request", bad, e)
 		}
 	}
+	// CSV export learns which secret fields exist at the exact revision; only
+	// flags cross the protocol, and the passwordless profile has no bundle.
+	presence, e := c.Request(t.Context(), ManagementRequest{Operation: "credential-presence", Expected: rev})
+	if e != nil || len(presence.Credentials) != 1 || presence.Credentials[0] != (CredentialPresence{ProfileID: profile.ID, Password: true}) {
+		t.Fatal("credential presence", presence.Credentials, e)
+	}
+	if raw, _ := json.Marshal(presence); bytes.Contains(raw, []byte("synthetic")) {
+		t.Fatal("credential presence exposed a secret")
+	}
+	if _, e = c.Request(t.Context(), ManagementRequest{Operation: "credential-presence", Expected: staleRevision}); !errors.Is(e, config.ErrRevision) {
+		t.Fatal("stale credential presence", e)
+	}
 	// Four blocked database management requests consume the entire admission budget;
-	// a fifth must fail promptly instead of waiting behind them.
+	// a fifth must fail promptly instead of waiting behind them. A test batch holds
+	// one slot while its targets run concurrently, and every streamed result
+	// arrives before its final reply.
 	driver.block.Store(true)
 	pending := make(chan error, 4)
 	for i := 0; i < 4; i++ {
 		go func() {
-			q := ManagementRequest{Operation: "test", ProfileID: profile.ID, Alias: profile.Alias}
-			if i%2 == 0 {
+			var mu sync.Mutex
+			var reported []string
+			q := ManagementRequest{Operation: "test", Targets: []ProfileTarget{target}, Report: func(r DiagnosticResult) error {
+				mu.Lock()
+				defer mu.Unlock()
+				reported = append(reported, r.Alias)
+				return nil
+			}}
+			want := []string{profile.Alias}
+			switch i {
+			case 0, 2:
 				q = describe
+			case 1:
+				q.Targets = append(q.Targets, ProfileTarget{ProfileID: second.ID, Alias: second.Alias})
+				want = append(want, second.Alias)
 			}
 			r, e := c.Request(t.Context(), q)
 			if e == nil && q.Operation == "describe" && (r.Description == nil || r.Description.Alias != profile.Alias || r.MCPEnabled) {
 				e = errors.New("management description lost snapshot or enabled MCP")
 			}
+			mu.Lock()
+			slices.Sort(reported)
+			slices.Sort(want)
+			if e == nil && q.Operation == "test" && !slices.Equal(reported, want) {
+				e = errors.New("test results did not precede the final reply")
+			}
+			mu.Unlock()
 			pending <- e
 		}()
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		select {
 		case <-driver.entered:
 		case <-time.After(3 * time.Second):
@@ -425,7 +484,7 @@ func TestPrivateManagement(t *testing.T) {
 		t.Fatal("description reloaded unlocked keyset")
 	}
 	bounded, finishAdmission := context.WithTimeout(t.Context(), time.Second)
-	_, overload := c.Request(bounded, ManagementRequest{Operation: "test", ProfileID: profile.ID, Alias: profile.Alias})
+	_, overload := c.Request(bounded, ManagementRequest{Operation: "test", Targets: []ProfileTarget{target}, Report: func(DiagnosticResult) error { return nil }})
 	finishAdmission()
 	if !errors.Is(overload, ErrUnavailable) {
 		t.Fatal("management overload queued", overload)
@@ -435,6 +494,14 @@ func TestPrivateManagement(t *testing.T) {
 		if e := <-pending; e != nil {
 			t.Fatal(e)
 		}
+	}
+	p, rev, e = config.Preview(t.Context(), c.Root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p.Connections = slices.DeleteFunc(p.Connections, func(c config.Profile) bool { return c.ID == second.ID })
+	if _, e = apply(p, rev, nil); e != nil {
+		t.Fatal("remove batch profile", e)
 	}
 	if state, e = c.Start(t.Context()); e != nil || !state.MCPEnabled {
 		t.Fatal("enable", state, e)

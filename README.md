@@ -56,20 +56,24 @@ data-mate mcp start
 
 ## Manage connections
 
-| Command                         | Purpose                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------- |
-| `data-mate db add`              | Save a PostgreSQL connection.                                             |
-| `data-mate db list`             | View aliases and nonsecret settings.                                      |
-| `data-mate db describe [alias]` | List application enums, tables, views, sequences, indexes, and functions. |
-| `data-mate db test [alias]`     | Test one connection, or all connections if omitted.                       |
-| `data-mate db edit [alias]`     | Update settings or credentials.                                           |
-| `data-mate db remove [alias]`   | Remove a connection and its saved credentials.                            |
-| `data-mate mcp status`          | Check service and agent registration status.                              |
-| `data-mate mcp stop`            | Stop agent access.                                                        |
+| Command                          | Purpose                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| `data-mate db add`               | Save a PostgreSQL connection.                                             |
+| `data-mate db list`              | View aliases and nonsecret settings.                                      |
+| `data-mate db describe [alias]`  | List application enums, tables, views, sequences, indexes, and functions. |
+| `data-mate db test [alias]`      | Test one connection, or all connections if omitted.                       |
+| `data-mate db edit [alias]`      | Update settings or credentials.                                           |
+| `data-mate db remove [alias]`    | Remove a connection and its saved credentials.                            |
+| `data-mate db export <file.csv>` | Export connections to a CSV file.                                         |
+| `data-mate db import <file.csv>` | Import connections from a CSV file.                                       |
+| `data-mate mcp status`           | Check service and agent registration status.                              |
+| `data-mate mcp stop`             | Stop agent access.                                                        |
 
 Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively.
 
 Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
+
+To copy connections to another machine, run `data-mate db export connections.csv`, then `data-mate db import connections.csv` there. Import asks for any passwords the file leaves empty.
 
 ## What agents can do
 

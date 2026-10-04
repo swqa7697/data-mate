@@ -53,7 +53,7 @@ func newDB(override *string, factory managementFactory, build Build) *cobra.Comm
 		}
 		db.AddCommand(cmd)
 	}
-	db.AddCommand(newDBTest(override, factory, build))
+	db.AddCommand(newDBTest(override, factory, build), newDBImport(override, factory, build), newDBExport(override, factory, build))
 	return db
 }
 
@@ -165,7 +165,7 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		if err != nil {
 			return failure("cannot generate connection identity")
 		}
-		profile = config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
+		profile = defaultProfile(id)
 	} else {
 		profile = profiles.Connections[index]
 		original = profile
@@ -196,30 +196,9 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		if profile.Transport.SSH == nil {
 			return invalid("SSH enrollment requires SSH settings")
 		}
-		raw, e := config.PreviewKnownHosts(ctx, root)
-		if e != nil {
-			return storageError(e, true)
-		}
-		pin, e := transport.ProbeHostKey(ctx, *profile.Transport.SSH, raw)
-		if e != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return failure(e.Error()) // transport returns only fixed safe diagnostics
-		}
-		f, e := getForm()
+		pin, e := enrollHost(ctx, root, *profile.Transport.SSH, getForm)
 		if e != nil {
 			return e
-		}
-		if _, e = fmt.Fprintf(f.terminal, "SSH endpoint: %q\nFingerprint: %s\n", pin.Address, ssh.FingerprintSHA256(pin.Key)); e != nil {
-			return failure("cannot write SSH fingerprint")
-		}
-		answer, e := f.ask("Trust this SSH fingerprint? [y/N]", "", false)
-		if e != nil {
-			return e
-		}
-		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
-			return context.Canceled
 		}
 		hostKey = &pin
 	}
@@ -263,29 +242,61 @@ func runDB(cmd *cobra.Command, args []string, action, override string, factory m
 		request.Pin = &service.HostPin{Address: hostKey.Address, Key: hostKey.Key.Marshal()}
 	}
 	reply, err := client.Request(ctx, request)
-	if err != nil && reply.Outcome == nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("mutation outcome unknown; run db list before retrying: %w", ctx.Err())
-		}
-	}
-	var outcome vault.Outcome
-	if reply.Outcome != nil {
-		outcome = *reply.Outcome
-	}
-
 	if err != nil {
-		if outcome.ProfilesSaved {
-			return failure("profile change committed; operation completion could not be confirmed; run db list before retrying")
-		}
-		if outcome.PublicationUncertain {
-			return failure("profile publication could not be confirmed; run db list before retrying")
-		}
-		return storageError(err, false)
+		return mutationError(ctx, reply.Outcome, err)
 	}
 	if _, err = fmt.Fprintln(cmd.OutOrStdout(), "Connection "+action+" completed."); err != nil {
 		return failure("change saved; cannot write output")
 	}
 	return nil
+}
+
+// defaultProfile is the starting point for every newly added connection.
+func defaultProfile(id string) config.Profile {
+	return config.Profile{ID: id, Driver: "postgres", Connection: config.Connection{Port: 5432}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
+}
+
+// enrollHost probes one SSH endpoint and returns its pin only after the user
+// trusts the displayed fingerprint; declining cancels the command. The form
+// opens after the probe so Ctrl-C still interrupts the network wait.
+func enrollHost(ctx context.Context, root config.Root, s config.SSH, getForm func() (*form, error)) (transport.HostKey, error) {
+	raw, err := config.PreviewKnownHosts(ctx, root)
+	if err != nil {
+		return transport.HostKey{}, storageError(err, true)
+	}
+	pin, err := transport.ProbeHostKey(ctx, s, raw)
+	if err != nil {
+		if ctx.Err() != nil {
+			return transport.HostKey{}, ctx.Err()
+		}
+		return transport.HostKey{}, failure(err.Error()) // transport returns only fixed safe diagnostics
+	}
+	f, err := getForm()
+	if err != nil {
+		return transport.HostKey{}, err
+	}
+	if _, err = fmt.Fprintf(f.terminal, "SSH endpoint: %q\nFingerprint: %s\n", pin.Address, ssh.FingerprintSHA256(pin.Key)); err != nil {
+		return transport.HostKey{}, failure("cannot write SSH fingerprint")
+	}
+	if err = f.consent("Trust this SSH fingerprint? [y/N]"); err != nil {
+		return transport.HostKey{}, err
+	}
+	return pin, nil
+}
+
+// mutationError maps a failed mutate reply to a public error, distinguishing
+// committed or uncertain publications from changes that were not saved.
+func mutationError(ctx context.Context, outcome *vault.Outcome, err error) error {
+	if outcome == nil && ctx.Err() != nil {
+		return fmt.Errorf("mutation outcome unknown; run db list before retrying: %w", ctx.Err())
+	}
+	if outcome != nil && outcome.ProfilesSaved {
+		return failure("profile change committed; operation completion could not be confirmed; run db list before retrying")
+	}
+	if outcome != nil && outcome.PublicationUncertain {
+		return failure("profile publication could not be confirmed; run db list before retrying")
+	}
+	return storageError(err, false)
 }
 
 func storageError(err error, input bool) error {

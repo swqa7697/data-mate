@@ -214,24 +214,25 @@ func (m *Manager) state(a adapter, s snapshot, executable string) string {
 	if s.entry == nil {
 		return "pending"
 	}
+	// Readiness concerns only our launch command. Client policy, environment and
+	// other user settings are not owned by Data Mate. Full fingerprints are used
+	// separately when deciding whether an entry may be removed.
+	launch := map[string]any{"command": s.entry["command"], "args": s.entry["args"]}
+	expected := map[string]any{"command": executable, "args": m.bridgeArgs()}
 	// Canonical JSON compares TOML/JSON array representations identically.
-	expected := m.desired(a, executable)
-	disabled := false
-	for k, v := range s.entry {
-		if a.name == "codex" && k == "enabled" {
+	if fingerprint(expected) != fingerprint(launch) || (a.name == "claude" && s.entry["type"] != "stdio") {
+		return "conflict"
+	}
+	if a.name == "codex" {
+		if v, exists := s.entry["enabled"]; exists {
 			enabled, ok := v.(bool)
 			if !ok {
 				return "conflict"
 			}
-			disabled = !enabled
-			expected[k] = v
+			if !enabled {
+				return "disabled"
+			}
 		}
-	}
-	if fingerprint(expected) != fingerprint(s.entry) {
-		return "conflict"
-	}
-	if disabled {
-		return "disabled"
 	}
 	return "ready"
 }
@@ -275,7 +276,7 @@ func (m *Manager) Inspect(ctx context.Context) ([]Status, error) {
 				result = ErrInspection
 			} else {
 				state = m.state(a, s, executable)
-				if i := owned.find(a.name); i >= 0 && (owned.Entries[i].Config != a.path || (s.entry != nil && fingerprint(s.entry) != owned.Entries[i].Fingerprint && state != "disabled")) {
+				if i := owned.find(a.name); i >= 0 && owned.Entries[i].Config != a.path {
 					state = "conflict"
 				}
 			}

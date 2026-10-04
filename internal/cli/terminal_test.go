@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/testsupport/transportfixture"
 	"golang.org/x/sys/unix"
@@ -105,7 +107,7 @@ func TestConnectionTerminal(t *testing.T) {
 				args = append(args, "--json")
 			}
 			code := run(args...)
-			if !fixture.closed {
+			if !fixture.isClosed() {
 				t.Fatal("pager retained management resources")
 			}
 			fmt.Println("catalog done")
@@ -120,10 +122,10 @@ func TestConnectionTerminal(t *testing.T) {
 			if !reflect.DeepEqual(before, files(t, root)) {
 				t.Fatal("description changed saved state")
 			}
-			if mode == "describe" && (code != 0 || len(fixture.described) != 1) {
+			if mode == "describe" && (code != 0 || len(fixture.describedAliases()) != 1) {
 				t.Fatal("description picker did not select profile")
 			}
-			if mode == "describe-cancel" && (code != ExitCancelled || len(fixture.described) != 0) {
+			if mode == "describe-cancel" && (code != ExitCancelled || len(fixture.describedAliases()) != 0) {
 				t.Fatal("canceled description reached database")
 			}
 			os.Exit(code)
@@ -178,6 +180,35 @@ func TestConnectionTerminal(t *testing.T) {
 			}
 			os.Exit(code)
 		}
+		// Extend the PTY scenario: CSV import must ask for a conflict policy with
+		// no default and prompt hidden only for empty required secret cells.
+		if mode == "import" {
+			command(t, root, keys, "", 0, "add", "--alias", "legacy", "--host", "localhost", "--database", "legacy", "--username", "reader", "--passwordless", "--yes")
+			legacy := snapshot(t, root).Connections[0]
+			dir := filepath.Dir(root)
+			key := "synthetic-import-key\n"
+			rows := "alias,host,database,username,password,ssh_host,ssh_user,ssh_auth\nlegacy,elsewhere,app,reader,,,,\nanalytics,localhost,app,reader,,,,\nlocal,localhost,app,reader,<none>,,,\njumpbox,localhost,app,reader,,jump.local,jump,key\n"
+			if err := os.WriteFile(filepath.Join(dir, "import-key"), []byte(key), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "import.csv"), []byte(rows), 0600); err != nil {
+				t.Fatal(err)
+			}
+			code := run("import", filepath.Join(dir, "import.csv"))
+			if code == 0 {
+				saved := map[string]config.Profile{}
+				for _, p := range snapshot(t, root).Connections {
+					saved[p.Alias] = p
+				}
+				if !reflect.DeepEqual(saved["legacy"], legacy) || saved["local"].CredentialRef != "" || credential(t, root, keys, saved["analytics"].ID).Password != "pty-hidden-secret" {
+					t.Fatal("import prompts saved the wrong connections")
+				}
+				if s := credential(t, root, keys, saved["jumpbox"].ID); s.SSHPrivateKey != key || s.Password != "" || s.SSHKeyPassphrase != "" {
+					t.Fatal("prompted key file or blank secrets not saved")
+				}
+			}
+			os.Exit(code)
+		}
 		code := run("add")
 		if strings.HasPrefix(mode, "keyring") {
 			keys.keyring = ""
@@ -190,6 +221,14 @@ func TestConnectionTerminal(t *testing.T) {
 				if code != 0 || len(p.Connections) != 1 || credential(t, root, keys, p.Connections[0].ID).Password != "pty-hidden-secret" {
 					t.Fatal("keyring preparation did not resume original save", code)
 				}
+			}
+			// A locked keyset prompts during live diagnostics; pending rows must
+			// clear and stay paused while the raw-mode prompt owns the terminal.
+			if mode == "keyring-unlock" {
+				keys.keyring = "unlock"
+				fmt.Println("diagnostics unlock")
+				code = run("test")
+				fmt.Println("diagnostics end")
 			}
 			os.Exit(code)
 		}

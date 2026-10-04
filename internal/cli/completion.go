@@ -41,6 +41,8 @@ func addCompletion(root *cobra.Command, override *string, build Build) {
 				callback = cobra.FixedCompletions([]string{"pem", "crt", "cer"}, cobra.ShellCompDirectiveFilterFileExt)
 			case "ssh-key-file":
 				callback = cobra.FixedCompletions(nil, cobra.ShellCompDirectiveDefault)
+			case "on-conflict":
+				callback = cobra.FixedCompletions([]string{"stop", "skip", "update"}, cobra.ShellCompDirectiveNoFileComp)
 			}
 			_ = cmd.RegisterFlagCompletionFunc(f.Name, callback)
 		})
@@ -77,6 +79,14 @@ func addCompletion(root *cobra.Command, override *string, build Build) {
 				}
 				slices.Sort(out)
 				return out, cobra.ShellCompDirectiveNoFileComp
+			}
+		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "db" && (cmd.Name() == "import" || cmd.Name() == "export") {
+			cmd.ValidArgsFunction = func(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+				if len(args) != 0 {
+					return nil, cobra.ShellCompDirectiveNoFileComp
+				}
+				return []string{"csv"}, cobra.ShellCompDirectiveFilterFileExt
 			}
 		}
 		for _, child := range cmd.Commands() {

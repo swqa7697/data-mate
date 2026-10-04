@@ -69,10 +69,12 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `db add [add-on-options]`: Add optional flags to add connection with advanced options like SSL/TLS, SSH tunnel and proxy
   - `db edit [c-alias(optional)]`: Modify a DB connection
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
+  - `db import <csv-file>`: Add, skip or update multiple DB connections from a CSV file; secrets are optional in the file and missing ones are entered in the terminal
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections
   - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a DB connection
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
+  - `db export <csv-file>`: Export all DB connections to a CSV file without secrets; a secret a connection does not use is marked explicitly as `<none>`
 - MCP - One shot
   - `mcp start`: Start the MCP service to expose all available DB connections to all supported agents
   - `mcp stop`: Stop the MCP service

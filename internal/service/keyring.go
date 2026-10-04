@@ -13,9 +13,11 @@ import (
 
 // These frames exist only after the authenticated management hello and request.
 // A challenge ID is scoped to this connection and this original operation.
+// Test results precede the final reply, one per target.
 type managementFrame struct {
 	Challenge *vault.KeyringChallenge `json:"challenge,omitempty"`
 	ID        string                  `json:"id,omitempty"`
+	Result    *DiagnosticResult       `json:"result,omitempty"`
 	Reply     *ManagementReply        `json:"reply,omitempty"`
 }
 type keyringAnswer struct {
@@ -25,7 +27,7 @@ type keyringAnswer struct {
 	Invalid  bool   `json:"invalid,omitempty"`
 }
 
-func exchangeManagement(ctx context.Context, conn *net.UnixConn, interactive bool) (ManagementReply, error) {
+func exchangeManagement(ctx context.Context, conn *net.UnixConn, request ManagementRequest) (ManagementReply, error) {
 	promptCtx, stopPrompt := context.WithCancel(ctx)
 	defer stopPrompt()
 	frames := make(chan managementFrame, 1)
@@ -54,7 +56,7 @@ func exchangeManagement(ctx context.Context, conn *net.UnixConn, interactive boo
 	var promptError error
 	for f := range frames {
 		if f.Reply != nil {
-			if f.Challenge != nil || f.ID != "" {
+			if f.Challenge != nil || f.ID != "" || f.Result != nil {
 				return ManagementReply{}, ErrState
 			}
 			if promptError != nil {
@@ -62,7 +64,14 @@ func exchangeManagement(ctx context.Context, conn *net.UnixConn, interactive boo
 			}
 			return *f.Reply, f.Reply.ResultError()
 		}
-		if f.Challenge == nil || !f.Challenge.Valid() || !config.ValidUUID(f.ID) || seen[f.ID] || len(seen) >= 8 || !interactive {
+		if f.Result != nil {
+			// The receiver rejects unrequested or repeated aliases.
+			if f.Challenge != nil || f.ID != "" || request.Report == nil || request.Report(*f.Result) != nil {
+				return ManagementReply{}, ErrState
+			}
+			continue
+		}
+		if f.Challenge == nil || !f.Challenge.Valid() || !config.ValidUUID(f.ID) || seen[f.ID] || len(seen) >= 8 || !request.Interactive {
 			return ManagementReply{}, ErrState
 		}
 		seen[f.ID] = true
@@ -171,6 +180,21 @@ func serveManagementExchange(ctx context.Context, conn *net.UnixConn, m *Manager
 			return nil, ctx.Err()
 		}
 	})
+	q.Report = func(r DiagnosticResult) error {
+		output.Lock()
+		defer output.Unlock()
+		if finished || operation.Err() != nil {
+			return context.Canceled
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		err := writeFrame(conn, managementFrame{Result: &r})
+		_ = conn.SetWriteDeadline(time.Time{})
+		if err != nil {
+			cancel()
+			return context.Canceled
+		}
+		return nil
+	}
 	reply := m.HandleManagement(promptOperation, q)
 	output.Lock()
 	defer output.Unlock()

@@ -12,7 +12,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/service"
-	"golang.org/x/term"
+	"github.com/swqa7697/data-mate/internal/vault"
 )
 
 type diagnosticResult = service.DiagnosticResult
@@ -52,25 +52,31 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 			return invalid("connection alias not found")
 		}
 	}
-	results := make([]diagnosticResult, 0, len(selected))
+	aliases := make([]string, len(selected))
+	targets := make([]service.ProfileTarget, len(selected))
+	for i, p := range selected {
+		aliases[i] = p.Alias
+		targets[i] = service.ProfileTarget{ProfileID: p.ID, Alias: p.Alias}
+	}
+	board := newDiagnosticBoard(aliases)
+	results := []diagnosticResult{}
 	if len(selected) > 0 {
-		client, err := factory(cmd.Context(), root)
-		if err != nil {
-			return serviceError(err)
+		var display *diagnosticDisplay
+		if !flag(cmd, "json") {
+			display = startDiagnosticDisplay(cmd.OutOrStdout(), board)
 		}
-		defer client.Close()
-		for _, p := range selected {
-			if err := cmd.Context().Err(); err != nil {
-				return err
+		err = requestDiagnostics(cmd, root, factory, board, targets, display)
+		if display != nil {
+			if e := display.stop(); e != nil && err == nil {
+				err = failure("cannot write diagnostics")
 			}
-			reply, err := client.Request(cmd.Context(), service.ManagementRequest{Operation: "test", Interactive: hasTerminal(cmd), ProfileID: p.ID, Alias: p.Alias})
-			if err != nil {
-				return storageError(err, false)
-			}
-			if reply.Diagnostic == nil {
-				return failure("diagnostic response unavailable")
-			}
-			results = append(results, *reply.Diagnostic)
+		}
+		if err != nil {
+			return err
+		}
+		var complete bool
+		if results, complete = board.complete(); !complete {
+			return failure("diagnostic response unavailable")
 		}
 	}
 	// No state lease is retained while writing to potentially slow output.
@@ -81,35 +87,9 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 		}{1, results}); err != nil {
 			return failure("cannot write diagnostics")
 		}
-	} else {
-		out := cmd.OutOrStdout()
-		terminal, isFile := out.(*os.File)
-		_, noColor := os.LookupEnv("NO_COLOR")
-		color := !noColor && isFile && term.IsTerminal(int(terminal.Fd()))
-		if len(results) == 0 {
-			if _, err = fmt.Fprintln(out, "No saved connections."); err != nil {
-				return failure("cannot write diagnostics")
-			}
-		}
-		for _, r := range results {
-			status, tint := "PASS", "\x1b[32m"
-			if !r.OK {
-				status, tint = "FAIL", "\x1b[31m"
-			}
-			if color {
-				status = tint + status + "\x1b[0m"
-			}
-			if _, err = fmt.Fprintf(out, "%s  %s\n", r.Alias, status); err != nil {
-				return failure("cannot write diagnostics")
-			}
-			for _, s := range r.Stages {
-				if s.OK {
-					continue
-				}
-				if _, err = fmt.Fprintf(out, "  %s: %s: %s\n", s.Stage, s.Error.Code, s.Error.Message); err != nil {
-					return failure("cannot write diagnostics")
-				}
-			}
+	} else if len(results) == 0 {
+		if _, err = fmt.Fprintln(cmd.OutOrStdout(), "No saved connections."); err != nil {
+			return failure("cannot write diagnostics")
 		}
 	}
 	code := ExitOK
@@ -126,6 +106,30 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 	}
 	if code != ExitOK {
 		return &Error{code, "one or more connection checks failed"}
+	}
+	return nil
+}
+
+// requestDiagnostics submits every target in one management request. The
+// service checks them concurrently and the board receives each result as it
+// completes; terminal prompts pause the live display.
+func requestDiagnostics(cmd *cobra.Command, root config.Root, factory managementFactory, board *diagnosticBoard, targets []service.ProfileTarget, display *diagnosticDisplay) error {
+	client, err := factory(cmd.Context(), root)
+	if err != nil {
+		return serviceError(err)
+	}
+	defer client.Close()
+	ctx := cmd.Context()
+	if display != nil && display.live {
+		prompt := keyringPrompt(cmd)
+		ctx = vault.WithKeyringPrompt(ctx, func(ctx context.Context, challenge vault.KeyringChallenge) ([]byte, error) {
+			display.pause()
+			defer display.resume()
+			return prompt(ctx, challenge)
+		})
+	}
+	if _, err = client.Request(ctx, service.ManagementRequest{Operation: "test", Interactive: hasTerminal(cmd), Targets: targets, Report: board.report}); err != nil {
+		return storageError(err, false)
 	}
 	return nil
 }
