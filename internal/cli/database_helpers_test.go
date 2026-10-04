@@ -6,6 +6,8 @@ import (
 	"github.com/swqa7697/data-mate/internal/service"
 	"github.com/swqa7697/data-mate/internal/vault"
 	"os"
+	"slices"
+	"sync"
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
@@ -14,18 +16,42 @@ import (
 )
 
 // Shared by command diagnostics and the PTY subprocess; no network or native keys.
+// The service runs batch checks concurrently, so observed calls are guarded.
 type fixtureDatabase struct {
 	acceptAll     bool
-	tested        []string
-	closed        bool
-	described     []string
 	describeError error
 	emptyCatalog  bool
 	catalog       []database.SchemaDescription
+	// before runs first in each Test call; an error fails the dial stage.
+	before func(context.Context, string) error
+
+	mu        sync.Mutex
+	tested    []string
+	described []string
+	closed    bool
+}
+
+// testedAliases returns tested aliases in alias order, independent of scheduling.
+func (d *fixtureDatabase) testedAliases() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Sorted(slices.Values(d.tested))
+}
+func (d *fixtureDatabase) describedAliases() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.described)
+}
+func (d *fixtureDatabase) isClosed() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closed
 }
 
 func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access) (database.DatabaseDescription, error) {
+	d.mu.Lock()
 	d.described = append(d.described, a.Profile.Alias)
+	d.mu.Unlock()
 	if d.describeError != nil {
 		return database.DatabaseDescription{}, d.describeError
 	}
@@ -56,9 +82,21 @@ func (d *fixtureDatabase) ValidateProfile(p config.Profile) error {
 	var driver postgres.Driver
 	return driver.ValidateProfile(p)
 }
-func (d *fixtureDatabase) Close() { d.closed = true }
-func (d *fixtureDatabase) Test(_ context.Context, a database.Access) (database.Readiness, error) {
+func (d *fixtureDatabase) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closed = true
+}
+func (d *fixtureDatabase) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
+	d.mu.Lock()
 	d.tested = append(d.tested, a.Profile.Alias)
+	d.mu.Unlock()
+	if d.before != nil {
+		if err := d.before(ctx, a.Profile.Alias); err != nil {
+			e := database.Fail(contracts.ConnectFailed, "fixture hook: "+err.Error(), false).(*database.Error)
+			return database.Readiness{Stage: "dial", Stages: []database.Stage{{Stage: "dial", Error: &e.Failure}}}, e
+		}
+	}
 	out := database.Readiness{ServerVersion: 160000, Stage: "read_only"}
 	for _, s := range []string{"config", "dial", "authentication", "version", "read_only"} {
 		if !d.acceptAll && a.Profile.Alias == "bad" && s == "authentication" {

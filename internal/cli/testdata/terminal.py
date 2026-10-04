@@ -15,6 +15,32 @@ import termios
 import time
 
 binary, base = sys.argv[1:]
+
+
+def screen(data):
+    """Replay live-display writes; cursor movement must stay within the output."""
+    lines, row, col = [b""], 0, 0
+    for token in re.findall(rb"\x1b\[[0-9;]*[A-Za-z]|\r|\n|[^\x1b\r\n]+", data):
+        if token == b"\r":
+            col = 0
+        elif token == b"\n":
+            row += 1
+            lines.extend([b""] * (row + 1 - len(lines)))
+        elif token.endswith(b"A"):
+            row -= int(token[2:-1] or b"1")
+            assert row >= 0, ("cursor left the display", data)
+        elif token.endswith(b"J"):
+            lines[row] = lines[row][:col]
+            del lines[row + 1:]
+        elif token.startswith(b"\x1b") and not token.endswith(b"m"):
+            raise AssertionError(("unexpected terminal control", token, data))
+        else:
+            lines[row] = lines[row][:col].ljust(col) + token + lines[row][col + len(token):]
+            col += len(token)
+    while len(lines) > 1 and not lines[-1]:
+        lines.pop()
+    return lines, col
+
 base_duration = catalog_duration = 0.0
 for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noninteractive", "happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel", "catalog-layout", "catalog-short", "catalog-pager", "catalog-cancel", "catalog-no-pager", "catalog-json", "catalog-redirected"):
     mode_started = time.monotonic()
@@ -106,6 +132,9 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
                 if mode == "keyring-unlock":
                     send_after("Keyring password:", "pty-wrong-keyring-secret\r")
                     send_after("Keyring password:", "pty-keyring-secret\r")
+                    send_after("diagnostics unlock\r\n", "")
+                    send_after("Keyring password:", "pty-keyring-secret\r")
+                    send_after("diagnostics end\r\n", "")
                 else:
                     send_after("Create keyring? [y/N]:", "y\r")
                     send_after("New keyring password:", "pty-keyring-secret\r" if mode != "keyring-cancel" else "pty-keyring-secret\x03")
@@ -183,7 +212,7 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
         elif mode == "diagnostics":
             for output in ("color", "no-color", "empty-no-color", "json"):
                 block = transcript.split(("diagnostics " + output + "\r\n").encode(), 1)[1].split(b"diagnostics end\r\n", 1)[0]
-                lines = block.splitlines()
+                lines = block.splitlines() if output == "json" else screen(block)[0]
                 assert lines[-1] == b"one or more connection checks failed", block
                 if output == "json":
                     assert b"\x1b" not in block, block
@@ -194,9 +223,21 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
                 else:
                     passed = b"\x1b[32mPASS\x1b[0m" if output == "color" else b"PASS"
                     failed = b"\x1b[31mFAIL\x1b[0m" if output == "color" else b"FAIL"
+                    # Every row is visible while pending, before any result.
+                    first_result = min(block.find(b"PASS"), block.find(b"FAIL"))
+                    assert -1 < block.find(b"bad  ") < block.find(b"good  ") < first_result, block
                     assert lines[:-1] == [b"bad  " + failed,
                                          b"  authentication: CONNECT_FAILED: authentication failed",
                                          b"good  " + passed], block
+        elif mode == "keyring-unlock":
+            block = transcript.split(b"diagnostics unlock\r\n", 1)[1].split(b"diagnostics end\r\n", 1)[0]
+            prompt = block.index(b"Enter the existing keyring password")
+            assert b"analytics  " in block[:prompt], block
+            lines, col = screen(block[:prompt])
+            assert col == 0 and not any(b"analytics" in line for line in lines), ("live rows overlapped the prompt", block)
+            lines, _ = screen(block)
+            assert lines[-1] == b"analytics  PASS" and not any(b"analytics" in line for line in lines[:-1]), ("live rows after the prompt", lines, block)
+            assert b"\x1b[36m" not in transcript and b"\x1b[1;36m" not in transcript and b"\x1b[32m" not in transcript, "NO_COLOR ignored"
         elif mode == "describe":
             assert b'{"version"' in transcript, (mode, transcript)
             report, _ = json.JSONDecoder().raw_decode(transcript[transcript.index(b'{"version"'):].decode())

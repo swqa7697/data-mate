@@ -105,7 +105,7 @@ func TestConnectionTerminal(t *testing.T) {
 				args = append(args, "--json")
 			}
 			code := run(args...)
-			if !fixture.closed {
+			if !fixture.isClosed() {
 				t.Fatal("pager retained management resources")
 			}
 			fmt.Println("catalog done")
@@ -120,10 +120,10 @@ func TestConnectionTerminal(t *testing.T) {
 			if !reflect.DeepEqual(before, files(t, root)) {
 				t.Fatal("description changed saved state")
 			}
-			if mode == "describe" && (code != 0 || len(fixture.described) != 1) {
+			if mode == "describe" && (code != 0 || len(fixture.describedAliases()) != 1) {
 				t.Fatal("description picker did not select profile")
 			}
-			if mode == "describe-cancel" && (code != ExitCancelled || len(fixture.described) != 0) {
+			if mode == "describe-cancel" && (code != ExitCancelled || len(fixture.describedAliases()) != 0) {
 				t.Fatal("canceled description reached database")
 			}
 			os.Exit(code)
@@ -190,6 +190,14 @@ func TestConnectionTerminal(t *testing.T) {
 				if code != 0 || len(p.Connections) != 1 || credential(t, root, keys, p.Connections[0].ID).Password != "pty-hidden-secret" {
 					t.Fatal("keyring preparation did not resume original save", code)
 				}
+			}
+			// A locked keyset prompts during live diagnostics; pending rows must
+			// clear and stay paused while the raw-mode prompt owns the terminal.
+			if mode == "keyring-unlock" {
+				keys.keyring = "unlock"
+				fmt.Println("diagnostics unlock")
+				code = run("test")
+				fmt.Println("diagnostics end")
 			}
 			os.Exit(code)
 		}

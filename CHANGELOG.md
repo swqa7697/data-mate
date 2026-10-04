@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Check connections concurrently in `db test` through one service request, showing each connection immediately in `db list` order with an animated terminal indicator until its result arrives; preserve redirected output, JSON and exit codes.
+
 ### Fixed
 
 - Allow custom MCP client settings and explicitly reenabled Codex registrations without reporting registration conflicts; preserve user settings during status and start and retain modified registrations during uninstall.
