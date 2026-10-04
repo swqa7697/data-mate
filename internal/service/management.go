@@ -61,11 +61,22 @@ type DiagnosticResult struct {
 	Error  *contracts.Failure `json:"error,omitempty"`
 }
 
+// CredentialPresence reports which saved secret fields are nonempty, never their values.
+type CredentialPresence struct {
+	ProfileID        string `json:"profile_id"`
+	Password         bool   `json:"password"`
+	SSHPassword      bool   `json:"ssh_password"`
+	SSHPrivateKey    bool   `json:"ssh_private_key"`
+	SSHKeyPassphrase bool   `json:"ssh_key_passphrase"`
+	ProxyPassword    bool   `json:"proxy_password"`
+}
+
 // ManagementReply contains bounded nonsecret results and fixed safe error identifiers.
 type ManagementReply struct {
 	Outcome     *vault.Outcome                `json:"outcome,omitempty"`
 	Diagnostic  *DiagnosticResult             `json:"diagnostic,omitempty"`
 	Description *database.DatabaseDescription `json:"description,omitempty"`
+	Credentials []CredentialPresence          `json:"credentials,omitempty"`
 	Error       string                        `json:"error,omitempty"`
 	Failure     *contracts.Failure            `json:"failure,omitempty"`
 	MCPEnabled  bool                          `json:"mcp_enabled"`
@@ -282,6 +293,12 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 		if err == nil && reply.Diagnostic == nil {
 			reply.Description = &description
 		}
+	case "credential-presence":
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID != "" || q.Alias != "" || q.Expected == "" || len(q.Targets) != 0 {
+			err = ErrState
+			return
+		}
+		reply.Credentials, err = m.credentialPresence(ctx, q.Expected)
 	default:
 		err = ErrState
 	}
@@ -320,6 +337,57 @@ func (m *Manager) describeProfile(parent context.Context, q ManagementRequest, d
 	}
 	unlockErr := m.prepareCredentials(parent, []config.Profile{*p})
 	return m.checkProfile(parent, q.Operation, q.Expected, *p, unlockErr, description)
+}
+
+// credentialPresence reports which secret fields each credentialed profile has
+// at the expected revision; values never leave the service. A profile whose
+// bundle is missing is omitted so callers treat its presence as unknown.
+func (m *Manager) credentialPresence(ctx context.Context, expected config.Revision) ([]CredentialPresence, error) {
+	l, err := m.store.ReadLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Release before unlocking: a waiting writer blocks the vault's own lease.
+	profiles, revision, err := l.ProfileSnapshot()
+	l.Release()
+	if err != nil {
+		return nil, err
+	}
+	if revision != expected {
+		return nil, config.ErrRevision
+	}
+	if !slices.ContainsFunc(profiles.Connections, func(p config.Profile) bool { return p.CredentialRef != "" }) {
+		return nil, nil
+	}
+	if err = m.unlock(ctx); err != nil {
+		return nil, err
+	}
+	l, err = m.store.ReadLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Release()
+	if _, revision, err = l.ProfileSnapshot(); err != nil {
+		return nil, err
+	}
+	if revision != expected {
+		return nil, config.ErrRevision
+	}
+	var presence []CredentialPresence
+	for _, p := range profiles.Connections {
+		if p.CredentialRef == "" {
+			continue
+		}
+		s, err := m.repo.Credential(ctx, l, p.ID)
+		if errors.Is(err, vault.ErrCredentialMissing) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		presence = append(presence, CredentialPresence{ProfileID: p.ID, Password: s.Password != "", SSHPassword: s.SSHPassword != "", SSHPrivateKey: s.SSHPrivateKey != "", SSHKeyPassphrase: s.SSHKeyPassphrase != "", ProxyPassword: s.ProxyPassword != ""})
+	}
+	return presence, nil
 }
 
 // testProfiles checks targets concurrently and reports each result as it

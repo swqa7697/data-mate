@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -413,10 +414,26 @@ func TestPrivateManagement(t *testing.T) {
 		{Operation: "test", ProfileID: profile.ID, Targets: []ProfileTarget{target}},
 		{Operation: "test", Targets: []ProfileTarget{target, target}},
 		{Operation: "test", Targets: []ProfileTarget{{Alias: profile.Alias}}},
+		{Operation: "credential-presence"},
+		{Operation: "credential-presence", Expected: rev, Targets: []ProfileTarget{target}},
+		{Operation: "credential-presence", Expected: rev, ProfileID: profile.ID},
+		{Operation: "credential-presence", Expected: rev, Mutation: &vault.Mutation{Expected: rev, Profiles: p}},
 	} {
 		if _, e = c.Request(t.Context(), bad); !errors.Is(e, ErrState) {
 			t.Fatal("invalid database request", bad, e)
 		}
+	}
+	// CSV export learns which secret fields exist at the exact revision; only
+	// flags cross the protocol, and the passwordless profile has no bundle.
+	presence, e := c.Request(t.Context(), ManagementRequest{Operation: "credential-presence", Expected: rev})
+	if e != nil || len(presence.Credentials) != 1 || presence.Credentials[0] != (CredentialPresence{ProfileID: profile.ID, Password: true}) {
+		t.Fatal("credential presence", presence.Credentials, e)
+	}
+	if raw, _ := json.Marshal(presence); bytes.Contains(raw, []byte("synthetic")) {
+		t.Fatal("credential presence exposed a secret")
+	}
+	if _, e = c.Request(t.Context(), ManagementRequest{Operation: "credential-presence", Expected: staleRevision}); !errors.Is(e, config.ErrRevision) {
+		t.Fatal("stale credential presence", e)
 	}
 	// Four blocked database management requests consume the entire admission budget;
 	// a fifth must fail promptly instead of waiting behind them. A test batch holds

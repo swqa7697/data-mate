@@ -97,8 +97,11 @@ func (f *form) ask(label, current string, hidden bool) (string, error) {
 	}
 	return value, nil
 }
-func (f *form) confirm() error {
-	value, err := f.ask("Save changes? [y/N]", "", false)
+func (f *form) confirm() error { return f.consent("Save changes? [y/N]") }
+
+// consent asks a default-No question; anything but y/yes cancels the command.
+func (f *form) consent(question string) error {
+	value, err := f.ask(question, "", false)
 	if err != nil {
 		return err
 	}

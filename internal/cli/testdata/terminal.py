@@ -42,7 +42,7 @@ def screen(data):
     return lines, col
 
 base_duration = catalog_duration = 0.0
-for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noninteractive", "happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel", "catalog-layout", "catalog-short", "catalog-pager", "catalog-cancel", "catalog-no-pager", "catalog-json", "catalog-redirected"):
+for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noninteractive", "happy", "no", "ctrl-c", "signal", "enroll", "enroll-no", "enroll-cancel", "diagnostics", "describe", "describe-cancel", "catalog-layout", "catalog-short", "catalog-pager", "catalog-cancel", "catalog-no-pager", "catalog-json", "catalog-redirected", "import"):
     mode_started = time.monotonic()
     print("PTY mode: " + mode, file=sys.stderr, flush=True)
     root = os.path.join(base, mode)
@@ -106,6 +106,15 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
                 # unread terminal output on its last close.
                 send_after('{"version":', "")
                 send_after('\r\n', "")
+        elif mode == "import":
+            send_after("Stop, skip, or update? [stop/skip/update]:", "bogus\r")
+            send_after("Stop, skip, or update? [stop/skip/update]:", "skip\r")
+            send_after("Password for analytics:", "pty-hidden-secret\r")
+            send_after("Password for jumpbox:", "\r")
+            send_after("SSH key file for jumpbox:", os.path.join(base, "import-key") + "\r")
+            send_after("SSH key passphrase for jumpbox (blank for none):", "\r")
+            send_after("Save changes? [y/N]:", "y\r")
+            send_after("jumpbox  added", "")
         elif mode.startswith("enroll"):
             send_after("SSH password:", "synthetic\r")
             send_after("Trust this SSH fingerprint? [y/N]:", "\r" if mode == "enroll-no" else "y\r")
@@ -118,7 +127,7 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
             send_after("Port [5432]:", "\r")
             send_after("Database:", "app\r")
             send_after("Username:", "reader\r")
-        if mode.startswith(("enroll", "describe", "catalog")) or mode in ("diagnostics", "keyring-noninteractive"):
+        if mode.startswith(("enroll", "describe", "catalog")) or mode in ("diagnostics", "keyring-noninteractive", "import"):
             pass
         elif mode == "signal":
             send_after("Password:", "")
@@ -174,7 +183,7 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
                 if err.errno != errno.EIO:
                     raise
                 break
-        assert code == (1 if mode=="keyring-noninteractive" else 0 if mode in ("keyring-create", "keyring-unlock", "happy", "enroll", "diagnostics", "describe") or (mode.startswith("catalog") and mode != "catalog-cancel") else 130), (mode, code, transcript)
+        assert code == (1 if mode=="keyring-noninteractive" else 0 if mode in ("keyring-create", "keyring-unlock", "happy", "enroll", "diagnostics", "describe", "import") or (mode.startswith("catalog") and mode != "catalog-cancel") else 130), (mode, code, transcript)
         assert b"pty-hidden-secret" not in transcript, transcript
         assert b"hidden-cancel-secret" not in transcript, transcript
         for secret in (b"pty-keyring-secret", b"pty-wrong-keyring-secret", b"pty-mismatch-secret"):
@@ -255,6 +264,10 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
             assert b'reader' in transcript, "username must remain visible"
             # Raw-mode review must emit CRLF so subsequent lines start at column 0.
             assert b'\r\nAlias: analytics\r\nDriver: postgres\r\n' in transcript
+        elif mode == "import":
+            assert b"Password for local" not in transcript, "<none> cell was prompted"
+            for row in (b"legacy  skipped", b"analytics  added", b"local  added", b"jumpbox  added"):
+                assert row in transcript, (row, transcript)
         elif mode != "diagnostics" and not mode.startswith(("describe", "catalog", "keyring")):
             assert os.listdir(root) == [], "cancellation created state"
         for parent, _, names in os.walk(root):
