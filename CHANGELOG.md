@@ -13,6 +13,7 @@
 ### Fixed
 
 - Allow custom MCP client settings and explicitly reenabled Codex registrations without reporting registration conflicts; preserve user settings during status and start and retain modified registrations during uninstall.
+- Stop intermittently disconnecting MCP clients that send up to sixteen concurrent tool calls, or reuse a request ID, immediately after receiving a response.
 
 ## [0.2.2] - 2026-09-27
 
