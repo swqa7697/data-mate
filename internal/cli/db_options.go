@@ -199,22 +199,11 @@ func readSecrets(cmd *cobra.Command) (secretPatch, error) {
 		}
 	}
 	if changed(cmd, "ssh-key-file") {
-		fd, err := unix.Open(str(cmd, "ssh-key-file"), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+		key, err := readKeyFile(str(cmd, "ssh-key-file"))
 		if err != nil {
-			return nil, invalid("cannot read SSH key file")
+			return nil, err
 		}
-		f := os.NewFile(uintptr(fd), "SSH key input")
-		defer f.Close()
-		st, err := f.Stat()
-		if err != nil || !st.Mode().IsRegular() || st.Size() > vault.MaxSecretBytes {
-			return nil, invalid("SSH key must be a bounded regular file")
-		}
-		b, err := io.ReadAll(io.LimitReader(f, vault.MaxSecretBytes+1))
-		defer clear(b)
-		if err != nil || len(b) == 0 {
-			return nil, invalid("cannot read SSH key file")
-		}
-		patch["ssh_private_key"] = string(b)
+		patch["ssh_private_key"] = key
 		patch["ssh_password"] = ""
 	}
 	for _, v := range patch {
@@ -223,4 +212,24 @@ func readSecrets(cmd *cobra.Command) (secretPatch, error) {
 		}
 	}
 	return patch, nil
+}
+
+// readKeyFile reads one bounded regular private-key file for vault import.
+func readKeyFile(path string) (string, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", invalid("cannot read SSH key file")
+	}
+	f := os.NewFile(uintptr(fd), "SSH key input")
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > vault.MaxSecretBytes {
+		return "", invalid("SSH key must be a bounded regular file")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, vault.MaxSecretBytes+1))
+	defer clear(b)
+	if err != nil || len(b) == 0 {
+		return "", invalid("cannot read SSH key file")
+	}
+	return string(b), nil
 }

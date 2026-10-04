@@ -2,9 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `db export` and `db import` to move connections through CSV files. Export writes nonsecret settings to an owner-only file, marking secrets a connection lacks as `<none>` without writing secret values; import accepts optional secrets in the file, prompts for missing ones, resolves existing aliases with `--on-conflict` or a prompt, supports `--ssh-enroll`, and validates and saves each row independently.
+
+### Changed
+
+- Check connections concurrently in `db test` through one service request, showing each connection immediately in `db list` order with an animated terminal indicator until its result arrives; preserve redirected output, JSON and exit codes.
+
 ### Fixed
 
 - Allow custom MCP client settings and explicitly reenabled Codex registrations without reporting registration conflicts; preserve user settings during status and start and retain modified registrations during uninstall.
+- Stop intermittently disconnecting MCP clients that send up to sixteen concurrent tool calls, or reuse a request ID, immediately after receiving a response.
 
 ## [0.2.2] - 2026-09-27
 

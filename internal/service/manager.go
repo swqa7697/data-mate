@@ -29,13 +29,14 @@ type Manager struct {
 	enabled         bool
 	enable          func(context.Context) error
 	management      chan struct{}
+	diagnostics     chan struct{}
 	profiles        config.Profiles
 	revision        config.Revision
 }
 
 func newManager(ctx context.Context, s *config.Store, keys vault.KeyProvider, d database.Driver) *Manager {
 	ctx, cancel := context.WithCancel(ctx)
-	return &Manager{store: s, repo: vault.New(s, keys), driver: d, ctx: ctx, cancel: cancel, active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations), management: make(chan struct{}, 4)}
+	return &Manager{store: s, repo: vault.New(s, keys), driver: d, ctx: ctx, cancel: cancel, active: make(chan struct{}, database.MaxActiveOperations), waiting: make(chan struct{}, database.MaxWaitingOperations), management: make(chan struct{}, 4), diagnostics: make(chan struct{}, diagnosticConcurrency)}
 }
 func (m *Manager) initialize(ctx context.Context) error {
 	l, err := m.store.ReadLease(ctx)

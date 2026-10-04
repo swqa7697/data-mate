@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -277,6 +280,7 @@ func TestConnectionCRUD(t *testing.T) {
 	if s.SSHPassword != "synthetic-ssh-secret" || s.Password != "replacement-secret" || p.Connections[0].Limits.QueryTimeoutMS != 750 {
 		t.Fatal("advanced settings or secrets lost")
 	}
+	connectionTransfer(t, root, keys)
 	command(t, root, keys, "", 0, "edit", "renamed", "--clear-password", "--tls", "--yes")
 	p = snapshot(t, root)
 	if p.Connections[0].Transport.TLS.CAFile != "/tmp/synthetic-ca.pem" {
@@ -348,6 +352,190 @@ func TestConnectionCRUD(t *testing.T) {
 	}
 }
 
+// connectionTransfer extends the CRUD fixture once it carries TLS, SSH and
+// custom limits. Export must mark absent secrets without exporting values, and
+// import must reproduce settings and secrets under each conflict policy. The
+// extra connections are removed so the remaining CRUD steps see one profile.
+func connectionTransfer(t *testing.T, root string, keys *testKeys) {
+	t.Helper()
+	command(t, root, keys, "", 0, "add", "--alias", "nopass", "--host", "localhost", "--database", "app", "--username", "reader", "--passwordless", "--yes")
+	command(t, root, keys, `{"ssh_password":"sshonly-secret"}`, 0, "add", "--alias", "sshonly", "--host", "db.internal", "--database", "app", "--username", "reader", "--passwordless", "--ssh-host", "jump.local", "--ssh-user", "jump", "--credentials-stdin", "--yes")
+	dir := t.TempDir()
+	exported := filepath.Join(dir, "connections.csv")
+	before := files(t, root)
+	if out, _ := command(t, root, keys, "", 0, "export", exported); out != "Exported 3 connections.\n" || !reflect.DeepEqual(before, files(t, root)) {
+		t.Fatal("export output or state", out)
+	}
+	raw, err := os.ReadFile(exported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(exported); err != nil || st.Mode().Perm() != 0600 {
+		t.Fatal("export is not owner-only", err)
+	}
+	leaks := []string{"replacement-secret", "synthetic-ssh-secret", "sshonly-secret"}
+	for _, p := range snapshot(t, root).Connections {
+		leaks = append(leaks, p.ID)
+		if p.CredentialRef != "" {
+			leaks = append(leaks, p.CredentialRef)
+		}
+	}
+	for _, leak := range leaks {
+		if strings.Contains(string(raw), leak) {
+			t.Fatal("export leaked a secret or identity")
+		}
+	}
+	// Empty means a saved secret was withheld; <none> means the secret is absent.
+	cells := csvCells(t, exported)
+	for alias, want := range map[string]map[string]string{
+		"renamed": {"password": "", "ssh_password": "", "ssh_auth": "password", "tls": "true", "tls_ca": "/tmp/synthetic-ca.pem", "query_timeout": "750ms", "max_rows": "12", "max_result_bytes": "4096"},
+		"nopass":  {"password": noSecret, "ssh_password": "", "ssh_host": ""},
+		"sshonly": {"password": noSecret, "ssh_password": "", "ssh_host": "jump.local"},
+	} {
+		for column, value := range want {
+			if cells[alias][column] != value {
+				t.Fatalf("export %s.%s = %q, want %q", alias, column, cells[alias][column], value)
+			}
+		}
+	}
+	command(t, root, keys, "", 2, "export", exported)
+	if after, _ := os.ReadFile(exported); !bytes.Equal(raw, after) {
+		t.Fatal("unconfirmed export replaced the file")
+	}
+	command(t, root, keys, "", 0, "export", exported, "--yes")
+
+	// Filling only the withheld cells reproduces settings and secrets elsewhere.
+	filled := filepath.Join(dir, "filled.csv")
+	editCSV(t, exported, filled, map[string]map[string]string{"renamed": {"password": "replacement-secret", "ssh_password": "synthetic-ssh-secret"}, "sshonly": {"ssh_password": "sshonly-secret"}})
+	fresh, freshKeys := privateRoot(t), &testKeys{}
+	if out, _ := command(t, fresh, freshKeys, "", 0, "import", filled, "--yes"); out != "nopass  added\nrenamed  added\nsshonly  added\n" {
+		t.Fatal("import output", out)
+	}
+	settings := func(root string) []config.Profile {
+		p := snapshot(t, root).Connections
+		for i := range p {
+			p[i].ID, p[i].CredentialRef = "", ""
+		}
+		slices.SortFunc(p, func(a, b config.Profile) int { return strings.Compare(a.Alias, b.Alias) })
+		return p
+	}
+	if !reflect.DeepEqual(settings(root), settings(fresh)) {
+		t.Fatal("round trip changed settings", settings(fresh))
+	}
+	imported := map[string]config.Profile{}
+	for _, p := range snapshot(t, fresh).Connections {
+		imported[p.Alias] = p
+	}
+	if s := credential(t, fresh, freshKeys, imported["renamed"].ID); s.Password != "replacement-secret" || s.SSHPassword != "synthetic-ssh-secret" {
+		t.Fatal("round trip lost secrets")
+	}
+	if s := credential(t, fresh, freshKeys, imported["sshonly"].ID); s.Password != "" || s.SSHPassword != "sshonly-secret" || imported["nopass"].CredentialRef != "" {
+		t.Fatal("round trip did not preserve absent secrets")
+	}
+
+	// Existing aliases need an explicit policy; stop and a missing choice save nothing.
+	before = files(t, fresh)
+	command(t, fresh, freshKeys, "", 2, "import", filled, "--yes")
+	command(t, fresh, freshKeys, "", 2, "import", filled, "--on-conflict", "stop", "--yes")
+	if !reflect.DeepEqual(before, files(t, fresh)) {
+		t.Fatal("refused conflict changed state")
+	}
+	if out, _ := command(t, fresh, freshKeys, "", 0, "import", filled, "--on-conflict", "skip", "--yes"); out != "nopass  skipped\nrenamed  skipped\nsshonly  skipped\n" {
+		t.Fatal("skip output", out)
+	}
+	// Updating from the unfilled export keeps withheld secrets; <none> reapplies absence.
+	if out, _ := command(t, fresh, freshKeys, "", 0, "import", exported, "--on-conflict", "update", "--yes"); out != "nopass  updated\nrenamed  unchanged\nsshonly  updated\n" {
+		t.Fatal("update output", out)
+	}
+	if s := credential(t, fresh, freshKeys, imported["sshonly"].ID); s.Password != "" || s.SSHPassword != "sshonly-secret" {
+		t.Fatal("update lost a withheld secret")
+	}
+	changed := filepath.Join(dir, "changed.csv")
+	editCSV(t, exported, changed, map[string]map[string]string{"renamed": {"max_rows": "99"}})
+	command(t, fresh, freshKeys, "", 0, "import", changed, "--on-conflict", "update", "--yes")
+	for _, p := range snapshot(t, fresh).Connections {
+		if p.Alias == "renamed" && (p.ID != imported["renamed"].ID || p.CredentialRef != imported["renamed"].CredentialRef || p.Limits.MaxRows != 99) {
+			t.Fatal("update changed identity or skipped settings")
+		}
+	}
+	if s := credential(t, fresh, freshKeys, imported["renamed"].ID); s.Password != "replacement-secret" || s.SSHPassword != "synthetic-ssh-secret" {
+		t.Fatal("update lost secrets")
+	}
+
+	// A row rejected by live validation does not stop later rows.
+	partial := filepath.Join(dir, "partial.csv")
+	if err = os.WriteFile(partial, []byte("alias,host,database,username,password\nbad,localhost,app,reader,<none>\ngood,localhost,app,reader,<none>\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := commandWithDatabase(Build{}, freshKeys, func() (cliDatabase, error) { return &fixtureDatabase{}, nil })
+	cmd.SetArgs([]string{"--root", fresh, "db", "import", partial, "--yes"})
+	cmd.SetIn(strings.NewReader(""))
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	if err = cmd.ExecuteContext(t.Context()); ExitCode(err) != ExitFailure || out.String() != "bad  FAIL  CONNECT_FAILED: authentication failed\ngood  added\n" {
+		t.Fatal("partial import", err, out.String())
+	}
+	aliases := []string{}
+	for _, p := range snapshot(t, fresh).Connections {
+		aliases = append(aliases, p.Alias)
+	}
+	if slices.Contains(aliases, "bad") || !slices.Contains(aliases, "good") {
+		t.Fatal("partial import saved the wrong rows", aliases)
+	}
+	command(t, root, keys, "", 0, "rm", "nopass", "--yes")
+	command(t, root, keys, "", 0, "rm", "sshonly", "--yes")
+}
+
+// csvCells indexes an exported CSV by alias, then column.
+func csvCells(t *testing.T, path string) map[string]map[string]string {
+	t.Helper()
+	records := readCSV(t, path)
+	cells := map[string]map[string]string{}
+	for _, record := range records[1:] {
+		row := map[string]string{}
+		for i, column := range records[0] {
+			row[column] = record[i]
+		}
+		cells[row["alias"]] = row
+	}
+	return cells
+}
+
+// editCSV copies src to dst, replacing cells selected by alias and column.
+func editCSV(t *testing.T, src, dst string, edits map[string]map[string]string) {
+	t.Helper()
+	records := readCSV(t, src)
+	for _, record := range records[1:] {
+		for i, column := range records[0] {
+			if value, ok := edits[record[0]][column]; ok {
+				record[i] = value
+			}
+		}
+	}
+	var b bytes.Buffer
+	w := csv.NewWriter(&b)
+	if err := w.WriteAll(records); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+func readCSV(t *testing.T, path string) [][]string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	records, err := csv.NewReader(f).ReadAll()
+	if err != nil || len(records) == 0 || records[0][0] != "alias" {
+		t.Fatal("unreadable CSV", err)
+	}
+	return records
+}
+
 // Curated input failures exercise the CLI ownership boundary, including bounded
 // stdin and preview-time races which pure profile/vault tests cannot cover.
 func TestConnectionInputs(t *testing.T) {
@@ -384,6 +572,48 @@ func TestConnectionInputs(t *testing.T) {
 		out, diag := command(t, root, keys, tc.input, 2, append(append([]string{}, basicAdd...), tc.extra...)...)
 		if keys.calls != 0 || !reflect.DeepEqual(before, files(t, root)) || strings.Contains(out+diag, "secret-sentinel") {
 			t.Fatalf("%s changed state or leaked input", tc.name)
+		}
+	}
+	// CSV import shares the boundary: a malformed file or missing scripted input
+	// fails before key access or state changes and never echoes cell values.
+	header := "alias,host,database,username,password"
+	tooMany := []string{header}
+	for i := range 129 {
+		tooMany = append(tooMany, fmt.Sprintf("a%03d,localhost,app,reader,secret-sentinel", i))
+	}
+	for _, tc := range []struct {
+		name, csv string
+		extra     []string
+	}{
+		{"unknown column", "alias,host,database,username,secret-sentinel\na,localhost,app,reader,x\n", nil},
+		{"duplicate column", "alias,host,database,username,host\na,localhost,app,reader,secret-sentinel\n", nil},
+		{"missing column", "alias,host,database\na,localhost,secret-sentinel\n", nil},
+		{"empty alias", header + "\n,localhost,app,reader,secret-sentinel\n", nil},
+		{"duplicate alias", header + "\na,localhost,app,reader,secret-sentinel\na,localhost,app,reader,secret-sentinel\n", nil},
+		{"malformed quote", header + "\na,\"localhost,app,reader,secret-sentinel\n", nil},
+		{"invalid utf8", header + "\na,localhost,\xff,reader,secret-sentinel\n", nil},
+		{"hex port", header + ",port\na,localhost,app,reader,secret-sentinel,0x10\n", nil},
+		{"proxy secret without proxy", "alias,host,database,username,password,proxy_password\na,localhost,app,reader,<none>,secret-sentinel\n", nil},
+		{"credential URL host", header + "\na,postgres://reader:secret-sentinel@host/db,app,reader,<none>\n", nil},
+		{"missing password nonTTY", "alias,host,database,username\na,localhost,app,reader\n", nil},
+		{"missing key nonTTY", header + ",ssh_host,ssh_user,ssh_auth\na,localhost,app,reader,secret-sentinel,jump,u,key\n", nil},
+		{"marker key file", header + ",ssh_host,ssh_user,ssh_key_file\na,localhost,app,reader,secret-sentinel,jump,u,<none>\n", nil},
+		{"relative key file", header + ",ssh_host,ssh_user,ssh_key_file\na,localhost,app,reader,secret-sentinel,jump,u,key.pem\n", nil},
+		{"too many rows", strings.Join(tooMany, "\n") + "\n", nil},
+		{"noninteractive host enrollment", header + "\na,localhost,app,reader,secret-sentinel\n", []string{"--ssh-enroll"}},
+		{"unknown conflict policy", header + "\na,localhost,app,reader,secret-sentinel\n", []string{"--on-conflict", "merge"}},
+		{"missing confirmation", header + "\na,localhost,app,reader,secret-sentinel\n", []string{"--yes=false"}},
+	} {
+		root := privateRoot(t)
+		keys := &testKeys{}
+		path := filepath.Join(t.TempDir(), "import.csv")
+		if err := os.WriteFile(path, []byte(tc.csv), 0600); err != nil {
+			t.Fatal(err)
+		}
+		before := files(t, root)
+		out, diag := command(t, root, keys, "", 2, append([]string{"import", path, "--yes"}, tc.extra...)...)
+		if keys.calls != 0 || !reflect.DeepEqual(before, files(t, root)) || strings.Contains(out+diag, "secret-sentinel") {
+			t.Fatalf("%s changed state or leaked input: %s", tc.name, diag)
 		}
 	}
 	root := privateRoot(t)
@@ -432,6 +662,40 @@ func TestConnectionInputs(t *testing.T) {
 	p = snapshot(t, root)
 	if p.Connections[0].Alias != "analytics" || p.Connections[0].Connection.Database != "newer" {
 		t.Fatal("newer manual state overwritten")
+	}
+	// Another writer between import rows stops the import; later rows are not
+	// built on profiles the confirmation never reviewed.
+	rows := filepath.Join(t.TempDir(), "rows.csv")
+	if err := os.WriteFile(rows, []byte("alias,host,database,username,password\nfirst,localhost,app,reader,<none>\nsecond,localhost,app,reader,<none>\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd = newCommand(Build{}, keys)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--root", root, "db", "import", rows, "--yes"})
+	interrupted := false
+	cmd.SetOut(writerFunc(func(b []byte) (int, error) {
+		if !interrupted {
+			interrupted = true
+			p := snapshot(t, root)
+			for i := range p.Connections {
+				if p.Connections[i].Alias == "analytics" {
+					p.Connections[i].Connection.Database = "outside"
+				}
+			}
+			saveProfiles(t, root, p)
+		}
+		return len(b), nil
+	}))
+	if err := cmd.ExecuteContext(t.Context()); ExitCode(err) != ExitFailure {
+		t.Fatal("import continued after a concurrent change", err)
+	}
+	saved := map[string]string{}
+	for _, p := range snapshot(t, root).Connections {
+		saved[p.Alias] = p.Connection.Database
+	}
+	if _, ok := saved["second"]; ok || saved["first"] != "app" || saved["analytics"] != "outside" {
+		t.Fatal("concurrent change was overwritten or ignored", saved)
 	}
 }
 

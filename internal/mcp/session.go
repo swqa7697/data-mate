@@ -172,10 +172,14 @@ func (g *guard) Write(ctx context.Context, msg jsonrpc.Message) error {
 			}
 			response.Error = &jsonrpc.Error{Code: code, Message: "MCP request failed"}
 		}
+		// Release the slot before the peer can observe the response: it may reuse
+		// the slot or ID immediately. Serialized writes keep one released response.
 		g.mu.Lock()
 		if g.pending[response.ID] == "initialize" && response.Error == nil {
 			g.initSent = true
 		}
+		delete(g.pending, response.ID)
+		delete(g.cancelled, response.ID)
 		g.mu.Unlock()
 	}
 	b, err := jsonrpc.EncodeMessage(msg)
@@ -188,12 +192,6 @@ func (g *guard) Write(ctx context.Context, msg jsonrpc.Message) error {
 	if err != nil {
 		g.Close()
 		return errProtocol
-	}
-	if response, ok := msg.(*jsonrpc.Response); ok {
-		g.mu.Lock()
-		delete(g.pending, response.ID)
-		delete(g.cancelled, response.ID)
-		g.mu.Unlock()
 	}
 	return nil
 }

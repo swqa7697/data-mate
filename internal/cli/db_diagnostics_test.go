@@ -8,7 +8,9 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
@@ -33,21 +35,23 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 	}
 	saveProfiles(t, root, p)
-	runCommand := func(action string, d *fixtureDatabase, want int, args ...string) (string, *fixtureDatabase) {
+	// watch observes stdout after each write, including streamed diagnostics.
+	runWatched := func(action string, d *fixtureDatabase, watch func(string), want int, args ...string) (string, *fixtureDatabase) {
 		t.Helper()
 		cmd := commandWithDatabase(Build{}, keys, func() (cliDatabase, error) { return d, nil })
 		cmd.SetArgs(append([]string{"--root", root, "db", action}, args...))
 		cmd.SetIn(strings.NewReader(""))
 		var out, diag bytes.Buffer
-		cmd.SetOut(&out)
-		if action == "describe" {
-			cmd.SetOut(writerFunc(func(b []byte) (int, error) {
-				if !d.closed {
-					t.Fatal("description output retained management resources")
-				}
-				return out.Write(b)
-			}))
-		}
+		cmd.SetOut(writerFunc(func(b []byte) (int, error) {
+			if action == "describe" && !d.isClosed() {
+				t.Fatal("description output retained management resources")
+			}
+			n, err := out.Write(b)
+			if watch != nil {
+				watch(out.String())
+			}
+			return n, err
+		}))
 		cmd.SetErr(&diag)
 		before := files(t, root)
 		err := cmd.ExecuteContext(t.Context())
@@ -64,6 +68,10 @@ func TestConnectionDiagnostics(t *testing.T) {
 			t.Fatal("failed description emitted partial stdout")
 		}
 		return out.String(), d
+	}
+	runCommand := func(action string, d *fixtureDatabase, want int, args ...string) (string, *fixtureDatabase) {
+		t.Helper()
+		return runWatched(action, d, nil, want, args...)
 	}
 	run := func(want int, args ...string) (string, *fixtureDatabase) {
 		t.Helper()
@@ -84,7 +92,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 		return report.Results, d
 	}
 	results, d := runJSON(1)
-	if len(results) != 3 || results[0].Alias != "bad" || results[0].Stage != "authentication" || results[0].OK || !results[1].OK || results[2].Error.Code != contracts.CredentialMissing || results[2].Stage != "vault" || !reflect.DeepEqual(d.tested, []string{"bad", "good"}) || !d.closed {
+	if len(results) != 3 || results[0].Alias != "bad" || results[0].Stage != "authentication" || results[0].OK || !results[1].OK || results[2].Error.Code != contracts.CredentialMissing || results[2].Stage != "vault" || !reflect.DeepEqual(d.testedAliases(), []string{"bad", "good"}) || !d.isClosed() {
 		t.Fatalf("batch diagnostics: %+v", results)
 	}
 	for _, r := range results {
@@ -100,11 +108,56 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatalf("single success: %q", out)
 	}
 	wantBatch := fmt.Sprintf("bad  FAIL\n  authentication: %s: %s\ngood  PASS\nmissing  FAIL\n  vault: %s: %s\n", results[0].Error.Code, results[0].Error.Message, results[2].Error.Code, results[2].Error.Message)
-	if out, _ := run(1); out != wantBatch {
-		t.Fatalf("compact batch diagnostics: %q", out)
+	// One request checks profiles concurrently and streams rows in list order:
+	// "bad" waits until "good" is in flight, and "good" waits until the "bad"
+	// row is written. Sequential or buffered checks fail at the bounded waits.
+	{
+		entered, sawBad := make(chan struct{}), make(chan struct{})
+		var written sync.Once
+		d := &fixtureDatabase{before: func(ctx context.Context, alias string) error {
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			wait := entered
+			if alias == "good" {
+				close(entered)
+				wait = sawBad
+			}
+			select {
+			case <-wait:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}}
+		out, _ := runWatched("test", d, func(out string) {
+			if strings.HasPrefix(out, "bad  FAIL\n") {
+				written.Do(func() { close(sawBad) })
+			}
+		}, 1)
+		if out != wantBatch {
+			t.Fatalf("compact streamed batch diagnostics: %q", out)
+		}
+	}
+	// Live terminal windows must fit the screen so relative cursor movement
+	// stays visible; completed rows commit only up to the first pending row.
+	pending := func(alias string) diagnosticRow { return diagnosticRow{lines: []string{alias + "  ⠋"}} }
+	for _, tc := range []struct {
+		name          string
+		rows          []diagnosticRow
+		width, height int
+		want          diagnosticView
+	}{
+		{"pending row stops commit", []diagnosticRow{{[]string{"a  PASS"}, true}, pending("b"), {[]string{"c  FAIL", "  dial: CONNECT_FAILED: x"}, true}}, 80, 24, diagnosticView{commit: []string{"a  PASS"}, window: []string{"b  ⠋", "c  FAIL", "  dial: CONNECT_FAILED: x"}, height: 3, committed: 1}},
+		{"window fits terminal height", []diagnosticRow{pending("a"), pending("b"), pending("c"), pending("d")}, 80, 3, diagnosticView{window: []string{"a  ⠋", "b  ⠋"}, height: 2}},
+		{"wrapped row stays whole", []diagnosticRow{pending("a"), {[]string{"b  FAIL", "  dial: CONNECT_FAILED: unreachable"}, true}}, 12, 5, diagnosticView{window: []string{"a  ⠋"}, height: 1}},
+		{"color takes no columns", []diagnosticRow{pending("a"), {[]string{"bb  \x1b[31mFAIL\x1b[0m"}, true}}, 8, 3, diagnosticView{window: []string{"a  ⠋", "bb  \x1b[31mFAIL\x1b[0m"}, height: 2}},
+	} {
+		if got := diagnosticFrame(tc.rows, 0, tc.width, tc.height); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: %+v", tc.name, got)
+		}
 	}
 	results, d = runJSON(0, "good")
-	if len(results) != 1 || len(results[0].Stages) != 6 || len(d.tested) != 1 {
+	if len(results) != 1 || len(results[0].Stages) != 6 || len(d.testedAliases()) != 1 {
 		t.Fatal("single diagnostics")
 	}
 	// Driver-specific config rejection precedes credential access and remains
@@ -119,7 +172,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 	saveProfiles(t, root, invalidProfile)
 	calls := keys.calls
 	results, d = runJSON(2, "good")
-	if len(results) != 1 || results[0].Stage != "config" || len(results[0].Stages) != 1 || keys.calls != calls || len(d.tested) != 0 {
+	if len(results) != 1 || results[0].Stage != "config" || len(results[0].Stages) != 1 || keys.calls != calls || len(d.testedAliases()) != 0 {
 		t.Fatal("invalid config reached vault or driver")
 	}
 	saveProfiles(t, root, original)
@@ -130,7 +183,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 		if contracts.Validate("db-describe.output", []byte(out)) != nil || json.Unmarshal([]byte(out), &description) != nil {
 			t.Fatal("description JSON contract", out)
 		}
-		if description.Alias != "good" || description.Database != "app" || len(description.Schemas) != 4 || len(d.described) != 1 || !d.closed {
+		if description.Alias != "good" || description.Database != "app" || len(description.Schemas) != 4 || len(d.describedAliases()) != 1 || !d.isClosed() {
 			t.Fatalf("description snapshot: %+v", description)
 		}
 		for _, s := range description.Schemas {
@@ -184,7 +237,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 	}
 	for _, args := range [][]string{{}, {"absent"}} {
 		_, d := runCommand("describe", &fixtureDatabase{}, 2, args...)
-		if len(d.described) != 0 {
+		if len(d.describedAliases()) != 0 {
 			t.Fatal("invalid selection reached catalog")
 		}
 	}
@@ -207,7 +260,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 	keys.denied = true
 	runCommand("describe", &fixtureDatabase{}, 1, "good", "--json")
 	results, d = runJSON(1)
-	if len(d.tested) != 0 || len(results) != 3 {
+	if len(d.testedAliases()) != 0 || len(results) != 3 {
 		t.Fatal("vault denial reached driver or stopped batch")
 	}
 	for _, r := range results {

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/swqa7697/data-mate/internal/config"
@@ -19,6 +21,10 @@ import (
 
 const managementLimit = 8 << 20
 
+// diagnosticConcurrency bounds service-wide test fan-out, leaving shared
+// admission capacity for MCP work while batches run.
+const diagnosticConcurrency = 16
+
 // ManagementRequest is the private CLI protocol. No operation returns saved secrets.
 type ManagementRequest struct {
 	Operation   string          `json:"operation"`
@@ -28,6 +34,16 @@ type ManagementRequest struct {
 	ProfileID   string          `json:"profile_id,omitempty"`
 	Alias       string          `json:"alias,omitempty"`
 	Pin         *HostPin        `json:"pin,omitempty"`
+	Targets     []ProfileTarget `json:"targets,omitempty"`
+	// Report receives each test result after its state lease is released. Calls
+	// may be concurrent; it is process-local and never serialized.
+	Report func(DiagnosticResult) error `json:"-"`
+}
+
+// ProfileTarget binds one diagnostic to a profile identity and its displayed alias.
+type ProfileTarget struct {
+	ProfileID string `json:"profile_id"`
+	Alias     string `json:"alias"`
 }
 
 // HostPin carries only a newly confirmed SSH public key, never a caller path.
@@ -45,11 +61,22 @@ type DiagnosticResult struct {
 	Error  *contracts.Failure `json:"error,omitempty"`
 }
 
+// CredentialPresence reports which saved secret fields are nonempty, never their values.
+type CredentialPresence struct {
+	ProfileID        string `json:"profile_id"`
+	Password         bool   `json:"password"`
+	SSHPassword      bool   `json:"ssh_password"`
+	SSHPrivateKey    bool   `json:"ssh_private_key"`
+	SSHKeyPassphrase bool   `json:"ssh_key_passphrase"`
+	ProxyPassword    bool   `json:"proxy_password"`
+}
+
 // ManagementReply contains bounded nonsecret results and fixed safe error identifiers.
 type ManagementReply struct {
 	Outcome     *vault.Outcome                `json:"outcome,omitempty"`
 	Diagnostic  *DiagnosticResult             `json:"diagnostic,omitempty"`
 	Description *database.DatabaseDescription `json:"description,omitempty"`
+	Credentials []CredentialPresence          `json:"credentials,omitempty"`
 	Error       string                        `json:"error,omitempty"`
 	Failure     *contracts.Failure            `json:"failure,omitempty"`
 	MCPEnabled  bool                          `json:"mcp_enabled"`
@@ -154,7 +181,7 @@ func (c *Controller) Request(ctx context.Context, request ManagementRequest) (Ma
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetReadDeadline(deadline)
 	}
-	return exchangeManagement(ctx, conn, request.Interactive)
+	return exchangeManagement(ctx, conn, request)
 }
 
 // HandleManagement owns independent admission and service-side input validation.
@@ -187,7 +214,7 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 	}()
 	switch q.Operation {
 	case "mutate":
-		if q.Mutation == nil || q.Expected != "" || q.Alias != "" {
+		if q.Mutation == nil || q.Expected != "" || q.Alias != "" || len(q.Targets) != 0 {
 			err = ErrState
 			return
 		}
@@ -219,7 +246,7 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			err = e
 		}
 	case "enable":
-		if q.Mutation != nil || q.Pin != nil || q.ProfileID != "" || q.Expected != "" || q.Alias != "" {
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID != "" || q.Expected != "" || q.Alias != "" || len(q.Targets) != 0 {
 			err = ErrState
 			return
 		}
@@ -228,17 +255,10 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			err = e
 			return
 		}
-		for _, p := range profiles.Connections {
-			if p.CredentialRef == "" {
-				continue
-			}
-			prep, prepared := context.WithTimeout(ctx, vault.PreparationTimeout)
-			err = m.repo.Unlock(prep, false, "")
-			prepared()
-			if err != nil {
+		if slices.ContainsFunc(profiles.Connections, func(p config.Profile) bool { return p.CredentialRef != "" }) {
+			if err = m.unlock(ctx); err != nil {
 				return
 			}
-			break
 		}
 		ctx, finish := context.WithTimeout(ctx, 30*time.Second)
 		defer finish()
@@ -257,16 +277,28 @@ func (m *Manager) HandleManagement(parent context.Context, q ManagementRequest) 
 			return
 		}
 		err = m.enable(ctx)
-	case "test", "describe":
-		if q.Mutation != nil || q.Pin != nil || q.ProfileID == "" || q.Alias == "" || (q.Operation != "test" && q.Expected == "") {
+	case "test":
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID != "" || q.Alias != "" || q.Expected != "" || q.Report == nil || !validTargets(q.Targets) {
+			err = ErrState
+			return
+		}
+		err = m.testProfiles(ctx, q)
+	case "describe":
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID == "" || q.Alias == "" || q.Expected == "" || len(q.Targets) != 0 {
 			err = ErrState
 			return
 		}
 		var description database.DatabaseDescription
-		reply.Diagnostic, err = m.managementDatabase(ctx, q, &description)
-		if q.Operation == "describe" && err == nil && reply.Diagnostic == nil {
+		reply.Diagnostic, err = m.describeProfile(ctx, q, &description)
+		if err == nil && reply.Diagnostic == nil {
 			reply.Description = &description
 		}
+	case "credential-presence":
+		if q.Mutation != nil || q.Pin != nil || q.ProfileID != "" || q.Alias != "" || q.Expected == "" || len(q.Targets) != 0 {
+			err = ErrState
+			return
+		}
+		reply.Credentials, err = m.credentialPresence(ctx, q.Expected)
 	default:
 		err = ErrState
 	}
@@ -287,7 +319,9 @@ func (m *Manager) keysetState(ctx context.Context) string {
 	}
 	return m.repo.State()
 }
-func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest, description *database.DatabaseDescription) (*DiagnosticResult, error) {
+
+// describeProfile describes one profile bound to the expected store revision.
+func (m *Manager) describeProfile(parent context.Context, q ManagementRequest, description *database.DatabaseDescription) (*DiagnosticResult, error) {
 	l, err := m.store.ReadLease(parent)
 	if err != nil {
 		return nil, err
@@ -297,18 +331,163 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 	if err != nil {
 		return nil, err
 	}
-	var p *config.Profile
+	p := findProfile(profiles, q.ProfileID, q.Alias)
+	if revision != q.Expected || p == nil {
+		return nil, config.ErrRevision
+	}
+	unlockErr := m.prepareCredentials(parent, []config.Profile{*p})
+	return m.checkProfile(parent, q.Operation, q.Expected, *p, unlockErr, description)
+}
+
+// credentialPresence reports which secret fields each credentialed profile has
+// at the expected revision; values never leave the service. A profile whose
+// bundle is missing is omitted so callers treat its presence as unknown.
+func (m *Manager) credentialPresence(ctx context.Context, expected config.Revision) ([]CredentialPresence, error) {
+	l, err := m.store.ReadLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Release before unlocking: a waiting writer blocks the vault's own lease.
+	profiles, revision, err := l.ProfileSnapshot()
+	l.Release()
+	if err != nil {
+		return nil, err
+	}
+	if revision != expected {
+		return nil, config.ErrRevision
+	}
+	if !slices.ContainsFunc(profiles.Connections, func(p config.Profile) bool { return p.CredentialRef != "" }) {
+		return nil, nil
+	}
+	if err = m.unlock(ctx); err != nil {
+		return nil, err
+	}
+	l, err = m.store.ReadLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Release()
+	if _, revision, err = l.ProfileSnapshot(); err != nil {
+		return nil, err
+	}
+	if revision != expected {
+		return nil, config.ErrRevision
+	}
+	var presence []CredentialPresence
+	for _, p := range profiles.Connections {
+		if p.CredentialRef == "" {
+			continue
+		}
+		s, err := m.repo.Credential(ctx, l, p.ID)
+		if errors.Is(err, vault.ErrCredentialMissing) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		presence = append(presence, CredentialPresence{ProfileID: p.ID, Password: s.Password != "", SSHPassword: s.SSHPassword != "", SSHPrivateKey: s.SSHPrivateKey != "", SSHKeyPassphrase: s.SSHKeyPassphrase != "", ProxyPassword: s.ProxyPassword != ""})
+	}
+	return presence, nil
+}
+
+// testProfiles checks targets concurrently and reports each result as it
+// completes. Ordinary failures are results; revision changes, cancellation and
+// undeliverable reports abort the batch.
+func (m *Manager) testProfiles(parent context.Context, q ManagementRequest) error {
+	l, err := m.store.ReadLease(parent)
+	if err != nil {
+		return err
+	}
+	// Release before unlocking: a waiting writer blocks the vault's own lease.
+	profiles, _, err := l.ProfileSnapshot()
+	l.Release()
+	if err != nil {
+		return err
+	}
+	selected := make([]config.Profile, len(q.Targets))
+	for i, t := range q.Targets {
+		p := findProfile(profiles, t.ProfileID, t.Alias)
+		if p == nil {
+			return config.ErrRevision
+		}
+		selected[i] = *p
+	}
+	unlockErr := m.prepareCredentials(parent, selected)
+	if errors.Is(unlockErr, context.Canceled) {
+		return unlockErr
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	var wg sync.WaitGroup
+	for _, p := range selected {
+		wg.Go(func() {
+			// Profile deadlines start only after a fan-out slot is held.
+			select {
+			case m.diagnostics <- struct{}{}:
+				defer func() { <-m.diagnostics }()
+			case <-ctx.Done():
+				return
+			}
+			r, err := m.checkProfile(ctx, "test", "", p, unlockErr, nil)
+			if err == nil && ctx.Err() == nil {
+				err = q.Report(*r)
+			}
+			if err != nil {
+				cancel(err)
+			}
+		})
+	}
+	// Every report precedes the final reply.
+	wg.Wait()
+	return context.Cause(ctx)
+}
+
+// validTargets requires a nonempty selection of distinct profile bindings.
+func validTargets(targets []ProfileTarget) bool {
+	ids, aliases := map[string]bool{}, map[string]bool{}
+	for _, t := range targets {
+		if t.ProfileID == "" || t.Alias == "" || ids[t.ProfileID] || aliases[t.Alias] {
+			return false
+		}
+		ids[t.ProfileID], aliases[t.Alias] = true, true
+	}
+	return len(targets) > 0
+}
+
+func findProfile(profiles config.Profiles, id, alias string) *config.Profile {
 	for i := range profiles.Connections {
-		if profiles.Connections[i].ID == q.ProfileID && profiles.Connections[i].Alias == q.Alias {
-			p = &profiles.Connections[i]
+		if profiles.Connections[i].ID == id && profiles.Connections[i].Alias == alias {
+			return &profiles.Connections[i]
 		}
 	}
-	if q.Operation != "test" && revision != q.Expected {
-		return nil, config.ErrRevision
+	return nil
+}
+
+// prepareCredentials unlocks the keyset once for profiles whose checks will use
+// it. Callers report its error per profile instead of repeating the unlock.
+func (m *Manager) prepareCredentials(ctx context.Context, profiles []config.Profile) error {
+	for _, p := range profiles {
+		if p.CredentialRef != "" && m.validProfile(p) {
+			return m.unlock(ctx)
+		}
 	}
-	if p == nil {
-		return nil, config.ErrRevision
-	}
+	return nil
+}
+func (m *Manager) unlock(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, vault.PreparationTimeout)
+	defer cancel()
+	return m.repo.Unlock(ctx, false, "")
+}
+
+// validProfile applies driver-specific settings validation before credential access.
+func (m *Manager) validProfile(p config.Profile) bool {
+	validator, ok := m.driver.(interface{ ValidateProfile(config.Profile) error })
+	return !ok || validator.ValidateProfile(p) == nil
+}
+
+// checkProfile runs one prepared profile's diagnostic or description. Staged
+// failures become results; revision changes and cancellation return errors.
+func (m *Manager) checkProfile(parent context.Context, operation string, expected config.Revision, p config.Profile, unlockErr error, description *database.DatabaseDescription) (*DiagnosticResult, error) {
 	ctx := parent
 	result := &DiagnosticResult{Alias: p.Alias, Stage: "config", Stages: []database.Stage{{Stage: "config", OK: true}}}
 	fail := func(stage string, code contracts.Code, e error) (*DiagnosticResult, error) {
@@ -335,39 +514,30 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		result.Stages = append(result.Stages, database.Stage{Stage: stage, Error: result.Error})
 		return result, nil
 	}
-	validator, validates := m.driver.(interface{ ValidateProfile(config.Profile) error })
-	if validates {
-		if e := validator.ValidateProfile(*p); e != nil {
-			result.Stage = "config"
-			result.Error = &contracts.Failure{Code: contracts.ConfigInvalid, Message: "invalid driver profile settings; repair with db edit"}
-			result.Stages = []database.Stage{{Stage: "config", Error: result.Error}}
-			return result, nil
-		}
+	if !m.validProfile(p) {
+		result.Error = &contracts.Failure{Code: contracts.ConfigInvalid, Message: "invalid driver profile settings; repair with db edit"}
+		result.Stages = []database.Stage{{Stage: "config", Error: result.Error}}
+		return result, nil
 	}
-	if p.CredentialRef != "" {
-		prep, prepared := context.WithTimeout(parent, vault.PreparationTimeout)
-		err = m.repo.Unlock(prep, false, "")
-		prepared()
-		if err != nil {
-			return fail("vault", contracts.VaultUnavailable, err)
-		}
+	if p.CredentialRef != "" && unlockErr != nil {
+		return fail("vault", contracts.VaultUnavailable, unlockErr)
 	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Limits.QueryTimeoutMS)*time.Millisecond)
 	defer cancel()
 	// Work admits before acquiring a fresh snapshot, preserving query-vs-mutation leases.
-	err = m.Work(ctx, p.Alias, func(ctx context.Context, d database.Driver, a database.Access) error {
-		if a.Profile.ID != q.ProfileID {
+	err := m.Work(ctx, p.Alias, func(ctx context.Context, d database.Driver, a database.Access) error {
+		if a.Profile.ID != p.ID {
 			return config.ErrRevision
 		}
-		if q.Operation != "test" {
+		if operation != "test" {
 			// Work holds the state lease, so a second passive read observes the same generation.
 			// Avoid acquiring a second application lease while a writer is waiting.
 			current := m.currentRevision()
-			if current != q.Expected {
+			if current != expected {
 				return config.ErrRevision
 			}
 		}
-		if q.Operation == "describe" {
+		if operation == "describe" {
 			describer, ok := d.(interface {
 				DescribeDatabase(context.Context, database.Access) (database.DatabaseDescription, error)
 			})
@@ -405,7 +575,7 @@ func (m *Manager) managementDatabase(parent context.Context, q ManagementRequest
 		}
 		return fail("vault", code, err)
 	}
-	if q.Operation == "describe" {
+	if operation == "describe" {
 		return nil, nil
 	}
 	return result, nil
