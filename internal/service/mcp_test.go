@@ -131,7 +131,9 @@ func sessionClient(t *testing.T, c *Controller) (*sdk.ClientSession, *net.UnixCo
 }
 func callTool(t *testing.T, s *sdk.ClientSession, name string, args any) (*sdk.CallToolResult, []byte) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	// Functional calls include large JSON round trips under the race detector.
+	// Cancellation and leak checks below keep their separate three-second bound.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	r, err := s.CallTool(ctx, &sdk.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
@@ -548,6 +550,8 @@ func sessionProtocolRecovery(t *testing.T, c *Controller, d *sessionDriver) {
 // cancellation must release blocked writes and uninitialized peers promptly.
 func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 	t.Helper()
+	testCtx, finishTest := context.WithTimeout(t.Context(), 30*time.Second)
+	defer finishTest()
 	m := newManager(t.Context(), store, noKeys{}, d)
 	defer m.Close()
 	if err := m.initialize(t.Context()); err != nil {
@@ -555,7 +559,7 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 	}
 	serve := func() (net.Conn, <-chan error, context.CancelFunc) {
 		peer, server := net.Pipe()
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancel(testCtx)
 		done := make(chan error, 1)
 		go func() { done <- relay.Serve(ctx, server, m, "fixture") }()
 		t.Cleanup(func() { cancel(); peer.Close() })
@@ -570,7 +574,7 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 		t.Fatal("idle session did not cancel")
 	}
 	for _, bridge := range []bool{false, true} {
-		socket, serverDone, cancel := serve()
+		socket, serverDone, stopTransport := serve()
 		var peer io.ReadWriter = socket
 		done := serverDone
 		if bridge {
@@ -585,8 +589,13 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 			}
 			output.Close()
 			inherited := os.NewFile(uintptr(fd), "fixture-stdout")
+			bridgeCtx, stopBridge := context.WithCancel(testCtx)
+			t.Cleanup(stopBridge)
 			bridgeDone := make(chan error, 1)
-			go func() { bridgeDone <- relay.Bridge(t.Context(), socket, input, inherited) }()
+			go func() { bridgeDone <- relay.Bridge(bridgeCtx, socket, input, inherited) }()
+			// Cancel the transport under test. Service EOF cannot reach a bridge
+			// while its output copy is blocked writing to an unread stdout.
+			stopTransport = stopBridge
 			peer = struct {
 				io.Reader
 				io.Writer
@@ -606,6 +615,11 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 			t.Fatal(err)
 		}
 		awaitSignal(t, d.entered)
+		// Wait for response output before cancellation so shutdown cannot race
+		// ahead of the write that this scenario is meant to interrupt.
+		if _, err := io.ReadFull(peer, make([]byte, 1)); err != nil {
+			t.Fatal("response output did not start", err)
+		}
 		ctx, finish := context.WithTimeout(t.Context(), 2*time.Second)
 		lease, err := store.WriteLease(ctx)
 		finish()
@@ -613,7 +627,7 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 			t.Fatal("slow output retained state lease", err)
 		}
 		lease.Release()
-		cancel()
+		stopTransport()
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
