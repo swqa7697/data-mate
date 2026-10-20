@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
 ### Added
 
 - Expose each connection's current finite row, result-byte, and timeout limits through MCP `list_connections`. Guide agents to inspect limits before database operations and omit disabled limits.
