@@ -3,8 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
-	"time"
 
+	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 )
@@ -56,7 +56,7 @@ func (d *Driver) Test(ctx context.Context, a database.Access) (database.Readines
 			return err
 		}
 		trace.pass("config")
-		ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
+		ctx, cancel := config.QueryContext(ctx, a.Profile.Limits.QueryTimeoutMS)
 		defer cancel()
 		trace.start("dial")
 		leave, err := d.admit(ctx)

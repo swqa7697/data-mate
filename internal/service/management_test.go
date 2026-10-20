@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -81,11 +83,12 @@ func (k *managedKeys) Delete(context.Context, string) error { return nil }
 func (k *managedKeys) calls() int                           { k.mu.Lock(); defer k.mu.Unlock(); return k.loads + k.creates }
 
 type blockedDiagnostics struct {
-	block           atomic.Bool
-	mu              sync.Mutex
-	validationError error
-	validated       []database.Access
-	validationDone  chan struct{}
+	block            atomic.Bool
+	largeDescription atomic.Bool
+	mu               sync.Mutex
+	validationError  error
+	validated        []database.Access
+	validationDone   chan struct{}
 	database.Driver
 	entered chan struct{}
 	release chan struct{}
@@ -95,7 +98,16 @@ func (d *blockedDiagnostics) Invalidate(string) {}
 func (d *blockedDiagnostics) Close()            {}
 func (d *blockedDiagnostics) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
 	_, err := d.Test(ctx, a)
-	return database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}, err
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	if d.largeDescription.Load() {
+		functions := make([]database.CatalogName, 140000)
+		prefix := strings.Repeat("x", 56)
+		for i := range functions {
+			functions[i].Name = prefix + strconv.Itoa(i)
+		}
+		out.Schemas = append(out.Schemas, database.SchemaDescription{Name: "wide", Functions: functions, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}})
+	}
+	return out, err
 }
 func (d *blockedDiagnostics) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
 	d.mu.Lock()
@@ -405,6 +417,14 @@ func TestPrivateManagement(t *testing.T) {
 		t.Fatal(e)
 	}
 	describe.Expected = rev
+	// Ladder 2: extend the authenticated description exchange beyond the old
+	// 8 MiB reply cap; credential request/answer caps remain covered below.
+	driver.largeDescription.Store(true)
+	largeReply, e := c.Request(t.Context(), describe)
+	driver.largeDescription.Store(false)
+	if e != nil || largeReply.Description == nil || len(largeReply.Description.Schemas) != 1 || len(largeReply.Description.Schemas[0].Functions) != 140000 {
+		t.Fatal("large nonsecret description reply rejected", e)
+	}
 	target := ProfileTarget{ProfileID: profile.ID, Alias: profile.Alias}
 	for _, bad := range []ManagementRequest{
 		{Operation: "describe", ProfileID: profile.ID, Alias: profile.Alias},

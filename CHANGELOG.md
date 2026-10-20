@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
+### Added
+
+- Expose each connection's current finite row, result-byte, and timeout limits through MCP `list_connections`. Guide agents to inspect limits before database operations and omit disabled limits.
+
+### Changed
+
+- Return up to 50,000 query rows by default and remove application size, complexity and metadata count caps. Default query execution time and result bytes to unlimited while retaining optional limits. Reset all previously saved execution limits, including custom values, to the new defaults; preserve subsequent user choices.
+
+### Fixed
+
+- Keep MCP sessions usable after tool failures, malformed requests, concurrent request saturation, cancellation, and response encoding failures. Preserve other in-flight calls and allow corrected requests through the same bridge without restarting the agent.
+
 ## [0.2.3] - 2026-10-03
 
 ### Added

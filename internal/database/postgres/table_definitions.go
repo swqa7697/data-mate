@@ -35,13 +35,13 @@ func tableDefinitions(ctx context.Context, tx pgx.Tx, oid uint32, out *database.
  CASE k.contype WHEN 'p' THEN 'primary' WHEN 'u' THEN 'unique' WHEN 'f' THEN 'foreign' WHEN 'c' THEN 'check' WHEN 'x' THEN 'exclusion' WHEN 'n' THEN 'not_null' ELSE k.contype::text END,
  pg_catalog.pg_get_constraintdef(k.oid)
  FROM pg_catalog.pg_constraint k
- WHERE k.conrelid=$1 ORDER BY k.conname::text COLLATE "C" LIMIT 4097`, args...)
+ WHERE k.conrelid=$1 ORDER BY k.conname::text COLLATE "C"`, args...)
 	if err != nil {
 		return err
 	}
 	out.Indexes, err = readDefinitions(ctx, tx, budget, `SELECT c.relname::text,am.amname::text,pg_catalog.pg_get_indexdef(i.indexrelid)
  FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=c.relam
- WHERE i.indrelid=$1 ORDER BY c.relname::text COLLATE "C" LIMIT 4097`, oid)
+ WHERE i.indrelid=$1 ORDER BY c.relname::text COLLATE "C"`, oid)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func tableDefinitions(ctx context.Context, tx pgx.Tx, oid uint32, out *database.
 func tableTriggers(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Description, budget *metadataBudget) error {
 	rows, err := tx.Query(ctx, `SELECT tgname::text,pg_catalog.pg_get_triggerdef(oid),
  CASE tgenabled WHEN 'O' THEN 'origin' WHEN 'D' THEN 'disabled' WHEN 'R' THEN 'replica' ELSE 'always' END,tgisinternal
- FROM pg_catalog.pg_trigger WHERE tgrelid=$1 ORDER BY tgname::text COLLATE "C" LIMIT 4097`, oid)
+ FROM pg_catalog.pg_trigger WHERE tgrelid=$1 ORDER BY tgname::text COLLATE "C"`, oid)
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func tablePolicies(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Des
  CASE polcmd WHEN '*' THEN 'all' WHEN 'r' THEN 'select' WHEN 'a' THEN 'insert' WHEN 'w' THEN 'update' ELSE 'delete' END,polpermissive,
  ARRAY(SELECT CASE WHEN role=0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(role)::text END FROM pg_catalog.unnest(polroles) role ORDER BY role),
  pg_catalog.pg_get_expr(polqual,polrelid),pg_catalog.pg_get_expr(polwithcheck,polrelid)
- FROM pg_catalog.pg_policy WHERE polrelid=$1 ORDER BY polname::text COLLATE "C" LIMIT 4097`, oid)
+ FROM pg_catalog.pg_policy WHERE polrelid=$1 ORDER BY polname::text COLLATE "C"`, oid)
 	if err != nil {
 		return err
 	}

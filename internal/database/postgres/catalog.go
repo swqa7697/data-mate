@@ -15,8 +15,6 @@ import (
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
-const maxCatalogObjects = 4096
-
 // Catalog reads use PostgreSQL catalog permissions, independent of row grants.
 const relationKindSQL = `c.relkind IN ('r','p','v','m','f')`
 
@@ -92,7 +90,7 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 	if req.PageSize == 0 {
 		req.PageSize = 100
 	}
-	if req.PageSize < 1 || req.PageSize > 500 || (req.Schema != "" && !validName(req.Schema)) {
+	if req.PageSize < 1 || req.PageSize == int(^uint(0)>>1) || (req.Schema != "" && !validName(req.Schema)) {
 		return database.TablePage{}, database.Fail(contracts.InvalidArgument, "invalid metadata page request", false)
 	}
 	d.mu.Lock()
@@ -152,7 +150,7 @@ func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget)
 	rows, err := tx.Query(ctx, `SELECT a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),NOT a.attnotnull,
  CASE WHEN a.attgenerated='' THEN pg_catalog.pg_get_expr(d.adbin,d.adrelid) END,
  CASE WHEN a.attgenerated<>'' THEN pg_catalog.pg_get_expr(d.adbin,d.adrelid) END,a.attidentity::text
- FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1601`, oid)
+ FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, err
 	}
@@ -167,9 +165,6 @@ func columns(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBudget)
 			return nil, err
 		}
 		out = append(out, c)
-	}
-	if len(out) > 1600 {
-		return nil, database.Fail(contracts.ResourceLimit, "column limit exceeded", false)
 	}
 	return out, rows.Err()
 }
@@ -222,27 +217,16 @@ func constraints(ctx context.Context, tx pgx.Tx, oid uint32, out *database.Descr
  COALESCE(n.nspname::text,''),COALESCE(c.relname::text,''),
  ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(k.confkey) WITH ORDINALITY x(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=k.confrelid AND a.attnum=x.num ORDER BY x.ord)
  FROM pg_catalog.pg_constraint k LEFT JOIN pg_catalog.pg_class c ON c.oid=k.confrelid LEFT JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
- WHERE k.conrelid=$1 AND k.contype IN ('p','u','f') ORDER BY k.oid LIMIT 4097`, args...)
+ WHERE k.conrelid=$1 AND k.contype IN ('p','u','f') ORDER BY k.oid`, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	count := 0
-	budget := 0
 	for rows.Next() {
-		count++
-		if count > maxCatalogObjects {
-			return database.Fail(contracts.ResourceLimit, "constraint count exceeds limit", false)
-		}
 		var k, s, n string
 		var cols, target []string
 		if err = rows.Scan(&k, &cols, &s, &n, &target); err != nil {
 			return err
-		}
-		encoded, _ := json.Marshal([]any{cols, s, n, target})
-		budget += len(encoded) + 64
-		if budget > (1<<20)/3 {
-			return database.Fail(contracts.ResourceLimit, "constraint metadata exceeds payload budget", false)
 		}
 		if k == "f" {
 			out.Relationships = append(out.Relationships, database.Relationship{Columns: cols, Target: config.Table{Schema: s, Name: n}, TargetColumns: target})

@@ -3,7 +3,10 @@
     {
       "alias": "analytics",
       "driver": "postgres",
-      "database": "analytics"
+      "database": "analytics",
+      "limits": {
+        "max_rows": 50000
+      }
     }
   ]
 }

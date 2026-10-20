@@ -39,7 +39,7 @@ func (d *Driver) ListObjects(ctx context.Context, a database.Access, req databas
 	if req.PageSize == 0 {
 		req.PageSize = 100
 	}
-	if req.PageSize < 1 || req.PageSize > 500 || (req.Schema != "" && !validName(req.Schema)) || (req.Kind != "" && !objectKind(req.Kind)) {
+	if req.PageSize < 1 || req.PageSize == int(^uint(0)>>1) || (req.Schema != "" && !validName(req.Schema)) || (req.Kind != "" && !objectKind(req.Kind)) {
 		return database.ObjectPage{}, database.Fail(contracts.InvalidArgument, "invalid object page request", false)
 	}
 	d.mu.Lock()
@@ -112,7 +112,7 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 	if req.IdentityArguments != nil {
 		signature = *req.IdentityArguments
 	}
-	if len(signature) > 64<<10 || !utf8.ValidString(signature) || strings.ContainsRune(signature, 0) {
+	if !utf8.ValidString(signature) || strings.ContainsRune(signature, 0) {
 		return database.ObjectDescription{}, database.Fail(contracts.InvalidArgument, "invalid routine identity", false)
 	}
 	a, rev, err := normalized(a)
@@ -152,17 +152,19 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 }
 
 // Bound cumulative collections as they are read, before constructing an envelope.
-type metadataBudget struct{ count, bytes, limit int }
+type metadataBudget struct{ bytes, limit int }
 
 func (b *metadataBudget) add(v any) error {
+	if b.limit == 0 {
+		return nil
+	}
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	b.count++
 	b.bytes += len(raw)
-	if b.count > maxCatalogObjects || b.bytes > b.limit {
-		return database.Fail(contracts.ResourceLimit, "metadata exceeds catalog or payload limit", false)
+	if b.bytes > b.limit {
+		return database.Fail(contracts.ResourceLimit, "metadata exceeds payload limit", false)
 	}
 	return nil
 }
@@ -199,7 +201,7 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBu
 		return nil, err
 	}
 	if out.Kind == "enum" {
-		rows, e := tx.Query(ctx, `SELECT enumlabel::text FROM pg_catalog.pg_enum WHERE enumtypid=$1 ORDER BY enumsortorder LIMIT 4097`, oid)
+		rows, e := tx.Query(ctx, `SELECT enumlabel::text FROM pg_catalog.pg_enum WHERE enumtypid=$1 ORDER BY enumsortorder`, oid)
 		if e != nil {
 			return nil, e
 		}
@@ -226,7 +228,7 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *metadataBu
 		}
 	}
 	if out.Kind == "domain" {
-		out.Constraints, err = readDefinitions(ctx, tx, budget, `SELECT conname::text,CASE contype WHEN 'c' THEN 'check' WHEN 'n' THEN 'not_null' ELSE contype::text END,pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE contypid=$1 ORDER BY conname::text COLLATE "C" LIMIT 4097`, oid)
+		out.Constraints, err = readDefinitions(ctx, tx, budget, `SELECT conname::text,CASE contype WHEN 'c' THEN 'check' WHEN 'n' THEN 'not_null' ELSE contype::text END,pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE contypid=$1 ORDER BY conname::text COLLATE "C"`, oid)
 		if err != nil {
 			return nil, err
 		}

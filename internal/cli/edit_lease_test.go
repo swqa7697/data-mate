@@ -140,7 +140,7 @@ func editLeaseChild(t *testing.T, rootPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profiles.Connections[0].Limits.MaxRows != 500 {
+	if profiles.Connections[0].Limits.MaxRows != config.DefaultLimits().MaxRows {
 		t.Fatal("edit published before cleanup")
 	}
 }

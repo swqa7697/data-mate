@@ -104,7 +104,7 @@ func executorAcceptance(t *testing.T, d *Driver, a database.Access, admin *pgx.C
 		}
 	}
 	for _, request := range []database.QueryRequest{
-		{SQL: "SELECT 1", RowLimit: 5001}, {SQL: "SELECT $1::int4"}, {SQL: "SELECT 1", Parameters: []json.RawMessage{json.RawMessage(`1`)}},
+		{SQL: "SELECT 1", RowLimit: 50001}, {SQL: "SELECT $1::int4"}, {SQL: "SELECT 1", Parameters: []json.RawMessage{json.RawMessage(`1`)}},
 		{SQL: "SELECT $1::date", Parameters: []json.RawMessage{json.RawMessage(`"synthetic-private-invalid-date"`)}},
 		{SQL: "SELECT 1/0"},
 		{SQL: "SELECT 'synthetic-private-invalid-date'::date"},
@@ -177,14 +177,18 @@ func executorLimits(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn,
 		if value[0] == '[' {
 			q = "SELECT '" + value + "'::json"
 		}
-		_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: q})
-		requireCode(t, err, contracts.ResourceLimit)
+		large, err := d.Query(t.Context(), a, database.QueryRequest{SQL: q})
+		if err != nil || large.Truncated || large.RowCount != 1 {
+			t.Fatal("former result boundary rejected", err)
+		}
 	}
 	sql("UPDATE app.large SET value=repeat('x',10000) WHERE id=1")
-	// Two cells individually fit the protocol cap; their row does not.
+	// A combined wire row can exceed the old protocol cap as well.
 	sql("UPDATE app.large SET value=repeat('x',1100000) WHERE id=1")
-	_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT value,value FROM app.large WHERE id=1"})
-	requireCode(t, err, contracts.ResourceLimit)
+	out, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT value,value FROM app.large WHERE id=1"})
+	if err != nil || out.Truncated || len(out.Rows[0]) != 2 {
+		t.Fatal("large combined row rejected", err)
+	}
 	sql("UPDATE app.large SET value=repeat('x',10000) WHERE id=1")
 	executorMemory(t, d, a)
 	var idle int
@@ -195,6 +199,11 @@ func executorLimits(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn,
 
 func executorMemory(t *testing.T, d *Driver, a database.Access) {
 	t.Helper()
+	// This existing retention fixture deliberately exercises an optional 1 MiB
+	// budget; the default now permits the entire result.
+	limits := config.DefaultLimits()
+	limits.MaxResultBytes = 1 << 20
+	a.Profile.Limits = &limits
 	// Hold one completed maximum-budget result as a slow consumer while preparing
 	// successive results. Driver admission/leases must already have been released.
 	var baseline runtime.MemStats
@@ -212,7 +221,7 @@ func executorMemory(t *testing.T, d *Driver, a database.Access) {
 			t.Fatal("maximum result fixture", err)
 		}
 		n, _ := QueryPayloadSize(out)
-		if n > config.DefaultLimits().MaxResultBytes {
+		if n > limits.MaxResultBytes {
 			t.Fatal("payload overflow")
 		}
 		if i == 0 {
@@ -331,9 +340,24 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 		t.Fatalf("40-second query under default budget: rows=%d error=%v", out.RowCount, err)
 	}
 	t.Logf("long-query regression duration=%s (one 40-second operation per PostgreSQL major)", time.Since(started))
-	// Relation lock deadline is independently bounded to one second.
+	// Operator-set statement/lock deadlines survive the unlimited application
+	// default. A caller deadline bounds the regression if that contract breaks.
+	sql("ALTER ROLE reader SET statement_timeout='200ms'; ALTER ROLE reader SET lock_timeout='100ms'")
+	defer func() {
+		sql("ALTER ROLE reader RESET statement_timeout; ALTER ROLE reader RESET lock_timeout")
+		// ALTER ROLE changes future logins; discard sessions that observed the
+		// temporary operator settings before later concurrency scenarios run.
+		d.Invalidate(a.Profile.ID)
+	}()
+	d.Invalidate(a.Profile.ID)
+	settings, err := d.Query(t.Context(), database.NewAccess(defaultProfile, a.Password()), database.QueryRequest{SQL: "SELECT current_setting('statement_timeout'),current_setting('lock_timeout')"})
+	if err != nil || settings.Rows[0][0] != "200ms" || settings.Rows[0][1] != "100ms" {
+		t.Fatal("operator deadlines overridden", err)
+	}
 	sql("BEGIN;LOCK TABLE app.changing IN ACCESS EXCLUSIVE MODE")
-	_, err = d.Query(t.Context(), a, database.QueryRequest{SQL: "SELECT * FROM app.changing"})
+	lockCtx, stop := context.WithTimeout(t.Context(), 2*time.Second)
+	_, err = d.Query(lockCtx, database.NewAccess(defaultProfile, a.Password()), database.QueryRequest{SQL: "SELECT * FROM app.changing"})
+	stop()
 	sql("ROLLBACK")
 	requireCode(t, err, contracts.QueryTimeout)
 }

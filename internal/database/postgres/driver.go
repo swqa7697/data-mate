@@ -332,9 +332,6 @@ func (d *Driver) checkout(ctx context.Context, a database.Access, rev config.Rev
 				trace.start("authentication")
 			}
 			release(false)
-			if cfg.Tracer.(*wireState).exceeded.Load() {
-				return nil, nil, nil, database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
-			}
 			return nil, nil, nil, safeError(errDial)
 		}
 	}
@@ -364,7 +361,7 @@ func (d *Driver) runObserved(ctx context.Context, a database.Access, trace *diag
 // this request. Query can reuse its pre-parse validation without caching access.
 func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev config.Revision, trace *diagnosticTrace, fn func(context.Context, pgx.Tx, int) error) (result error) {
 	trace.start("dial")
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
+	ctx, cancel := config.QueryContext(ctx, a.Profile.Limits.QueryTimeoutMS)
 	defer cancel()
 	leave, err := d.admit(ctx)
 	if err != nil {
@@ -380,11 +377,6 @@ func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev confi
 	trace.start("version")
 	healthy := false
 	discarded := false
-	defer func() {
-		if exceeded(c) {
-			result = database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
-		}
-	}()
 	defer func() { release(healthy) }()
 	tx, err := c.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -407,9 +399,10 @@ func (d *Driver) runNormalized(ctx context.Context, a database.Access, rev confi
 			result = safeError(err)
 		}
 	}()
-	_, err = tx.Exec(ctx, "SELECT pg_catalog.set_config('statement_timeout', $1, true), pg_catalog.set_config('lock_timeout', '1000', true)", strconv.Itoa(a.Profile.Limits.QueryTimeoutMS))
-	if err != nil {
-		return safeError(err)
+	if a.Profile.Limits.QueryTimeoutMS > 0 {
+		if _, err = tx.Exec(ctx, "SELECT pg_catalog.set_config('statement_timeout', $1, true)", strconv.Itoa(a.Profile.Limits.QueryTimeoutMS)); err != nil {
+			return safeError(err)
+		}
 	}
 	version, err := checkReadOnlyObserved(ctx, tx, a.Profile.Connection.Username, trace)
 	if err != nil {
@@ -471,15 +464,18 @@ func safeError(err error) error {
 	return database.Fail(contracts.ConnectFailed, "PostgreSQL operation failed; check endpoint, TLS and credentials", true)
 }
 func payloadBound(v any, a database.Access) error {
+	limit := 0
+	if a.Profile.Limits != nil {
+		limit = a.Profile.Limits.MaxResultBytes
+	}
+	if limit == 0 {
+		return nil
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	limit := config.DefaultLimits().MaxResultBytes
-	if a.Profile.Limits != nil {
-		limit = a.Profile.Limits.MaxResultBytes
-	} // reserve JSON escaping plus duplicated compatibility representation
-	if len(b)*3+1024 > limit {
+	if resultBytes(b) > limit {
 		return database.Fail(contracts.ResourceLimit, "metadata result exceeds payload budget; request a smaller page", false)
 	}
 	return nil

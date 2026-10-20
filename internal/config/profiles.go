@@ -2,6 +2,8 @@
 package config
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,10 +20,10 @@ import (
 const MaxProfileBytes = 1 << 20
 
 const (
-	// DefaultQueryTimeout budgets setup, pool waiting, execution and result reading.
-	DefaultQueryTimeout = 60 * time.Second
-	// MaxQueryTimeout is the largest timeout accepted for a profile.
-	MaxQueryTimeout = 5 * time.Minute
+	// DefaultQueryTimeout leaves execution deadlines to the caller and database.
+	DefaultQueryTimeout time.Duration = 0
+	// MaxQueryTimeout is PostgreSQL's maximum statement_timeout in milliseconds.
+	MaxQueryTimeout = time.Duration(1<<31-1) * time.Millisecond
 )
 
 // Profiles is the versioned connections file.
@@ -78,27 +80,60 @@ type Proxy struct {
 	Username string `json:"username,omitempty"`
 }
 
-// Limits caps work for one connection.
+// Limits holds optional execution budgets. Zero timeout/bytes means unlimited.
 type Limits struct {
 	QueryTimeoutMS int `json:"query_timeout_ms"`
 	MaxRows        int `json:"max_rows"`
 	MaxResultBytes int `json:"max_result_bytes"`
 }
 
-// UnmarshalJSON applies defaults only to omitted limits, preserving explicit zeros
-// for validation to reject. The enclosing schema rejects unknown members first.
+// MarshalJSON marks current settings so historical limits are reset only once.
+func (l Limits) MarshalJSON() ([]byte, error) {
+	type plain Limits
+	return json.Marshal(struct {
+		Version int `json:"version"`
+		plain
+	}{2, plain(l)})
+}
+
+// UnmarshalJSON resets historical, unversioned limits, including custom values.
+// Passive snapshots apply this migration without writing files or using the vault.
 func (l *Limits) UnmarshalJSON(b []byte) error {
 	type plain Limits
-	defaults := plain(DefaultLimits())
-	if err := json.Unmarshal(b, &defaults); err != nil {
+	v := struct {
+		Version json.RawMessage `json:"version"`
+		plain
+	}{plain: plain(DefaultLimits())}
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&v); err != nil {
 		return err
 	}
-	*l = Limits(defaults)
+	if v.QueryTimeoutMS < 0 || int64(v.QueryTimeoutMS) > int64(MaxQueryTimeout/time.Millisecond) || v.MaxRows < 1 || v.MaxResultBytes < 0 {
+		return errors.New("invalid execution limits")
+	}
+	if len(v.Version) == 0 {
+		*l = DefaultLimits()
+		return nil
+	}
+	var version int
+	if json.Unmarshal(v.Version, &version) != nil || version != 2 {
+		return errors.New("unsupported execution limits version")
+	}
+	*l = Limits(v.plain)
 	return nil
 }
 
 // DefaultLimits returns independent default settings.
-func DefaultLimits() Limits { return Limits{int(DefaultQueryTimeout / time.Millisecond), 500, 1048576} }
+func DefaultLimits() Limits { return Limits{0, 50000, 0} }
+
+// QueryContext applies a positive optional deadline and always returns a cancel.
+func QueryContext(parent context.Context, milliseconds int) (context.Context, context.CancelFunc) {
+	if milliseconds == 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, time.Duration(milliseconds)*time.Millisecond)
+}
 
 // Table is an exact, case-sensitive name, not a glob.
 type Table struct {

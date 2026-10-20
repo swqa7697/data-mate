@@ -1,21 +1,18 @@
 package mcp
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/muesli/cancelreader"
 	"golang.org/x/sys/unix"
 )
 
-// Bridge relays complete bounded frames only. It owns the socket and streams;
+// Bridge relays protocol bytes without interpreting frames. It owns the streams;
 // closing them interrupts pending reads and writes on disconnect/cancellation.
 func Bridge(ctx context.Context, socket net.Conn, input io.ReadCloser, output io.WriteCloser) error {
 	writer, restore, err := pollableOutput(output)
@@ -51,29 +48,15 @@ func Bridge(ctx context.Context, socket net.Conn, input io.ReadCloser, output io
 		input bool
 	}
 	done := make(chan completion, 2)
-	relay := func(dst io.Writer, src io.Reader, limit int, input bool) {
-		reader := bufio.NewReaderSize(src, limit+1)
-		for {
-			line, err := reader.ReadSlice('\n')
-			if err != nil {
-				done <- completion{err, input}
-				return
-			}
-			if len(line) > limit {
-				done <- completion{errProtocol, input}
-				return
-			}
-			timer := time.AfterFunc(5*time.Second, closeAll)
-			_, err = io.Copy(dst, bytes.NewReader(line))
-			timer.Stop()
-			if err != nil {
-				done <- completion{err, input}
-				return
-			}
+	relay := func(dst io.Writer, src io.Reader, input bool) {
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			err = io.EOF
 		}
+		done <- completion{err, input}
 	}
-	go relay(socket, reader, inboundLimit, true)
-	go relay(writer, socket, outboundLimit, false)
+	go relay(socket, reader, true)
+	go relay(writer, socket, false)
 	result := <-done
 	closeAll()
 	<-done
@@ -88,7 +71,7 @@ func Bridge(ctx context.Context, socket net.Conn, input io.ReadCloser, output io
 
 // Inherited stdout is normally a blocking descriptor that os.File.Close cannot
 // interrupt during Write. Register a nonblocking duplicate with Go's poller so
-// shutdown and the five-second output bound also hold for real process pipes.
+// shutdown can interrupt writes to real process pipes.
 func pollableOutput(output io.WriteCloser) (io.WriteCloser, func(), error) {
 	file, ok := output.(*os.File)
 	if !ok {
@@ -109,12 +92,5 @@ func pollableOutput(output io.WriteCloser) (io.WriteCloser, func(), error) {
 	}
 	restore := func() { _ = unix.SetNonblock(original, flags&unix.O_NONBLOCK != 0); _ = output.Close() }
 	writer := os.NewFile(uintptr(fd), file.Name())
-	if err = writer.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		writer.Close()
-		restore()
-		return nil, nil, err
-	}
-	// Each frame has its own timer; this initial deadline only checks support.
-	_ = writer.SetWriteDeadline(time.Time{})
 	return writer, restore, nil
 }

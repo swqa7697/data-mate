@@ -15,7 +15,6 @@
     },
     "schemas": {
       "type": "array",
-      "maxItems": 4096,
       "items": {
         "type": "object",
         "properties": {
@@ -27,7 +26,6 @@
           },
           "tables": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "type": "object",
               "properties": {
@@ -56,7 +54,6 @@
           },
           "enums": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "type": "object",
               "properties": {
@@ -75,7 +72,6 @@
           },
           "sequences": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "type": "object",
               "properties": {
@@ -94,7 +90,6 @@
           },
           "indexes": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "type": "object",
               "properties": {
@@ -113,7 +108,6 @@
           },
           "functions": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "type": "object",
               "properties": {

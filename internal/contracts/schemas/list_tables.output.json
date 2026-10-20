@@ -41,8 +41,7 @@
           "kind"
         ],
         "additionalProperties": false
-      },
-      "maxItems": 500
+      }
     },
     "next_cursor": {
       "type": [

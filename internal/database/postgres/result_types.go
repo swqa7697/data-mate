@@ -8,8 +8,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/swqa7697/data-mate/internal/contracts"
-	"github.com/swqa7697/data-mate/internal/database"
 )
 
 // These are output representations, not an authorization allowlist.
@@ -43,7 +41,7 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
  CROSS JOIN LATERAL unnest(ARRAY[t.typbasetype,CASE WHEN t.typcategory='A' AND t.typinput='pg_catalog.array_in'::regproc THEN t.typelem ELSE 0::oid END]) child WHERE child<>0)
  SELECT t.oid,t.typbasetype,CASE WHEN t.typcategory='A' AND t.typinput='pg_catalog.array_in'::regproc THEN t.typelem ELSE 0::oid END,
  CASE WHEN n.nspname='pg_catalog' THEN t.typname::text ELSE pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(t.typname) END,t.typdelim::text
- FROM types JOIN pg_catalog.pg_type t USING(oid) JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace LIMIT 8193`, ids)
+ FROM types JOIN pg_catalog.pg_type t USING(oid) JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -59,9 +57,6 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
 		}
 		t.delimiter = delim[0]
 		out[t.oid] = t
-	}
-	if len(out) > 8192 {
-		return nil, database.Fail(contracts.ResourceLimit, "result type metadata exceeds limit", false)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
@@ -93,7 +88,9 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
 	return out, nil
 }
 func (types resultTypes) representation(oid uint32) (string, error) {
-	for range 64 {
+	seen := map[uint32]bool{}
+	for !seen[oid] {
+		seen[oid] = true
 		t, ok := types[oid]
 		if !ok {
 			return "", codecError()
@@ -116,19 +113,22 @@ func (types resultTypes) representation(oid uint32) (string, error) {
 	}
 	return "", codecError()
 }
-func (types resultTypes) decode(oid uint32, raw []byte, depth int) (any, error) {
+func (types resultTypes) decode(oid uint32, raw []byte) (any, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	if depth > 64 {
-		return nil, database.Fail(contracts.ResourceLimit, "result nesting exceeds limit", false)
-	}
-	t, ok := types[oid]
-	if !ok || !utf8.Valid(raw) {
+	if !utf8.Valid(raw) {
 		return nil, codecError()
 	}
-	if t.base != 0 {
-		return types.decode(t.base, raw, depth+1)
+	// The same chain used for output representation also detects dependency
+	// cycles before decoding. Domain unwrapping does not consume the Go stack.
+	if _, err := types.representation(oid); err != nil {
+		return nil, err
+	}
+	t := types[oid]
+	for t.base != 0 {
+		oid = t.base
+		t = types[oid]
 	}
 	if t.element == 0 {
 		if _, ok := scalarNames[oid]; ok {
@@ -159,7 +159,7 @@ func (types resultTypes) decode(oid uint32, raw []byte, depth int) (any, error) 
 				v := array.Elements[index]
 				index++
 				if v.Valid {
-					values[i], err = types.decode(t.element, []byte(v.String), depth+1)
+					values[i], err = types.decode(t.element, []byte(v.String))
 				}
 			}
 			if err != nil {

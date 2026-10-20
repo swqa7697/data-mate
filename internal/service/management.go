@@ -71,7 +71,7 @@ type CredentialPresence struct {
 	ProxyPassword    bool   `json:"proxy_password"`
 }
 
-// ManagementReply contains bounded nonsecret results and fixed safe error identifiers.
+// ManagementReply contains nonsecret results and fixed safe error identifiers.
 type ManagementReply struct {
 	Outcome     *vault.Outcome                `json:"outcome,omitempty"`
 	Diagnostic  *DiagnosticResult             `json:"diagnostic,omitempty"`
@@ -121,7 +121,7 @@ func readFrameLimit(r io.Reader, dst any, limit int) error {
 		return err
 	}
 	n := binary.BigEndian.Uint32(size[:])
-	if n == 0 || n > uint32(limit) {
+	if n == 0 || limit > 0 && uint64(n) > uint64(limit) {
 		return ErrState
 	}
 	raw := make([]byte, n)
@@ -129,14 +129,23 @@ func readFrameLimit(r io.Reader, dst any, limit int) error {
 	if _, err := io.ReadFull(r, raw); err != nil {
 		return err
 	}
+	if limit == 0 {
+		limit = int(n)
+	}
 	if config.DecodeStrict(raw, limit, dst) != nil {
 		return ErrState
 	}
 	return nil
 }
 func writeFrame(w io.Writer, v any) error {
+	return writeFrameLimit(w, v, managementLimit)
+}
+
+// Nonsecret database descriptions may use the full uint32 framing range.
+// Credential-bearing requests and answers always keep their owning byte caps.
+func writeFrameLimit(w io.Writer, v any, limit int) error {
 	raw, err := json.Marshal(v)
-	if err != nil || len(raw) > managementLimit {
+	if err != nil || uint64(len(raw)) > uint64(^uint32(0)) || limit > 0 && len(raw) > limit {
 		return ErrState
 	}
 	defer clear(raw)
@@ -522,7 +531,7 @@ func (m *Manager) checkProfile(parent context.Context, operation string, expecte
 	if p.CredentialRef != "" && unlockErr != nil {
 		return fail("vault", contracts.VaultUnavailable, unlockErr)
 	}
-	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Limits.QueryTimeoutMS)*time.Millisecond)
+	ctx, cancel := config.QueryContext(parent, p.Limits.QueryTimeoutMS)
 	defer cancel()
 	// Work admits before acquiring a fresh snapshot, preserving query-vs-mutation leases.
 	err := m.Work(ctx, p.Alias, func(ctx context.Context, d database.Driver, a database.Access) error {

@@ -127,7 +127,7 @@ func (m *Manager) admit(ctx context.Context) (func(), error) {
 // The callback must prepare its bounded response and finish cleanup before return.
 // Alias is resolved only after admission; queued callers retain no old snapshots.
 func (m *Manager) Work(parent context.Context, alias string, fn func(context.Context, database.Driver, database.Access) error) error {
-	ctx, cancel := context.WithTimeout(parent, config.MaxQueryTimeout+database.AdmissionTimeout+5*time.Second)
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer stop()
@@ -149,7 +149,7 @@ func (m *Manager) Work(parent context.Context, alias string, fn func(context.Con
 		if profile.Alias != alias {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(ctx, time.Duration(profile.Limits.QueryTimeoutMS)*time.Millisecond)
+		ctx, cancel := config.QueryContext(ctx, profile.Limits.QueryTimeoutMS)
 		defer cancel()
 		s, err := m.repo.Credential(ctx, l, profile.ID)
 		if err != nil {
@@ -197,7 +197,12 @@ func (m *Manager) Connections(parent context.Context, prepare func([]mcp.Connect
 	}
 	items := make([]mcp.Connection, 0, len(p.Connections))
 	for _, p := range p.Connections {
-		items = append(items, mcp.Connection{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database})
+		items = append(items, mcp.Connection{
+			Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
+			Limits: mcp.ConnectionLimits{
+				MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
+			},
+		})
 	}
 	return prepare(items)
 }

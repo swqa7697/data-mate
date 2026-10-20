@@ -47,7 +47,7 @@ func (m *Manager) validateMutation(ctx context.Context, q ManagementRequest) (ti
 		targetFound = true
 	}
 	needsUnlock := false
-	budget := config.MaxQueryTimeout
+	budget := 30 * time.Second
 	for _, p := range candidates.Connections {
 		if p.ID == q.ProfileID {
 			targetFound = true
@@ -59,7 +59,7 @@ func (m *Manager) validateMutation(ctx context.Context, q ManagementRequest) (ti
 		if !exists || p.ID == q.ProfileID || !reflect.DeepEqual(p, before) || len(mutation.Patches[p.ID]) != 0 {
 			changed = append(changed, p)
 			limit := time.Duration(p.Limits.QueryTimeoutMS) * time.Millisecond
-			if limit < budget {
+			if limit > 0 && limit < budget {
 				budget = limit
 			}
 			needsUnlock = needsUnlock || before.CredentialRef != ""

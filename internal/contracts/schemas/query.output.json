@@ -41,13 +41,11 @@
       "items": {
         "type": "array",
         "items": {}
-      },
-      "maxItems": 5000
+      }
     },
     "row_count": {
       "type": "integer",
-      "minimum": 0,
-      "maximum": 5000
+      "minimum": 0
     },
     "truncated": {
       "type": "boolean"

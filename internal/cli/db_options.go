@@ -28,9 +28,9 @@ func profileFlags(cmd *cobra.Command) {
 	f.Int("port", 5432, "Database port")
 	f.Int("ssh-port", 22, "SSH port")
 	f.Bool("ssh-enroll", false, "Interactively verify and save an SSH host fingerprint")
-	f.Duration("query-timeout", config.DefaultQueryTimeout, "Query timeout (1ms to 5m)")
-	f.Int("max-rows", 500, "Maximum rows")
-	f.Int("max-result-bytes", 1048576, "Maximum result bytes")
+	f.Duration("query-timeout", config.DefaultQueryTimeout, "Query timeout (0 disables the application timeout)")
+	f.Int("max-rows", config.DefaultLimits().MaxRows, "Maximum rows")
+	f.Int("max-result-bytes", 0, "Maximum result bytes (0 means unlimited)")
 	for _, flag := range []struct{ name, help string }{
 		{"tls", "Enable verified TLS"}, {"password-stdin", "Read one password line from stdin"}, {"credentials-stdin", "Read strict credential JSON from stdin"}, {"passwordless", "Explicitly use no database password"},
 		{"clear-password", "Clear the database password"}, {"clear-ssh-password", "Clear the SSH password"}, {"clear-ssh-key-passphrase", "Clear the SSH key passphrase"}, {"clear-proxy-password", "Clear the proxy password"},
@@ -132,8 +132,8 @@ func applyOptions(cmd *cobra.Command, p *config.Profile) error {
 	}
 	if changed(cmd, "query-timeout") {
 		d, _ := cmd.Flags().GetDuration("query-timeout")
-		if d < time.Millisecond || d > config.MaxQueryTimeout || d%time.Millisecond != 0 {
-			return invalid("query timeout must be whole milliseconds from 1ms to 5m")
+		if d < 0 || d > config.MaxQueryTimeout || d%time.Millisecond != 0 {
+			return invalid("query timeout must be whole milliseconds from 0ms to 2147483647ms")
 		}
 		p.Limits.QueryTimeoutMS = int(d / time.Millisecond)
 	}

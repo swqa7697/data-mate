@@ -10,19 +10,18 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^[^\\x00]+$",
-      "maxLength": 65536,
       "description": "One PostgreSQL read statement (SELECT, VALUES, TABLE, SHOW, or EXPLAIN of a read query). Physical tables and views require schema-qualified names. System schemas and application routines are permitted; writes and transaction control are rejected."
     },
     "parameters": {
       "type": "array",
       "items": {},
-      "maxItems": 256,
-      "description": "Ordered JSON values bound separately to $1, $2, etc. PostgreSQL infers types; use SQL casts when needed. Null means SQL NULL. Objects/arrays become JSON text; PostgreSQL array inputs use array-text strings with casts."
+      "maxItems": 65535,
+      "description": "At most 65,535 ordered JSON values bound separately to $1, $2, etc. PostgreSQL infers types; use SQL casts when needed. Null means SQL NULL. Objects/arrays become JSON text; PostgreSQL array inputs use array-text strings with casts."
     },
     "row_limit": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 5000
+      "description": "Maximum rows to return. Defaults to this connection's limits.max_rows from list_connections and must not exceed it."
     }
   },
   "required": [

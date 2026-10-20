@@ -24,62 +24,66 @@ func JSON(r io.Reader, limit int) ([]byte, error) {
 	if err != nil || len(b) > limit || !utf8.Valid(b) {
 		return nil, errors.New("invalid or oversized JSON input")
 	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.UseNumber()
-	if err := value(d, 0); err != nil {
+	if err := checkJSON(b, 64); err != nil {
 		return nil, errors.New("invalid JSON: duplicate key, syntax, or nesting limit")
-	}
-	if _, err := d.Token(); err != io.EOF {
-		return nil, errors.New("expected one JSON value")
 	}
 	return b, nil
 }
 
-func value(d *json.Decoder, depth int) error {
-	if depth > 64 {
-		return errors.New("depth")
+// JSONMessage checks protocol input without imposing configuration-file budgets.
+// Standard-library syntax limits still apply; duplicate keys are never accepted.
+func JSONMessage(b []byte) error { return checkJSON(b, 0) }
+
+func checkJSON(b []byte, maxDepth int) error {
+	if !utf8.Valid(b) || !json.Valid(b) {
+		return errors.New("invalid JSON")
 	}
-	t, err := d.Token()
-	if err != nil {
-		return err
+	type frame struct {
+		keys map[string]bool
+		key  bool
 	}
-	switch t {
-	case json.Delim('{'):
-		seen := map[string]bool{}
-		for d.More() {
-			key, err := d.Token()
-			if err != nil {
-				return err
-			}
-			s, ok := key.(string)
-			if !ok || seen[s] {
-				return errors.New("key")
-			}
-			seen[s] = true
-			if err := value(d, depth+1); err != nil {
-				return err
-			}
-		}
-		t, err = d.Token()
-		if err != nil || t != json.Delim('}') {
-			return errors.New("object")
-		}
-	case json.Delim('['):
-		for d.More() {
-			if err := value(d, depth+1); err != nil {
-				return err
-			}
-		}
-		t, err = d.Token()
-		if err != nil || t != json.Delim(']') {
-			return errors.New("array")
-		}
-	default:
-		if _, ok := t.(json.Delim); ok {
-			return errors.New("delimiter")
+	var stack []frame
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	complete := func() {
+		if len(stack) > 0 && stack[len(stack)-1].keys != nil {
+			stack[len(stack)-1].key = true
 		}
 	}
-	return nil
+	for {
+		token, err := d.Token()
+		if err == io.EOF {
+			return nil // json.Valid already required exactly one complete value.
+		}
+		if err != nil {
+			return errors.New("invalid JSON")
+		}
+		if token == json.Delim('}') || token == json.Delim(']') {
+			stack = stack[:len(stack)-1]
+			complete()
+			continue
+		}
+		if len(stack) > 0 && stack[len(stack)-1].key {
+			f := &stack[len(stack)-1]
+			key, ok := token.(string)
+			if !ok || f.keys[key] {
+				return errors.New("duplicate JSON key")
+			}
+			f.keys[key], f.key = true, false
+			continue
+		}
+		if maxDepth > 0 && len(stack) > maxDepth {
+			return errors.New("JSON nesting limit")
+		}
+		switch token {
+		case json.Delim('{'):
+			stack = append(stack, frame{keys: map[string]bool{}, key: true})
+		case json.Delim('['):
+			stack = append(stack, frame{})
+		default:
+			complete()
+		}
+	}
 }
 
 // Validate checks a JSON value against an embedded schema without exposing its contents.

@@ -18,8 +18,7 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 	}
 	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		// At least one row per schema; the extra row detects overflow without
-		// materializing an unbounded catalog. A left join preserves empty schemas.
+		// A left join preserves empty schemas in the same catalog snapshot.
 		rows, err := tx.Query(ctx, `WITH schemas AS MATERIALIZED (
  SELECT oid,nspname FROM pg_catalog.pg_namespace
  WHERE nspname <> 'information_schema' AND left(nspname::text,3) <> 'pg_'
@@ -35,12 +34,11 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
  FROM pg_catalog.pg_proc p JOIN schemas n ON n.oid=p.pronamespace WHERE p.prokind IN ('f','w')
  ) SELECT n.nspname::text,o.name,o.kind
  FROM schemas n LEFT JOIN objects o ON o.namespace=n.oid
- ORDER BY n.nspname::text COLLATE "C",o.name COLLATE "C",o.kind COLLATE "C" LIMIT 4097`)
+ ORDER BY n.nspname::text COLLATE "C",o.name COLLATE "C",o.kind COLLATE "C"`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		count := 0
 		for rows.Next() {
 			var schema string
 			var name, relationKind *string
@@ -48,11 +46,9 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 				return err
 			}
 			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
-				count++
 				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}, Functions: []database.CatalogName{}})
 			}
 			if name != nil {
-				count++
 				i := len(out.Schemas) - 1
 				switch *relationKind {
 				case "enum":
@@ -67,9 +63,6 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: *name, Kind: kind(*relationKind)})
 				}
 			}
-			if count > maxCatalogObjects {
-				return database.Fail(contracts.ResourceLimit, "database description exceeds 4096 schemas and objects", false)
-			}
 		}
 		if err := rows.Err(); err != nil {
 			return err
@@ -79,7 +72,7 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 		if err != nil {
 			return err
 		}
-		if len(encoded) > a.Profile.Limits.MaxResultBytes {
+		if a.Profile.Limits.MaxResultBytes > 0 && len(encoded) > a.Profile.Limits.MaxResultBytes {
 			return database.Fail(contracts.ResourceLimit, "database description exceeds profile result-byte limit", false)
 		}
 		return nil

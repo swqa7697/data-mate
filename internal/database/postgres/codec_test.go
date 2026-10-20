@@ -72,8 +72,9 @@ func TestQueryCodecs(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{strings.Repeat("[", 65) + "0" + strings.Repeat("]", 65), `"` + strings.Repeat("x", 1<<20) + `"`} {
-		_, err := decodeValue(114, []byte(raw))
-		requireCode(t, err, contracts.ResourceLimit)
+		if _, err := decodeValue(114, []byte(raw)); err != nil {
+			t.Fatal("large or nested JSON rejected", err)
+		}
 	}
 	for _, p := range []json.RawMessage{json.RawMessage(`"\u0000"`), json.RawMessage(`{"invalid":`), nil} {
 		_, err := queryParameters([]json.RawMessage{p})
@@ -83,6 +84,40 @@ func TestQueryCodecs(t *testing.T) {
 	if err != nil || string(params[0]) != "9007199254740993" || string(params[1]) != "true" || params[2] != nil || string(params[3]) != "text" || string(params[4]) != `{"n":9007199254740993}` || string(params[5]) != `[1,null]` {
 		t.Fatal("parameter fidelity", err)
 	}
+	// Extend the same codec boundary with a formerly oversized parameter and
+	// parameter count, retaining the PostgreSQL extended protocol's uint16 count.
+	large, _ := json.Marshal(strings.Repeat("x", 300<<10))
+	params, err = queryParameters([]json.RawMessage{large})
+	if err != nil || len(params[0]) != 300<<10 {
+		t.Fatal("large parameter rejected", err)
+	}
+	for _, count := range []int{257, 1 << 16} {
+		values := make([]json.RawMessage, count)
+		for i := range values {
+			values[i] = json.RawMessage(`1`)
+		}
+		_, err = queryParameters(values)
+		if count == 257 && err != nil {
+			t.Fatal("former parameter cap retained", err)
+		}
+		if count == 1<<16 {
+			requireCode(t, err, contracts.InvalidArgument)
+		}
+	}
+	// Type chains longer than the former depth bound decode exact values; cycles
+	// are invalid representations rather than recursion or resource failures.
+	types := resultTypes{20: {oid: 20, name: "int8"}}
+	for oid := uint32(1000); oid < 1128; oid++ {
+		types[oid] = resultType{oid: oid, base: oid + 1}
+	}
+	types[1128] = resultType{oid: 1128, base: 20}
+	value, err := types.decode(1000, []byte("9007199254740993"))
+	if err != nil || value != "9007199254740993" {
+		t.Fatal("long type chain rejected", err)
+	}
+	types[1128] = resultType{oid: 1128, base: 1000}
+	_, err = types.decode(1000, []byte("1"))
+	requireCode(t, err, contracts.QueryUnsupported)
 
 	// Count the actual compatibility envelope, including escaping and exact JSON.
 	out := database.QueryResult{Connection: "fixture", Columns: []database.ResultColumn{{Name: "q\"", Type: "json"}}, Rows: [][]any{{json.RawMessage(`{"n":9007199254740993,"s":"<\n\""}`)}}, RowCount: 1}

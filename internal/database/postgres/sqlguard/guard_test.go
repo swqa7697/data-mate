@@ -30,10 +30,15 @@ func TestQueryGuard(t *testing.T) {
 		"WITH RECURSIVE x AS (SELECT * FROM y), y AS (SELECT * FROM app.items) SELECT * FROM x",
 		"WITH x AS (SELECT * FROM app.items) SELECT * FROM (WITH x AS (SELECT * FROM x) SELECT * FROM x) q",
 		`SELECT * FROM "Dot.Schema"."a.b"`, "SELECT * FROM app.items TABLESAMPLE SYSTEM(10)",
+		// Extend the existing guard corpus beyond former byte, node and depth caps.
+		strings.Repeat("(", 65) + "SELECT 1" + strings.Repeat(")", 65),
+		"SELECT " + strings.Repeat("1,", 8192) + "1",
+		"SELECT 1 /*" + strings.Repeat("x", 1<<20) + "*/",
+		"SELECT " + strings.Repeat("NOT ", 128) + "true",
 	}
 	for _, q := range positive {
 		if err := Check(q); err != nil {
-			t.Errorf("accepted query %s: %v", q, err)
+			t.Errorf("accepted query %.200s: %v", q, err)
 		}
 	}
 	negative := []string{
@@ -47,7 +52,7 @@ func TestQueryGuard(t *testing.T) {
 		"SELECT * FROM (WITH x AS (SELECT 1) SELECT * FROM x) q,x",
 
 		"SELECT * FROM (SELECT * FROM app.items FOR SHARE) q",
-		strings.Repeat("(", 65) + "SELECT 1" + strings.Repeat(")", 65), strings.Repeat(" ", 65537), "SELECT " + strings.Repeat("1,", 8192) + "1",
+		strings.Repeat(" ", 65537),
 	}
 	for _, q := range negative {
 		if err := Check(q); err == nil {

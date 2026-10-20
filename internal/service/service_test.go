@@ -657,8 +657,8 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 		parentTimeout time.Duration
 		want          time.Duration
 	}{
-		{"default", nil, 0, 60 * time.Second},
-		{"maximum", &config.Limits{QueryTimeoutMS: 300000, MaxRows: 500, MaxResultBytes: 1048576}, 0, 5 * time.Minute},
+		{"default", nil, 0, 0},
+		{"long explicit", &config.Limits{QueryTimeoutMS: 600000, MaxRows: 50000, MaxResultBytes: 0}, 0, 10 * time.Minute},
 		{"earlier caller", nil, 10 * time.Second, 10 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -673,7 +673,11 @@ func TestRequestReloadAndAdmission(t *testing.T) {
 			before := time.Now()
 			err := m.Work(parent, "fixture", func(ctx context.Context, _ database.Driver, _ database.Access) error {
 				deadline, ok := ctx.Deadline()
-				if !ok {
+				if tc.want == 0 {
+					if pd, parentBound := parent.Deadline(); ok != parentBound || ok && !deadline.Equal(pd) {
+						t.Error("default added an execution deadline")
+					}
+				} else if !ok {
 					t.Error("missing operation deadline")
 				} else if tc.parentTimeout != 0 {
 					pd, _ := parent.Deadline()

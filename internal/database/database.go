@@ -74,7 +74,7 @@ type Stage struct {
 	Error *contracts.Failure `json:"error,omitempty"`
 }
 
-// DatabaseDescription is the complete, bounded user-facing catalog. It is never
+// DatabaseDescription is the complete user-facing catalog. It is never
 // an MCP result; it includes empty application schemas but excludes system schemas.
 type DatabaseDescription struct {
 	Version  int                 `json:"version"`
