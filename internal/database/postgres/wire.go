@@ -10,11 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// pgconn's simple-query reader can replace a protocol-length error with "conn
-// closed" after peeking. Observe only frame lengths (never bodies) so every path
-// can retain RESOURCE_LIMIT classification. pgproto3 still enforces the hard cap.
-// Each observer belongs to one frontend and has bounded, constant memory.
-type wireState struct{ exceeded, authStarted atomic.Bool }
+// Observe only message headers so diagnostics distinguish authentication from
+// dialing without retaining or inspecting secret-bearing protocol bodies.
+type wireState struct{ authStarted atomic.Bool }
 
 func (s *wireState) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
 	return ctx
@@ -32,7 +30,7 @@ type frameReader struct {
 func (r *frameReader) Read(p []byte) (int, error) {
 	n, err := r.Reader.Read(p)
 	b := p[:n]
-	for len(b) > 0 && !r.state.exceeded.Load() {
+	for len(b) > 0 {
 		if r.remaining > 0 {
 			take := min(len(b), int(r.remaining))
 			r.remaining -= uint32(take)
@@ -53,9 +51,6 @@ func (r *frameReader) Read(p []byte) (int, error) {
 				return n, err
 			}
 			r.remaining = size - 4
-			if r.remaining > 2<<20 {
-				r.state.exceeded.Store(true)
-			}
 		}
 	}
 	return n, err
@@ -64,11 +59,9 @@ func trackWire(c *pgx.ConnConfig) *wireState {
 	s := &wireState{}
 	c.Tracer = s
 	c.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
-		return pgproto3.NewFrontend(&frameReader{Reader: r, state: s}, w)
+		f := pgproto3.NewFrontend(&frameReader{Reader: r, state: s}, w)
+		f.SetMaxBodyLen(0)
+		return f
 	}
 	return s
-}
-func exceeded(c *pgx.Conn) bool {
-	s, ok := c.Config().Tracer.(*wireState)
-	return ok && s.exceeded.Load()
 }

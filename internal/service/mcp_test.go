@@ -6,9 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -27,9 +30,55 @@ type sessionDriver struct {
 	database.Driver
 	entered chan struct{}
 	exited  chan struct{}
+	release chan struct{}
+}
+
+func (d *sessionDriver) ListTables(ctx context.Context, a database.Access, q database.PageRequest) (database.TablePage, error) {
+	if q.Schema == "fault" {
+		return database.TablePage{}, database.Fail(contracts.ResourceLimit, "synthetic metadata failure", true)
+	}
+	return d.Driver.ListTables(ctx, a, q)
+}
+func (d *sessionDriver) ListObjects(ctx context.Context, a database.Access, q database.ObjectPageRequest) (database.ObjectPage, error) {
+	if q.Schema == "fault" {
+		return database.ObjectPage{}, database.Fail(contracts.StaleCursor, "synthetic metadata failure", false)
+	}
+	return d.Driver.ListObjects(ctx, a, q)
+}
+func (d *sessionDriver) DescribeTable(ctx context.Context, a database.Access, q config.Table) (database.Description, error) {
+	if q.Name == "fault" {
+		return database.Description{}, database.Fail(contracts.PermissionDenied, "synthetic metadata failure", false)
+	}
+	return d.Driver.DescribeTable(ctx, a, q)
+}
+func (d *sessionDriver) DescribeObject(ctx context.Context, a database.Access, q database.ObjectRequest) (database.ObjectDescription, error) {
+	if q.Name == "fault" {
+		return database.ObjectDescription{}, database.Fail(contracts.QueryUnsupported, "synthetic metadata failure", false)
+	}
+	return d.Driver.DescribeObject(ctx, a, q)
 }
 
 func (d *sessionDriver) Query(ctx context.Context, a database.Access, q database.QueryRequest) (database.QueryResult, error) {
+	if strings.HasPrefix(q.SQL, "fail:") {
+		return database.QueryResult{}, database.Fail(contracts.Code(strings.TrimPrefix(q.SQL, "fail:")), "synthetic failure", true)
+	}
+	if q.SQL == "panic" {
+		panic("synthetic-password postgres://secret")
+	}
+	if q.SQL == "encode" {
+		return database.QueryResult{Rows: [][]any{{math.NaN()}}}, nil
+	}
+	if q.SQL == "hold" {
+		d.entered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return database.QueryResult{}, ctx.Err()
+		case <-d.release:
+		}
+	}
+	if strings.HasPrefix(q.SQL, "select 1") || q.SQL == "hold" {
+		return database.QueryResult{Connection: a.Profile.Alias, Columns: []database.ResultColumn{{Name: "value", Type: "int4"}}, Rows: [][]any{{1}}, RowCount: 1}, nil
+	}
 	if q.SQL == "wait" {
 		d.entered <- struct{}{}
 		<-ctx.Done()
@@ -57,12 +106,26 @@ func sessionClient(t *testing.T, c *Controller) (*sdk.ClientSession, *net.UnixCo
 	client := sdk.NewClient(&sdk.Implementation{Name: "fixture", Version: "1"}, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	session, err := client.Connect(ctx, &sdk.IOTransport{Reader: conn, Writer: conn}, nil)
+	input, writer := io.Pipe()
+	reader, output := io.Pipe()
+	bridged := make(chan error, 1)
+	go func() { bridged <- relay.Bridge(t.Context(), conn, input, output) }()
+	session, err := client.Connect(ctx, &sdk.IOTransport{Reader: reader, Writer: writer, MaxLineLength: -1}, nil)
 	if err != nil {
 		conn.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { session.Close() })
+	t.Cleanup(func() {
+		session.Close()
+		reader.Close()
+		writer.Close()
+		conn.Close()
+		select {
+		case <-bridged:
+		case <-time.After(3 * time.Second):
+			t.Error("session bridge leaked")
+		}
+	})
 	return session, conn
 }
 func callTool(t *testing.T, s *sdk.ClientSession, name string, args any) (*sdk.CallToolResult, []byte) {
@@ -109,7 +172,7 @@ func TestMCPSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &sessionDriver{Driver: pg, entered: make(chan struct{}, 16), exited: make(chan struct{}, 16)}
+	d := &sessionDriver{Driver: pg, entered: make(chan struct{}, 16), exited: make(chan struct{}, 16), release: make(chan struct{})}
 	f.driver = d
 	p := fixtureProfile()
 	p.Connection.Host = "synthetic-host"
@@ -151,19 +214,82 @@ func TestMCPSessions(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), "synthetic-password") {
 			t.Fatal("invalid input diagnostic", err)
 		}
+		callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
 	}
 	for _, test := range []struct {
 		sql, alias string
 		code       contracts.Code
-	}{{"delete from app.items", "fixture", contracts.ReadOnlyViolation}, {"select 1", "missing", contracts.ConnectionNotFound}, {"large", "fixture", contracts.ResourceLimit}, {"upstream", "fixture", contracts.ServiceUnavailable}} {
+	}{{"delete from app.items", "fixture", contracts.ReadOnlyViolation}, {"select 1", "missing", contracts.ConnectionNotFound}, {"panic", "fixture", contracts.ServiceUnavailable}, {"encode", "fixture", contracts.ServiceUnavailable}, {"upstream", "fixture", contracts.ServiceUnavailable}} {
 		r, raw = callTool(t, a, "query", map[string]any{"connection": test.alias, "sql": test.sql})
 		var body struct {
 			Error contracts.Failure `json:"error"`
 		}
 		_ = json.Unmarshal(raw, &body)
 		if !r.IsError || body.Error.Code != test.code || bytes.Contains(raw, []byte("synthetic-password")) {
-			t.Fatalf("failure propagation %s: %s", test.sql, raw)
+			t.Fatalf("failure propagation %s: %.200s", test.sql, raw)
 		}
+		callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
+	}
+	// Ladder 2: each public failure code must leave this same bridged client usable.
+	for _, code := range []contracts.Code{contracts.ConfigInvalid, contracts.ConnectionNotFound, contracts.CredentialMissing, contracts.VaultUnavailable, contracts.ConnectFailed, contracts.QueryUnsupported, contracts.QueryTimeout, contracts.ResourceLimit, contracts.ReadOnlyViolation, contracts.PermissionDenied, contracts.QueryFailed, contracts.StaleCursor, contracts.InvalidArgument, contracts.ServiceUnavailable, contracts.Cancelled} {
+		r, raw = callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "fail:" + string(code)})
+		var body struct {
+			Error contracts.Failure `json:"error"`
+		}
+		if json.Unmarshal(raw, &body) != nil || !r.IsError || body.Error.Code != code {
+			t.Fatalf("lost failure %s: %.200s", code, raw)
+		}
+		probe, _ := callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
+		if probe.IsError {
+			t.Fatal("failure poisoned original session", code)
+		}
+	}
+	// All four metadata dispatch paths release their work on errors, too.
+	for _, test := range []struct {
+		name string
+		args map[string]any
+		code contracts.Code
+	}{
+		{"list_tables", map[string]any{"connection": "fixture", "schema": "fault"}, contracts.ResourceLimit},
+		{"list_objects", map[string]any{"connection": "fixture", "schema": "fault"}, contracts.StaleCursor},
+		{"describe_table", map[string]any{"connection": "fixture", "schema": "app", "table": "fault"}, contracts.PermissionDenied},
+		{"describe_object", map[string]any{"connection": "fixture", "schema": "app", "name": "fault", "kind": "type"}, contracts.QueryUnsupported},
+	} {
+		r, raw = callTool(t, a, test.name, test.args)
+		var body struct {
+			Error contracts.Failure `json:"error"`
+		}
+		if json.Unmarshal(raw, &body) != nil || !r.IsError || body.Error.Code != test.code {
+			t.Fatal("metadata failure lost", test.name)
+		}
+		callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
+	}
+	// A genuine broken configuration must recover after repair on this session,
+	// including list_connections, without reopening the bridge or service.
+	databasePath := filepath.Join(c.Root.Path, "data-mate.db")
+	if err := os.Chmod(databasePath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(databasePath, 0600) })
+	r, _ = callTool(t, a, "list_connections", map[string]any{})
+	if !r.IsError {
+		t.Fatal("invalid configuration accepted")
+	}
+	if err := os.Chmod(databasePath, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = callTool(t, a, "list_connections", map[string]any{})
+	if r.IsError {
+		t.Fatal("configuration repair required a new session")
+	}
+	callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
+	r, raw = callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "large"})
+	if r.IsError || len(raw) < 1<<19 {
+		t.Fatal("large escaped result rejected")
+	}
+	r, _ = callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1 /*" + strings.Repeat("x", 1<<20) + "*/"})
+	if r.IsError {
+		t.Fatal("large inbound query rejected")
 	}
 	// SDK cancellation releases work; a second session continues independently.
 	cancelCtx, cancel := context.WithCancel(t.Context())
@@ -179,6 +305,7 @@ func TestMCPSessions(t *testing.T) {
 		t.Fatal("cancelled call succeeded")
 	}
 	awaitSignal(t, d.exited)
+	callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
 	// EOF cancels an active operation even when the client did not notify.
 	disconnected, wire := sessionClient(t, c)
 	go func() {
@@ -187,42 +314,32 @@ func TestMCPSessions(t *testing.T) {
 	awaitSignal(t, d.entered)
 	wire.Close()
 	awaitSignal(t, d.exited)
-	// Sixteen accepted calls consume the session; the seventeenth closes it promptly.
+	// Saturation rejects only the extra call; admitted work and its client survive.
 	saturated, _ := sessionClient(t, c)
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Go(func() {
-			_, _ = saturated.CallTool(t.Context(), &sdk.CallToolParams{Name: "query", Arguments: map[string]any{"connection": "fixture", "sql": "wait"}})
+			result, err := saturated.CallTool(t.Context(), &sdk.CallToolParams{Name: "query", Arguments: map[string]any{"connection": "fixture", "sql": "hold"}})
+			if err != nil || result.IsError {
+				t.Error("admitted call interrupted", err)
+			}
 		})
 	}
 	for range 16 {
 		awaitSignal(t, d.entered)
 	}
-	_, err = saturated.CallTool(t.Context(), &sdk.CallToolParams{Name: "list_connections", Arguments: map[string]any{}})
-	if err == nil {
-		t.Fatal("seventeenth call admitted")
+	r, raw = callTool(t, saturated, "list_connections", map[string]any{})
+	var busy struct {
+		Error contracts.Failure `json:"error"`
 	}
+	if json.Unmarshal(raw, &busy) != nil || !r.IsError || busy.Error.Code != contracts.ResourceLimit || !busy.Error.Retryable {
+		t.Fatal("seventeenth call was not rejected safely")
+	}
+	close(d.release)
 	wg.Wait()
-	for range 16 {
-		awaitSignal(t, d.exited)
-	}
+	callTool(t, saturated, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
 	callTool(t, b, "list_connections", map[string]any{})
-	// Invalid peers never reach a handler or poison healthy sessions.
-	for _, bad := range []string{"{broken}\n", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n", `{"jsonrpc":"2.0","id":1,"id":2,"method":"initialize"}` + "\n", strings.Repeat("x", (256<<10)+1) + "\n"} {
-		conn, err := c.OpenSession(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		_, _ = io.WriteString(conn, bad)
-		var b [1]byte
-		_, err = conn.Read(b[:])
-		conn.Close()
-		var timeout net.Error
-		if err == nil || errors.As(err, &timeout) && timeout.Timeout() {
-			t.Fatal("invalid frame not closed", err)
-		}
-	}
+	sessionProtocolRecovery(t, c, d)
 	// Real stdio pipes ensure the preamble stays off stdout and EOF joins relay work.
 	conn, err := c.OpenSession(t.Context())
 	if err != nil {
@@ -247,8 +364,155 @@ func TestMCPSessions(t *testing.T) {
 	sessionDeadlines(t, store, d)
 }
 
-// Extend the same owning wire scenario with real production deadlines. net.Pipe
-// provides deterministic backpressure without depending on kernel buffer sizes.
+// Extend the owning wire scenario with malformed frames and protocol recovery
+// through the same bridge. Raw peers can exercise input that SDK clients cannot send.
+func sessionProtocolRecovery(t *testing.T, c *Controller, d *sessionDriver) {
+	t.Helper()
+	socket, err := c.OpenSession(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, pipes := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- relay.Bridge(t.Context(), socket, pipes, pipes) }()
+	defer func() {
+		peer.Close()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("raw bridge leaked")
+		}
+	}()
+	reader := bufio.NewReader(peer)
+	type reply struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int64 `json:"code"`
+		} `json:"error"`
+	}
+	send := func(s string) {
+		t.Helper()
+		_ = peer.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.WriteString(peer, s+"\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receive := func() reply {
+		t.Helper()
+		_ = peer.SetReadDeadline(time.Now().Add(5 * time.Second))
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			t.Fatal("same MCP connection became unavailable", err)
+		}
+		if bytes.Contains(line, []byte("synthetic-password")) || bytes.Contains(line, []byte("postgres://secret")) {
+			t.Fatal("protocol diagnostic leaked")
+		}
+		var r reply
+		if json.Unmarshal(line, &r) != nil {
+			t.Fatal("invalid MCP response")
+		}
+		return r
+	}
+	probe := func(id string) {
+		t.Helper()
+		send(`{"jsonrpc":"2.0","id":` + id + `,"method":"tools/call","params":{"name":"query","arguments":{"connection":"fixture","sql":"select 1"}}}`)
+		r := receive()
+		var result struct {
+			IsError    bool                 `json:"isError"`
+			Structured database.QueryResult `json:"structuredContent"`
+		}
+		if r.Error != nil || string(r.ID) != id || json.Unmarshal(r.Result, &result) != nil || result.IsError || result.Structured.RowCount != 1 {
+			t.Fatal("recovery query failed", string(r.ID), r.Error)
+		}
+	}
+	// Pre-initialization errors must allow a corrected initialize on this peer.
+	for _, input := range []string{`{broken}`, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":[]}`} {
+		send(input)
+		if receive().Error == nil {
+			t.Fatal("invalid handshake accepted")
+		}
+	}
+	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw","version":"1"}}}`)
+	if receive().Error != nil {
+		t.Fatal("corrected initialization failed")
+	}
+	send(`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`)
+	for _, test := range []struct {
+		input string
+		code  int64
+	}{
+		{`{broken}`, -32700},
+		{strings.Repeat("x", (256<<10)+1), -32700},
+		{`{"jsonrpc":"2.0","id":1,"id":2,"method":"tools/list"}`, -32600},
+		{`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"connection":"fixture","sql":"select 1","sql":"panic"}}}`, -32600},
+		{`[]`, -32600},
+		{`{"jsonrpc":"2.0"}`, -32600},
+		{`{"jsonrpc":"1.0","id":1,"method":"tools/list"}`, -32600},
+		{`{"jsonrpc":"2.0","id":null,"method":"tools/list"}`, -32600},
+		{`{"jsonrpc":"2.0","id":true,"method":"tools/list"}`, -32600},
+		{`{"jsonrpc":"2.0","id":1.5,"method":"tools/list"}`, -32600},
+		{`{"jsonrpc":"2.0","id":1,"method":42}`, -32600},
+		{`{"jsonrpc":"2.0","id":1,"method":"unknown"}`, -32601},
+		{`{"jsonrpc":"2.0","id":1,"method":"server/discover"}`, -32601},
+		{`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, -32600},
+		{`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"connection":"fixture","sql":"select 1","row_limit":0}}}`, -32602},
+		{`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"unknown","arguments":{}}}`, -32602},
+	} {
+		send(test.input)
+		r := receive()
+		if r.Error == nil || r.Error.Code != test.code {
+			t.Fatalf("protocol failure %.100s: %+v", test.input, r.Error)
+		}
+		probe(`"after-error"`)
+	}
+	// Ignored notifications/responses cannot introduce a reply or change state.
+	for _, ignored := range []string{
+		`{"jsonrpc":"2.0","method":"notifications/unknown"}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":true}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"missing"}}`,
+		`{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"ignored"}}`,
+	} {
+		send(ignored)
+		probe(`"after-notification"`)
+	}
+	// Integer IDs must not round through floating point; string and number IDs
+	// that look alike must remain distinct. They may be reused after a response.
+	for _, id := range []string{`9007199254740993`, `9223372036854775807`, `"1"`, `1`, `""`, `1`} {
+		probe(id)
+	}
+	send(`{"jsonrpc":"2.0","id":"duplicate","method":"tools/call","params":{"name":"query","arguments":{"connection":"fixture","sql":"wait"}}}`)
+	awaitSignal(t, d.entered)
+	send(`{"jsonrpc":"2.0","id":"duplicate","method":"tools/call","params":{"name":"query","arguments":{"connection":"fixture","sql":"panic"}}}`)
+	send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"duplicate"}}`)
+	awaitSignal(t, d.exited)
+	if string(receive().ID) != `"duplicate"` {
+		t.Fatal("duplicate replaced original request")
+	}
+	probe(`"duplicate"`)
+	// Control saturation is also a per-request error. Cancellation notifications
+	// still pass while all request slots are occupied.
+	for i := 0; i < 16; i++ {
+		send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"query","arguments":{"connection":"fixture","sql":"wait"}}}`, i))
+		awaitSignal(t, d.entered)
+	}
+	send(`{"jsonrpc":"2.0","id":"busy","method":"tools/list"}`)
+	if r := receive(); r.Error == nil || r.Error.Code != -32000 {
+		t.Fatal("control saturation disconnected or succeeded")
+	}
+	for i := 0; i < 16; i++ {
+		send(fmt.Sprintf(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":%d}}`, i))
+	}
+	for i := 0; i < 16; i++ {
+		receive()
+		awaitSignal(t, d.exited)
+	}
+	probe(`"after-capacity"`)
+}
+
+// Real pipes retain no state lease during backpressure. Explicit transport
+// cancellation must release blocked writes and uninitialized peers promptly.
 func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 	t.Helper()
 	m := newManager(t.Context(), store, noKeys{}, d)
@@ -256,33 +520,32 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 	if err := m.initialize(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	serve := func() (net.Conn, <-chan error) {
+	serve := func() (net.Conn, <-chan error, context.CancelFunc) {
 		peer, server := net.Pipe()
+		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
-		go func() { done <- relay.Serve(t.Context(), server, m, "fixture") }()
-		t.Cleanup(func() { peer.Close() })
-		return peer, done
+		go func() { done <- relay.Serve(ctx, server, m, "fixture") }()
+		t.Cleanup(func() { cancel(); peer.Close() })
+		return peer, done, cancel
 	}
-	idle, idleDone := serve()
+	idle, idleDone, stopIdle := serve()
 	defer idle.Close()
-
-	type blocked struct {
-		done       <-chan error
-		serverDone <-chan error
+	stopIdle()
+	select {
+	case <-idleDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle session did not cancel")
 	}
-	var blockedPeers []blocked
 	for _, bridge := range []bool{false, true} {
-		socket, done := serve()
+		socket, serverDone, cancel := serve()
 		var peer io.ReadWriter = socket
-		var serverDone <-chan error
-
+		done := serverDone
 		if bridge {
 			input, stdin := io.Pipe()
 			stdout, output, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Reproduce an inherited blocking stdout, not an os.Pipe poller.
 			fd, err := unix.Dup(int(output.Fd()))
 			if err != nil {
 				t.Fatal(err)
@@ -295,13 +558,9 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 				io.Reader
 				io.Writer
 			}{stdout, stdin}
-			serverDone = done
 			done = bridgeDone
 			t.Cleanup(func() { stdout.Close(); stdin.Close() })
-		} else {
-			_ = socket.SetDeadline(time.Now().Add(12 * time.Second))
 		}
-
 		_, err := io.WriteString(peer, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}`+"\n")
 		if err != nil {
 			t.Fatal(err)
@@ -314,34 +573,25 @@ func sessionDeadlines(t *testing.T, store *config.Store, d *sessionDriver) {
 			t.Fatal(err)
 		}
 		awaitSignal(t, d.entered)
-		// Query has entered with the shared lease. A writer must acquire it even
-		// though neither the socket peer nor the bridge stdout consumes the result.
-		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		ctx, finish := context.WithTimeout(t.Context(), 2*time.Second)
 		lease, err := store.WriteLease(ctx)
-		cancel()
+		finish()
 		if err != nil {
 			t.Fatal("slow output retained state lease", err)
 		}
 		lease.Release()
-		blockedPeers = append(blockedPeers, blocked{done, serverDone})
-	}
-	for _, p := range blockedPeers {
+		cancel()
 		select {
-		case <-p.done:
-		case <-time.After(7 * time.Second):
-			t.Fatal("stalled output session survived")
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("blocked output did not cancel")
 		}
-		if p.serverDone != nil {
+		if bridge {
 			select {
-			case <-p.serverDone:
-			case <-time.After(time.Second):
-				t.Fatal("bridge server survived disconnect")
+			case <-serverDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("bridge server survived cancellation")
 			}
 		}
-	}
-	select {
-	case <-idleDone:
-	case <-time.After(7 * time.Second):
-		t.Fatal("uninitialized session survived")
 	}
 }

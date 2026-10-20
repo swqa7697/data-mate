@@ -104,6 +104,90 @@ func TestOwnedStorage(t *testing.T) {
 	if err != nil || observed != next {
 		t.Fatal("existing-only snapshot", err)
 	}
+	// Ladder 2: extend passive snapshots/publication with a historical settings
+	// record. Reading resets even custom old limits without changing SQLite;
+	// the next ordinary save marks new settings and must preserve them thereafter.
+	legacyWrite, err := s.WriteLease(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := legacyWrite.database()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRaw, _ := json.Marshal(fixture.Connections[0])
+	var legacyProfile map[string]json.RawMessage
+	if json.Unmarshal(legacyRaw, &legacyProfile) != nil {
+		t.Fatal("legacy fixture")
+	}
+	legacyProfile["limits"] = json.RawMessage(`{"query_timeout_ms":750,"max_rows":12,"max_result_bytes":2048}`)
+	legacyRaw, _ = json.Marshal(legacyProfile)
+	if _, err = db.ExecContext(t.Context(), "UPDATE profiles SET settings=? WHERE id=?", legacyRaw, fixture.Connections[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	legacyWrite.Release()
+	beforeMigration, err := os.ReadFile(filepath.Join(root.Path, "data-mate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, migratedRevision, err := Preview(t.Context(), root)
+	if err != nil || *migrated.Connections[0].Limits != DefaultLimits() {
+		t.Fatal("historical custom limits retained", err)
+	}
+	afterMigration, err := os.ReadFile(filepath.Join(root.Path, "data-mate.db"))
+	if err != nil || !bytes.Equal(beforeMigration, afterMigration) {
+		t.Fatal("passive migration wrote state", err)
+	}
+	customLimits := Limits{300001, 60000, 2 << 20}
+	migrated.Connections[0].Limits = &customLimits
+	publish, err := s.WriteLease(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = publish.SaveProfiles(migrated, migratedRevision)
+	publish.Release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained, _, err := Preview(t.Context(), root)
+	if err != nil || *retained.Connections[0].Limits != customLimits {
+		t.Fatal("versioned settings reset again", err)
+	}
+	// A null/unknown policy version is corruption, not an absent legacy marker.
+	// Snapshot decoding must reject it before normalization can erase evidence.
+	validRaw, _ := json.Marshal(retained.Connections[0])
+	for _, invalidVersion := range []string{"null", "3"} {
+		badRaw := bytes.Replace(validRaw, []byte(`"version":2`), []byte(`"version":`+invalidVersion), 1)
+		writer, err := s.WriteLease(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err := writer.database()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.ExecContext(t.Context(), "UPDATE profiles SET settings=? WHERE id=?", badRaw, retained.Connections[0].ID)
+		writer.Release()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = Preview(t.Context(), root); err == nil {
+			t.Fatal("invalid limits version accepted", invalidVersion)
+		}
+		writer, err = s.WriteLease(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err = writer.database()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.ExecContext(t.Context(), "UPDATE profiles SET settings=? WHERE id=?", validRaw, retained.Connections[0].ID)
+		writer.Release()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Development-only identities are rejected without upgrading their inventory.
 	originalIdentity, _ := os.ReadFile(filepath.Join(root.Path, "installation.json"))
 	legacy := s.identity

@@ -6,7 +6,7 @@ Data Mate makes saved database connections available to independently launched t
 
 This document defines the implemented architecture and technical contracts for Tink, SQLite, and centralized service-owned credential access, plus the distribution contracts in section 13. The [PRD](PRD.md) defines product requirements, the [README](../README.md) documents implemented setup and usage, and the [changelog](../CHANGELOG.md) records user-visible changes. Implementation plans and validation evidence belong in ignored `.misc`, not in this design. Compatibility with published distribution contracts is required; obsolete development-only vault state must be reported without silently deleting it.
 
-The supported platforms are macOS 15+ on Apple Silicon and Linux x86_64 with glibc 2.39+ (Ubuntu 24.04+), with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax is bounded by the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
+The supported platforms are macOS 15+ on Apple Silicon and Linux x86_64 with glibc 2.39+ (Ubuntu 24.04+), with one Go executable installed in the checkout's `.dev`. Agent adapters support Codex and Claude Code. PostgreSQL is the only database driver: PostgreSQL 16 or later is required, without per-major semantic manifests. SQL syntax follows the pinned native parser version. PostgreSQL 16 and 18 form the integration matrix.
 
 Production distribution, explicit upgrades, terminal uninstall, shell completion, and development/production service exclusion are implemented under section 13. macOS distribution is published. Linux distribution becomes publicly available when a release containing its signed artifacts passes the existing acceptance gates. Other database drivers, unattended updates, credential export, and key rotation remain deferred. Linux uses Secret Service without changing credential encryption. Windows and Intel macOS are outside the product scope. There is no GUI, Electron runtime, cloud service, account system, model API integration, agent launcher, database mutation tool, PostgreSQL migration runner, query history, telemetry, or plugin loader. SQLite stores Data Mate's own state only; Data Mate does not manage database users or change server permissions.
 
@@ -43,7 +43,7 @@ The binary has three process roles:
 | ---------------- | -------------------------------------------------------------------------------------------------------- |
 | User CLI         | Forms, confirmed management requests, passive nonsecret reads, agent registration, and service lifecycle |
 | Internal service | Profile mutations, OS keyset access, Tink encryption, CLI database operations, and enabled MCP sessions  |
-| Internal bridge  | Relay bounded MCP messages between agent stdio and the service socket                                    |
+| Internal bridge  | Relay MCP bytes between agent stdio and the service socket                                    |
 
 Development agent registration invokes `data-mate mcp bridge --root <absolute-root>`. Production registration omits `--root` and uses the fixed installation described in section 13.2. A private service entry point runs under launchd on macOS or systemd on Linux, initially in management-only mode unless started through `mcp start`. These internal commands require no separate user setup. The bridge has no database connection, keyset, or management API. Each bridge creates one socket connection and an independent MCP session. Stdout carries protocol messages only; diagnostics use stderr.
 
@@ -115,7 +115,7 @@ Both modes require `--yes`; each secret is limited to 128 KiB. Secrets are never
 
 Omitted edit secrets remain unchanged. `--clear-password`, `--clear-ssh-password`, `--clear-ssh-key-passphrase`, and `--clear-proxy-password` clear individual secrets. `--clear-ssh` and `--clear-proxy` clear both transport settings and their secrets. SSH key files are read once by the CLI and submitted as bounded secret bytes for encryption; their source files remain untouched. A missing bundle can be repaired by explicitly supplying credentials for all configured transports. Missing keysets or corrupt persistent state are never silently recreated.
 
-Advanced options include `--tls`, `--tls-ca`, `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`, `--ssh-enroll`, `--proxy`, and `--proxy-user`. TLS, SSH, and SOCKS5 are off by default. `--tls=false` clears the CA path; enabling TLS preserves an omitted existing CA field. Transport rules are specified in section 8. Limits use `--query-timeout` in whole milliseconds from `1ms` to `5m`, `--max-rows`, and `--max-result-bytes`.
+Advanced options include `--tls`, `--tls-ca`, `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key-file`, `--ssh-enroll`, `--proxy`, and `--proxy-user`. TLS, SSH, and SOCKS5 are off by default. `--tls=false` clears the CA path; enabling TLS preserves an omitted existing CA field. Transport rules are specified in section 8. Limits use `--query-timeout` in whole milliseconds from `0ms` to PostgreSQL's `2147483647ms` maximum, positive `--max-rows`, and nonnegative `--max-result-bytes`. Zero timeout/bytes disables the application limit.
 
 A profile and its encrypted bundle are removed in the same SQLite transaction. They are either both removed or both preserved. If a reply is lost after commit, report that the outcome is unknown and require a fresh state read before retrying; do not imply rollback or automatically replay the mutation.
 
@@ -131,7 +131,7 @@ After driver cleanup, lease release, and management-client closure, interactive 
 
 The version-1 JSON envelope contains `version`, `alias`, `database`, and `schemas`; each schema contains `name`, `tables` (entries with `name` and exact relation `kind`, including views), plus `enums`, `sequences`, `indexes`, and `functions` (entries with `name`, without function signatures). Catalog collections are arrays even when empty. This unreleased contract remains version 1; the exact contract is `db-describe.output.json`.
 
-Bound descriptions to 4,096 combined schema/object entries (counting each distinct function name once per schema) and the profile's encoded-result-byte cap and query timeout. The byte cap measures the JSON description, without an MCP compatibility envelope. Exceeding either size limit returns `RESOURCE_LIMIT`, never successful truncation; terminal paging does not extend these limits. Connection, credential, timeout, cancellation, stale-selection and configuration failures follow existing safe error/exit contracts and print no partial description to stdout. No application rows, columns, enum values, definitions, counts, or diagnostic-stage output are included.
+Descriptions have no application schema/object count cap. A positive profile byte cap or execution timeout still applies. The byte cap measures the JSON description, without an MCP compatibility envelope. Exceeding an enabled size limit returns `RESOURCE_LIMIT`, never successful truncation. Connection, credential, timeout, cancellation, stale-selection and configuration failures follow existing safe error/exit contracts and print no partial description to stdout. No application rows, columns, enum values, definitions, counts, or diagnostic-stage output are included.
 
 `db test` submits the selected profiles in one management request. The service unlocks an existing keyset at most once before any check starts, then checks the profiles concurrently, with at most sixteen diagnostics running across the service. Each profile has its own deadline, starting after preparation and once it holds a diagnostic slot, that includes lease acquisition and vault access. Each result records reached `config`, `vault`, `dial`, `authentication`, `version`, and `read_only` stages. Dial includes the route and TLS handshake; an observed PostgreSQL authentication exchange distinguishes authentication failures. The final stage verifies the actual read-only transaction and authenticated identity and performs a fresh account audit through a dedicated short-lived connection. It reads catalogs, never application rows, and never reuses a live pool approval. Success is a point-in-time privilege check, not a permanent authorization.
 
@@ -213,7 +213,7 @@ Only the CLI management path can submit profile mutations, credential patches, d
 
 Requests carry an operation, expected revision, and bounded typed input. There is no generic SQL, arbitrary-path, keyset-export, or saved-password retrieval endpoint. The `credential-presence` request supports `db export`: bound to an exact revision, it returns only whether each saved secret field is nonempty, never values. The CLI submits only newly entered secret values and explicit keep/clear actions; merging with saved secrets happens inside the service. Responses contain nonsecret state or safe operation results. The service revalidates all requests independently of CLI validation.
 
-Management frames use length-prefixed strict JSON with an 8 MiB request cap checked before allocation; decoded profiles, individual secrets, and replies retain their smaller owning-contract bounds. Allow at most four active management requests and reject excess requests without an unbounded queue. Handshakes and blocked output retain the ten-second and five-second bounds. Protocol version 3 wraps server responses in typed challenge, test-result, or final-reply frames. A `db test` batch names its profile targets once and holds one management slot for its whole duration. The service writes one result frame per target under the five-second blocked-output bound, all before the final reply; clients reject result frames for other operations and for unrequested or repeated aliases. Hello requires an exact build match, so frame additions within a build do not change the protocol version. Each terminal challenge identifies creation (including consent and local confirmation) or unlocking, the bounded attempt number, and an unpredictable connection-local answer ID. Password/cancellation answers are accepted only for the outstanding challenge on that authenticated connection and original request; reject malformed, unsolicited, oversized, or repeated answers. Answer frames have a smaller preallocation cap and decoded passwords use the existing 128 KiB secret limit. A disconnect cancels preparation and any subsequent work. Incompatible services require an explicit restart; no MCP operation can initiate this exchange.
+Management frames use length-prefixed strict JSON with an 8 MiB request cap checked before allocation; decoded profiles, individual secrets, and ordinary replies retain their owning-contract bounds. Nonsecret database-description replies use the full uint32 length-framing range without an application byte cap or fixed output timer, honor caller cancellation, and still enforce an optional positive profile byte cap. Allow at most four active management requests and reject excess requests without an unbounded queue. Handshakes and blocked output retain the ten-second and five-second bounds. Protocol version 3 wraps server responses in typed challenge, test-result, or final-reply frames. A `db test` batch names its profile targets once and holds one management slot for its whole duration. The service writes one result frame per target under the five-second blocked-output bound, all before the final reply; clients reject result frames for other operations and for unrequested or repeated aliases. Hello requires an exact build match, so frame additions within a build do not change the protocol version. Each terminal challenge identifies creation (including consent and local confirmation) or unlocking, the bounded attempt number, and an unpredictable connection-local answer ID. Password/cancellation answers are accepted only for the outstanding challenge on that authenticated connection and original request; reject malformed, unsolicited, oversized, or repeated answers. Answer frames have a smaller preallocation cap and decoded passwords use the existing 128 KiB secret limit. A disconnect cancels preparation and any subsequent work. Incompatible services require an explicit restart; no MCP operation can initiate this exchange.
 
 Credential preparation has a five-minute overall deadline, including terminal input and retries, with individual provider calls bounded at 30 seconds or less. Database validation and publication share the existing 30-second mutation budget beginning after preparation; diagnostics/catalog work start their profile deadlines after preparation, and batch diagnostics also after acquiring a diagnostic slot. Execute the original operation once, preserving revision and save-confirmation checks. A failed preparation reports no publication. Native prompting may not be interruptible: a timed-out request cannot publish later, and late provider results must be discarded safely. Native validation must establish bounded shutdown behavior. Mutable password buffers and protocol buffers are cleared after use; upstream provider text, passwords, and keysets never enter diagnostics or persisted state.
 
@@ -283,11 +283,11 @@ Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-
 
 | Optional limit     | Default | Accepted range |
 | ------------------ | ------- | -------------- |
-| `query_timeout_ms` | 60000   | 1–300000       |
-| `max_rows`         | 500     | 1–5000         |
-| `max_result_bytes` | 1048576 | 1024–1048576   |
+| `query_timeout_ms` | 0       | 0–2147483647; zero means no application timeout |
+| `max_rows`         | 50000   | Positive representable integer |
+| `max_result_bytes` | 0       | Nonnegative representable integer; zero means unlimited |
 
-Omitted members take individual defaults; zero is not omission. Profile digests are SHA-256 over validated canonical JSON with normalized UUIDs, explicit defaults, and sorted profiles. Formatting and profile order do not change the digest; settings and limits do. A revision also carries a database generation incremented in the same transaction for every profile or credential change, so credential-only edits invalidate stale previews and service resources.
+Saved limits include `version: 2`. Unversioned historical limits, including custom values, normalize to all new defaults during decoding. A normal subsequent save writes version 2; new custom limits then survive decoding. This logical migration leaves SQLite, credentials and keyset state untouched during passive reads and requires no SQLite schema migration. Omitted current-version members take individual defaults. Profile digests include the normalized limits and their version, with normalized UUIDs, explicit defaults, and sorted profiles. Formatting and profile order do not change the digest; settings and limits do. A revision also carries a database generation incremented in the same transaction for every profile or credential change, so credential-only edits invalidate stale previews and service resources.
 
 SQLite owns one authoritative set of records:
 
@@ -370,7 +370,7 @@ Catalog tools use parameterized SQL and C-collated keyset pagination. Table desc
 
 Routine descriptions include exact identity arguments, source, language, volatility and security mode; aggregates include their transition/state and combination metadata. Extension membership is descriptive. Types include enums, domains, composites, ranges, multiranges, arrays, table-row types and pseudo-types. Sequences expose configuration and owner-table/column metadata; ordinary qualified queries may read sequence state, but must not advance it. Definitions and foreign-key endpoints are returned without requiring row access or recursively fetching dependencies.
 
-Authenticated cursors bind version, tool, profile ID/revision, schema/kind filters, position, and process invalidation epoch. Object ordering uses C-collated schema/name/kind followed by OID to distinguish overloads without embedding unbounded signatures in cursors. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 and cap at 500 objects. Descriptions cap columns at 1600, existing key/relationship collections at 4096 and combined new metadata collections at 4096 entries, with incremental byte accounting, deadlines and final encoded-size accounting. Oversized definitions fail with RESOURCE_LIMIT without partial output. Metadata shares the profile result-byte cap.
+Authenticated cursors bind version, tool, profile ID/revision, schema/kind filters, position, and process invalidation epoch. Object ordering uses C-collated schema/name/kind followed by OID to distinguish overloads without embedding signatures in cursors. Tokens are at most 2 KiB and expire on restart or invalidation. Agent pages default to 100 objects and accept a positive page size that leaves room for the extra-row check. Descriptions have no application collection or type-depth caps. Metadata shares an optional positive profile result-byte cap, with incremental byte accounting and final encoded-size accounting. Exceeding an enabled cap fails with RESOURCE_LIMIT without partial output.
 
 ## 8. Database transport and connection management
 
@@ -395,22 +395,13 @@ Each database connection owns its SSH TCP connection and forwarding channel, or 
 
 ### 8.2 Pools, admission, and cleanup
 
-One shared PostgreSQL driver owns lazy pools with no initial idle connections, at most eight connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows 32 active operations, 128 waiters, and a 60-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Service database work has a 365-second outer deadline and then the profile timeout; connection listing has a five-second deadline. The outer deadline is the maximum
-profile timeout plus the admission allowance and five seconds of overhead. The
-profile budget starts after service admission and profile resolution and includes
-credentials, driver admission, pool waiting, connection setup, execution and
-result reading. Nested contexts never extend it, and earlier caller deadlines
-win. Sixteen pools of eight connections permit at most 128 pooled connections;
-only 32 operations are admitted at once. Batch diagnostics share a service-wide
-limit of sixteen concurrent checks, so `db test` never occupies more than half
-of the active admission slots. PostgreSQL statement timeout uses the profile
-budget, while lock timeout remains one second.
+One shared PostgreSQL driver owns lazy pools with no initial idle connections, at most eight connections per profile, at most sixteen pools, and five-minute idle eviction. Driver admission allows 32 active operations, 128 waiters, and a 60-second queue deadline. The service manager separately applies the same admission bounds before acquiring state access. Execution has no default application deadline; a positive profile timeout starts after service admission and profile resolution and includes credentials, driver admission, pool waiting, connection setup, execution and result reading. Nested contexts never extend it, and earlier caller deadlines win. Connection listing retains a five-second snapshot deadline. Sixteen pools of eight connections permit at most 128 pooled connections; only 32 operations are admitted at once. Batch diagnostics share a service-wide limit of sixteen concurrent checks. A positive profile timeout sets local PostgreSQL statement_timeout; zero leaves database statement_timeout unchanged. Data Mate does not set lock_timeout. Connection setup, admission and transaction cleanup retain their independent deadlines.
 
 Queries, catalog operations, and diagnostics use the same connection boundary: a read-only READ COMMITTED transaction with an actual transaction-state and authenticated-identity check. Pools cache account approval only while physical connections remain. PostgreSQL still enforces privileges on each executed operation. PostgreSQL statement and description caches are disabled. Successful operations roll back and run `DISCARD ALL` before pool reuse; cleanup failures discard the connection. Profile invalidation cancels active work and invalidates cursors.
 
 Rollback has an independent two-second budget. Uncertain connections are discarded; cleanup failure cannot return success. Deliberate byte truncation closes the connection before returning a complete bounded result instead of draining unread rows. No executing query is automatically retried. Driver cleanup finishes before the caller releases its state lease.
 
-Every PostgreSQL connection, including readiness and catalog connections, caps message bodies at 2 MiB. A constant-memory frame-length observer preserves `RESOURCE_LIMIT` when pgx would otherwise report only a closed connection; it retains no message data.
+PostgreSQL connections have no application message-body cap. A constant-memory header observer records when authentication starts for diagnostics; it retains no message data. PostgreSQL protocol and driver representation constraints still produce safe request failures.
 
 ## 9. Read-only PostgreSQL execution
 
@@ -428,37 +419,36 @@ Administrators can change grants while a pool remains connected; fresh validatio
 
 ### 9.2 Query guard
 
-The pinned native scanner bounds tokens and delimiter nesting before parsing; the AST walk bounds messages/depth. Permit one SELECT-family statement (`SELECT`, `VALUES`, `TABLE`), SHOW, or EXPLAIN (including ANALYZE) of a permitted SELECT-family statement. Reject modifying CTEs, SELECT INTO, locking clauses, multiple statements, transaction control, CALL, DO and COPY. CTE names follow lexical scopes; physical relations require schema qualification. PostgreSQL validates database qualifiers. System schemas are allowed.
+The pinned native parser validates SQL without application text, token, AST-count or depth caps. An iterative AST walk preserves lexical CTE visibility without recursive Go calls. Permit one SELECT-family statement (`SELECT`, `VALUES`, `TABLE`), SHOW, or EXPLAIN (including ANALYZE) of a permitted SELECT-family statement. Reject modifying CTEs, SELECT INTO, locking clauses, multiple statements, transaction control, CALL, DO and COPY. CTE names follow lexical scopes; physical relations require schema qualification. PostgreSQL validates database qualifiers. System schemas are allowed.
 
 Direct and indirect application/extension routines, aggregates, windows, sampling methods, casts and operators follow PostgreSQL resolution and privileges. There are no routine-origin/OID checks, overload blacklists, semantic manifests, SQL rewriting or routine-body audits. Session search_path remains pg_catalog; qualify application routine names explicitly. Keep standard_conforming_strings=on so the native parser and server agree on string syntax.
 
 ### 9.3 Execution
 
-1. Validate the current profile, JSON parameters and bounded query guard under the existing state lease.
+1. Validate the current profile, JSON parameters and read-only query guard under the existing state lease.
 2. Admit work, acquire an approved pool connection (auditing a new pool generation), begin READ ONLY READ COMMITTED, set local timeouts and verify transaction state/identity.
 3. Parse/describe the original SQL through PostgreSQL's extended protocol with unspecified parameter OIDs. Check the server's parameter count.
-4. Fetch only result type names and array/domain dependencies in one bounded recursive catalog query. This is decoding metadata, not a semantic audit.
+4. Fetch only result type names and array/domain dependencies in one recursive catalog query with duplicate elimination. This is decoding metadata, not a semantic audit.
 5. Bind values separately and execute the same prepared statement with text-format results. Preserve labels, including duplicates, and PostgreSQL's query semantics; do not rewrite SQL or LIMIT.
 6. Consume complete rows within the row/byte budgets. One extra row detects truncation. Close the socket before closing the result reader on truncation or early failure, preventing unbounded draining.
 7. Roll back completed operations and `DISCARD ALL` before pool reuse. Rollback/reset use the bounded cleanup context. Closed/uncertain connections are discarded before releasing admission and state access.
 
 ### 9.4 Bounds and codecs
 
-| Resource              | Bound                                               |
-| --------------------- | --------------------------------------------------- |
-| Query deadline        | Profile default 60 seconds, maximum five minutes    |
-| Lock wait             | 1 second                                            |
-| Returned rows         | Profile default 500, maximum 5000; caller may lower |
-| Result envelope       | Profile cap, at most 1 MiB                          |
-| Protocol message body | 2 MiB                                               |
-| SQL                   | 64 KiB                                              |
-| Tokens / AST messages | 8192 each; depth 64                                 |
-| Parameters            | 256; 64 KiB each, 256 KiB total JSON input          |
-| Result type metadata  | 8192 type descriptors; decoding depth 64            |
+| Resource              | Contract |
+| --------------------- | -------- |
+| Query deadline        | Unlimited by default; optional positive profile timeout and caller/database deadlines |
+| Lock wait             | Database setting and caller cancellation |
+| Returned rows         | Default 50,000; positive profile cap without an application maximum; caller may lower |
+| Result envelope       | Unlimited by default; optional positive profile byte cap |
+| Protocol message body | No application cap |
+| SQL                   | No application byte or complexity cap |
+| Parameters            | PostgreSQL extended-protocol count limit of 65,535; no application byte caps |
+| Result type metadata  | No count/depth cap; dependency cycles fail safely |
 
-Native parsing cannot be interrupted by a Go context; the worst-shape regression runs in a deadline-controlled subprocess. Timeouts and cancellation return failures without partial results. Row/byte truncation returns complete rows with `truncated: true`; oversized column metadata fails with `RESOURCE_LIMIT`. Encoded-size accounting includes escaping, base64 and both MCP result representations.
+Native parsing cannot be interrupted by a Go context; the worst-shape regression runs in a deadline-controlled subprocess. Timeouts and cancellation return failures without partial results. Row truncation or an enabled byte budget returns complete rows with `truncated: true`; column metadata exceeding an enabled byte budget fails with `RESOURCE_LIMIT`. Encoded-size accounting includes escaping, base64 and both MCP result representations.
 
-Rows are arrays aligned with columns. SQL NULL becomes JSON null. Int8/numeric values are exact strings; finite floats are numbers and special values are strings. Local timestamps have no invented zone; timestamptz normalizes to UTC. BC/infinity remain explicit strings. Bytea uses base64. JSON retains exact numbers and duplicate members, with a 1 MiB/depth-64 bound.
+Rows are arrays aligned with columns. SQL NULL becomes JSON null. Int8/numeric values are exact strings; finite floats are numbers and special values are strings. Local timestamps have no invented zone; timestamptz normalizes to UTC. BC/infinity remain explicit strings. Bytea uses base64. JSON retains exact numbers and duplicate members without application size or depth caps. Standard-library syntax and encoding constraints still apply.
 
 PostgreSQL arrays become nested JSON arrays, retaining null elements, multidimensional shape and the scalar representation of each element. Empty arrays become `[]`; lower bounds normalize to JSON indexing. Domains use their base representation. Other types, including enums, ranges and composites, use PostgreSQL text with actual type names and `encoding: postgres_text`. Array encoding markers describe their elements (for example bytea arrays use `base64`). No unselected column participates in result decoding.
 
@@ -481,7 +471,7 @@ Six tools expose strict embedded [input/output schemas](../internal/contracts/sc
 
 All tools declare read-only intent, enforced server-side. Inputs reject additional fields. No tool accepts connection overrides, credentials, DSNs, hosts, or arbitrary file paths; no tool modifies profiles or grants privileges. Schema validation alone does not authorize execution. Connection listing reads only the public profile snapshot and never loads credentials.
 
-Each handler calls the shared service manager and prepares both `structuredContent` and identical compact JSON text under the state lease. The combined envelope must fit one MiB and the lower profile cap for database tools. Serialization/output after preparation holds no state lease. A session never caches successful live authorization.
+Each handler calls the shared service manager and prepares both `structuredContent` and identical compact JSON text under the state lease. A positive profile cap bounds the combined envelope for database tools; zero disables that budget. Serialization/output after preparation holds no state lease. A session never caches successful live authorization.
 
 Example structured query result:
 
@@ -502,13 +492,13 @@ Database text is untrusted data, not operational instruction. Database privilege
 
 ### 10.2 Sessions, framing, and cancellation
 
-After the authenticated identity preamble, SDK IOTransport negotiates MCP `2025-11-25`. Stateless `server/discover` receives a protocol error so newer SDK clients can fall back to initialization. Subscriptions, sampling, prompts, and persistent resources are not exposed. Each socket owns an independent server session.
+After the authenticated identity preamble, a custom SDK connection negotiates MCP `2025-11-25`. Stateless `server/discover` receives a protocol error so newer SDK clients can fall back to initialization. Subscriptions, sampling, prompts, and persistent resources are not exposed. Each socket owns an independent server session.
 
-The listener caps handshakes plus sessions at sixteen. A pre-dispatch guard admits at most sixteen concurrent requests per session, including control requests, and filters repeated/unknown cancellation IDs. Saturation closes the excess peer instead of creating an unbounded handler or response queue. Service/driver queue exhaustion returns typed tool errors.
+The listener caps handshakes plus sessions at sixteen. A pre-dispatch guard admits at most sixteen concurrent requests per session, including control requests, and filters repeated/unknown cancellation IDs. Saturated tool calls return retryable RESOURCE_LIMIT results; control requests return JSON-RPC -32000. Existing work and the session survive. Service/driver queue exhaustion also returns typed tool errors. Duplicate in-flight IDs are ignored without reexecution or an extra response. Private SDK string IDs preserve original string/integer wire IDs exactly, including integers above 2^53.
 
-Frames are complete newline-delimited JSON objects, bounded to 256 KiB inbound and 2 MiB outbound including wrapping/newline. Duplicate keys, excess nesting, batches, malformed frames, and work before initialization close the session. Initialization has a ten-second deadline; blocked socket/bridge output has five seconds.
+Frames are newline-delimited JSON objects without application byte caps. The connection handles malformed JSON (-32700), duplicate keys/invalid envelopes/batches (-32600), unknown methods (-32601) and invalid parameters (-32602) without returning a read failure to the SDK. Unknown or malformed notifications and unsolicited responses are ignored. Before initialization, work receives a protocol error and a corrected initialize can proceed on the same socket. Initialization and output have no fixed application timer. Standard-library decoding errors remain request failures. Tool panics and result encoding failures return safe errors after normal deferred cleanup.
 
-The bridge owns and closes its streams. Cancellable file reads allow service disconnect to interrupt idle stdin. Inherited stdout uses a nonblocking duplicate registered with Go's poller; output without deadline support is refused. Normal stdin EOF ends the bridge successfully; unexpected service EOF is an operational failure. EOF/cancellation cancels session work. Protocol and upstream error details are neither logged nor copied into diagnostics.
+The bridge copies cancellable byte streams without frame parsing or size checks. Inherited stdout uses a nonblocking duplicate registered with Go's poller so cancellation interrupts writes. Output holds no state lease. Normal stdin EOF ends the bridge successfully; unexpected service EOF is an operational failure. EOF, I/O failures and service cancellation end the connection and cancel session work, without reconnecting or replaying requests. Recoverable request failures never close the socket or stdio streams. Protocol and upstream error details are neither logged nor copied into diagnostics.
 
 ## 11. Development operations and cleanup
 

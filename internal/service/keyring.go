@@ -39,7 +39,11 @@ func exchangeManagement(ctx context.Context, conn *net.UnixConn, request Managem
 		defer stopPrompt()
 		for {
 			var f managementFrame
-			if readFrame(conn, &f) != nil {
+			limit := managementLimit
+			if request.Operation == "describe" {
+				limit = 0
+			}
+			if readFrameLimit(conn, &f, limit) != nil {
 				return
 			}
 			select {
@@ -199,6 +203,13 @@ func serveManagementExchange(ctx context.Context, conn *net.UnixConn, m *Manager
 	output.Lock()
 	defer output.Unlock()
 	finished = true
+	if q.Operation == "describe" {
+		_ = conn.SetWriteDeadline(time.Time{})
+		stop := context.AfterFunc(operation, func() { conn.Close() })
+		defer stop()
+		_ = writeFrameLimit(conn, managementFrame{Reply: &reply}, 0)
+		return
+	}
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = writeFrame(conn, managementFrame{Reply: &reply})
 }

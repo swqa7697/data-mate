@@ -229,8 +229,8 @@ func TestConnectionCRUD(t *testing.T) {
 		t.Fatal("password leaked")
 	}
 	p := snapshot(t, root)
-	if p.Connections[0].Limits.QueryTimeoutMS != 60000 {
-		t.Fatal("new connection did not save the 60-second default")
+	if *p.Connections[0].Limits != config.DefaultLimits() {
+		t.Fatal("new connection did not save unlimited execution defaults")
 	}
 	id := p.Connections[0].ID
 	ref := p.Connections[0].CredentialRef
@@ -295,10 +295,14 @@ func TestConnectionCRUD(t *testing.T) {
 	if p.Connections[0].CredentialRef != "" || p.Connections[0].Transport.SSH != nil {
 		t.Fatal("clearing final secrets retained reference")
 	}
-	// An operator can save the full five-minute budget through the normal edit flow.
-	command(t, root, keys, "", 0, "edit", "renamed", "--query-timeout", "5m", "--yes")
-	if snapshot(t, root).Connections[0].Limits.QueryTimeoutMS != 300000 {
-		t.Fatal("five-minute timeout was not saved")
+	// Extend CRUD beyond the old upper bounds and back to optional unlimited caps.
+	command(t, root, keys, "", 0, "edit", "renamed", "--query-timeout", "10m", "--max-rows", "60000", "--max-result-bytes", "2097152", "--yes")
+	if *snapshot(t, root).Connections[0].Limits != (config.Limits{QueryTimeoutMS: 600000, MaxRows: 60000, MaxResultBytes: 2097152}) {
+		t.Fatal("expanded limits were not saved")
+	}
+	command(t, root, keys, "", 0, "edit", "renamed", "--query-timeout", "0ms", "--max-result-bytes", "0", "--yes")
+	if *snapshot(t, root).Connections[0].Limits != (config.Limits{QueryTimeoutMS: 0, MaxRows: 60000, MaxResultBytes: 0}) {
+		t.Fatal("optional limits did not disable")
 	}
 	// Removed scope commands and flags must fail before touching state or keys.
 	before = files(t, root)
@@ -560,8 +564,8 @@ func TestConnectionInputs(t *testing.T) {
 		{"CA without TLS", "", []string{"--passwordless", "--tls-ca", "/tmp/ca.pem"}},
 		{"stdin confirmation", "secret-sentinel", []string{"--password-stdin", "--yes=false"}},
 		{"missing confirmation", "", []string{"--passwordless", "--yes=false"}},
-		{"zero timeout", "", []string{"--passwordless", "--query-timeout", "0ms"}},
-		{"timeout above maximum", "", []string{"--passwordless", "--query-timeout", "300001ms"}},
+		{"negative timeout", "", []string{"--passwordless", "--query-timeout", "-1ms"}},
+		{"timeout above PostgreSQL maximum", "", []string{"--passwordless", "--query-timeout", "2147483648ms"}},
 		{"fractional millisecond timeout", "", []string{"--passwordless", "--query-timeout", "1.5ms"}},
 		{"invalid limit", "", []string{"--passwordless", "--max-rows", "0"}},
 		{"no alias nonTTY", "", []string{"--passwordless", "--alias", ""}},

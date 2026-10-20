@@ -79,7 +79,7 @@ func TestProfiles(t *testing.T) {
 			tr["proxy"] = map[string]any{"kind": "socks5", "host": "h", "port": 1080}
 		},
 		"timeout high": func(c map[string]any) {
-			c["limits"] = map[string]any{"query_timeout_ms": 300001, "max_rows": 500, "max_result_bytes": 1048576}
+			c["limits"] = map[string]any{"version": 2, "query_timeout_ms": 2147483648}
 		},
 	}
 	for name, change := range changes {
@@ -159,21 +159,21 @@ func TestPartialLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := v["connections"].([]any)[0].(map[string]any)
-	c["limits"] = map[string]any{"max_rows": 12}
+	c["limits"] = map[string]any{"version": 2, "max_rows": 12}
 	b, _ := json.Marshal(v)
 	p, _, err := DecodeProfiles(bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *p.Connections[0].Limits != (Limits{60000, 12, 1048576}) {
+	if *p.Connections[0].Limits != (Limits{0, 12, 0}) {
 		t.Fatal("partial defaults")
 	}
 	// Expanded timeout bounds must survive decoding, including explicit short limits.
 	for _, tc := range []struct {
 		timeout int
 		valid   bool
-	}{{1, true}, {60000, true}, {300000, true}, {0, false}} {
-		c["limits"] = map[string]any{"query_timeout_ms": tc.timeout}
+	}{{1, true}, {300001, true}, {2147483647, true}, {0, true}, {-1, false}, {2147483648, false}} {
+		c["limits"] = map[string]any{"version": 2, "query_timeout_ms": tc.timeout}
 		b, _ = json.Marshal(v)
 		got, _, err := DecodeProfiles(bytes.NewReader(b))
 		if (err == nil) != tc.valid {
@@ -183,7 +183,27 @@ func TestPartialLimits(t *testing.T) {
 			t.Fatalf("explicit timeout %d changed", tc.timeout)
 		}
 	}
-	c["limits"] = map[string]any{"max_rows": 0}
+	// Ladder 2: extend decoding/default regressions with legacy custom settings.
+	// Versioned settings must survive a round trip; all unversioned values reset.
+	for _, legacy := range []map[string]any{
+		{"query_timeout_ms": 60000, "max_rows": 500, "max_result_bytes": 1048576},
+		{"query_timeout_ms": 750, "max_rows": 12, "max_result_bytes": 2048},
+	} {
+		c["limits"] = legacy
+		b, _ = json.Marshal(v)
+		got, _, err := DecodeProfiles(bytes.NewReader(b))
+		if err != nil || *got.Connections[0].Limits != DefaultLimits() {
+			t.Fatal("legacy limits did not reset", err)
+		}
+		custom := Limits{300001, 60000, 2 << 20}
+		got.Connections[0].Limits = &custom
+		b, _ = json.Marshal(got)
+		roundTrip, _, err := DecodeProfiles(bytes.NewReader(b))
+		if err != nil || *roundTrip.Connections[0].Limits != custom {
+			t.Fatal("new custom limits reset", err)
+		}
+	}
+	c["limits"] = map[string]any{"version": 2, "max_rows": 0}
 	b, _ = json.Marshal(v)
 	if _, _, err := DecodeProfiles(bytes.NewReader(b)); err == nil {
 		t.Fatal("zero limit accepted")

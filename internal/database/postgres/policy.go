@@ -12,11 +12,6 @@ import (
 
 // Approval is published only after this isolated transaction has been cleaned up.
 func validateAccountConnection(ctx context.Context, c *pgx.Conn, a database.Access, trace *diagnosticTrace) (result error) {
-	defer func() {
-		if exceeded(c) {
-			result = database.Fail(contracts.ResourceLimit, "PostgreSQL message exceeds limit", false)
-		}
-	}()
 	trace.pass("dial")
 	trace.pass("authentication")
 	trace.start("version")
@@ -38,8 +33,10 @@ func validateAccountConnection(ctx context.Context, c *pgx.Conn, a database.Acce
 			}
 		}
 	}()
-	if _, err = tx.Exec(ctx, "SELECT pg_catalog.set_config('statement_timeout',$1,true),pg_catalog.set_config('lock_timeout','1000',true)", strconv.Itoa(a.Profile.Limits.QueryTimeoutMS)); err != nil {
-		return safeError(err)
+	if a.Profile.Limits.QueryTimeoutMS > 0 {
+		if _, err = tx.Exec(ctx, "SELECT pg_catalog.set_config('statement_timeout',$1,true)", strconv.Itoa(a.Profile.Limits.QueryTimeoutMS)); err != nil {
+			return safeError(err)
+		}
 	}
 	version, err := checkReadOnlyObserved(ctx, tx, a.Profile.Connection.Username, trace)
 	if err != nil {

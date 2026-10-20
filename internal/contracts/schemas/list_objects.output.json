@@ -33,7 +33,6 @@
           },
           "identity_arguments": {
             "type": "string",
-            "maxLength": 65536,
             "pattern": "^[^\\x00]*$"
           },
           "extension": {

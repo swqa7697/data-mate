@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 	"github.com/swqa7697/data-mate/internal/database/postgres/sqlguard"
@@ -23,7 +24,7 @@ func (d *Driver) Query(ctx context.Context, a database.Access, req database.Quer
 	if err != nil {
 		return database.QueryResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Profile.Limits.QueryTimeoutMS)*time.Millisecond)
+	ctx, cancel := config.QueryContext(ctx, a.Profile.Limits.QueryTimeoutMS)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return database.QueryResult{}, safeError(err)
@@ -99,7 +100,7 @@ func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description
 	out.ElapsedMS = 1<<63 - 1
 	header, _ := json.Marshal(out)
 	used := resultBytes(header)
-	if used > a.Profile.Limits.MaxResultBytes {
+	if a.Profile.Limits.MaxResultBytes > 0 && used > a.Profile.Limits.MaxResultBytes {
 		return out, database.Fail(contracts.ResourceLimit, "column metadata exceeds result budget", false)
 	}
 	out.RowCount = 0
@@ -152,10 +153,14 @@ func executeQuery(ctx context.Context, tx pgx.Tx, a database.Access, description
 		}
 		row := make([]any, len(raw))
 		for i, b := range raw {
-			row[i], err = types.decode(fields[i].DataTypeOID, b, 0)
+			row[i], err = types.decode(fields[i].DataTypeOID, b)
 			if err != nil {
 				return out, err
 			}
+		}
+		if a.Profile.Limits.MaxResultBytes == 0 {
+			out.Rows = append(out.Rows, row)
+			continue
 		}
 		b, e := json.Marshal(row)
 		if e != nil {

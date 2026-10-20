@@ -28,7 +28,7 @@ Data Mate lets coding agents discover tables, inspect columns, and answer questi
 
 | Feature               | What it gives you                                                             |
 | --------------------- | ----------------------------------------------------------------------------- |
-| Read-only tools       | List connections and tables, describe tables, and run bounded queries.        |
+| Read-only tools       | List connections and tables, describe tables, and run read-only queries.      |
 | Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
 | Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
 | Agent setup           | Register the service with installed Codex and Claude Code clients.            |
@@ -73,6 +73,10 @@ Inspect one saved database with `data-mate db describe analytics`, or omit the a
 
 Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
 
+Queries return up to 50,000 complete rows by default. Set `--max-rows` on `db add/edit` to any positive row limit. Query execution and result bytes have no application limit by default; opt in with `--query-timeout` and `--max-result-bytes`, or set either to `0` to remove that limit. Database timeouts and caller cancellation still apply. SQL text, parameters, results and metadata have no application size or complexity caps; PostgreSQL, protocol and codec constraints still apply. Metadata lists retain pagination.
+
+On upgrade, all saved execution limits, including custom values from previous versions, reset to these defaults. Subsequent edits retain the limits you choose. Listing connections applies this conversion without changing stored files or accessing credentials.
+
 To copy connections to another machine, run `data-mate db export connections.csv`, then `data-mate db import connections.csv` there. Import asks for any passwords the file leaves empty.
 
 ## What agents can do
@@ -87,6 +91,8 @@ To copy connections to another machine, run `data-mate db export connections.csv
 | `query`            | Run one read statement with optional parameters.                                      |
 
 MCP tools cannot edit connections or retrieve saved passwords.
+
+Tool failures, invalid requests and concurrent request saturation preserve the MCP session. Correct the request or its cause and retry in the same agent session. Actual transport failures and service shutdown still end the connection.
 
 ## Update or remove
 

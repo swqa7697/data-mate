@@ -57,7 +57,13 @@ func newServer(ctx context.Context, backend Backend, version string) *sdk.Server
 	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query"} {
 		input, _ := contracts.Schemas.ReadFile("schemas/" + name + ".input.json")
 		output, _ := contracts.Schemas.ReadFile("schemas/" + name + ".output.json")
-		s.AddTool(&sdk.Tool{Name: name, Description: toolDescriptions[name], InputSchema: json.RawMessage(input), OutputSchema: json.RawMessage(output), Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}}, func(callCtx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		s.AddTool(&sdk.Tool{Name: name, Description: toolDescriptions[name], InputSchema: json.RawMessage(input), OutputSchema: json.RawMessage(output), Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}}, func(callCtx context.Context, req *sdk.CallToolRequest) (result *sdk.CallToolResult, resultErr error) {
+			defer func() {
+				if recover() != nil {
+					result = failureResult(database.Fail(contracts.ServiceUnavailable, "operation failed; retry the request", true))
+					resultErr = nil
+				}
+			}()
 			callCtx, cancel := context.WithCancel(callCtx)
 			defer cancel()
 			stop := context.AfterFunc(ctx, cancel)
@@ -73,7 +79,6 @@ func newServer(ctx context.Context, backend Backend, version string) *sdk.Server
 			if json.Unmarshal(raw, &args) != nil {
 				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid tool arguments"}
 			}
-			var result *sdk.CallToolResult
 			prepare := func(value any, limit int) error {
 				var err error
 				result, err = boundedResult(value, limit)
@@ -84,7 +89,7 @@ func newServer(ctx context.Context, backend Backend, version string) *sdk.Server
 				err = backend.Connections(callCtx, func(items []Connection) error {
 					return prepare(struct {
 						Connections []Connection `json:"connections"`
-					}{items}, 1<<20)
+					}{items}, 0)
 				})
 			} else {
 				err = backend.Work(callCtx, args.Connection, func(ctx context.Context, d database.Driver, a database.Access) error {
@@ -127,7 +132,7 @@ func boundedResult(value any, limit int) (*sdk.CallToolResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(full) > min(limit, 1<<20) {
+	if limit > 0 && len(full) > limit {
 		return nil, database.Fail(contracts.ResourceLimit, "result exceeds payload budget; request less data", false)
 	}
 	return r, nil
@@ -145,7 +150,7 @@ func failureResult(err error) *sdk.CallToolResult {
 	}
 	r, _ := boundedResult(struct {
 		Error contracts.Failure `json:"error"`
-	}{f}, 1<<20)
+	}{f}, 0)
 	r.IsError = true
 	return r
 }

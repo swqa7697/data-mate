@@ -121,8 +121,8 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 			t.Fatal("agent catalog omitted readable relations", err)
 		}
 	}
-	// A compact database-generated corpus verifies the combined schema/object
-	// boundary in this owned fixture, without thousands of test executions.
+	// Reuse the database-generated boundary corpus: catalogs must now remain
+	// complete beyond the old combined schema/object count, including new kinds.
 	bounded := a.Profile
 	limits := config.DefaultLimits()
 	bounded.Limits = &limits
@@ -135,7 +135,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	for _, s := range description.Schemas {
 		count += len(s.Tables) + len(s.Enums) + len(s.Sequences) + len(s.Indexes) + len(s.Functions)
 	}
-	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(maxCatalogObjects-count) + ` LOOP
+	sql(`DO $$ BEGIN FOR i IN 1..` + fmt.Sprint(4096-count) + ` LOOP
  EXECUTE format('CREATE SCHEMA describe_bound%s',i);
  EXECUTE format('GRANT USAGE ON SCHEMA describe_bound%s TO reader',i);
  END LOOP; END $$`)
@@ -146,8 +146,7 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	if _, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password)); err != nil {
 		t.Fatal("exact catalog bound rejected", err)
 	}
-	// An overload adds no displayed entry; new index/function names do and must
-	// fail at the same combined bound without returning a partial description.
+	// An overload adds no displayed entry; new index/function names do.
 	sql("CREATE FUNCTION picker.lookup(bigint) RETURNS bigint LANGUAGE sql AS 'SELECT $1'")
 	if _, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password)); err != nil {
 		t.Fatal("overload consumed an extra catalog entry", err)
@@ -158,21 +157,21 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	} {
 		sql(object.create)
 		result, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
-		requireCode(t, err, contracts.ResourceLimit)
-		if result.Schemas != nil {
-			t.Fatal("oversized index/function catalog returned partial result")
+		if err != nil || result.Schemas == nil {
+			t.Fatal("large index/function catalog rejected", err)
 		}
 		sql(object.drop)
 	}
 	sql("CREATE SEQUENCE describe_bound1.extra")
 	result, err := d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
-	requireCode(t, err, contracts.ResourceLimit)
-	if result.Schemas != nil {
-		t.Fatal("oversized catalog returned partial result")
+	if err != nil || result.Schemas == nil {
+		t.Fatal("large sequence catalog rejected", err)
 	}
 	sql("DROP SEQUENCE describe_bound1.extra; CREATE TYPE describe_bound1.extra AS ENUM ('x')")
 	_, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
-	requireCode(t, err, contracts.ResourceLimit)
+	if err != nil {
+		t.Fatal("large enum catalog rejected", err)
+	}
 	sql("DROP TYPE describe_bound1.extra")
 	bounded.Limits.MaxResultBytes = 1024
 	_, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))

@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"net"
 	"os"
@@ -32,7 +31,10 @@ func TestConnectionBoundary(t *testing.T) {
 		p.Connection.Port = port
 		d := driver(t)
 		_, err := d.Test(t.Context(), database.NewAccess(p, "explicit-synthetic"))
-		requireCode(t, err, contracts.ResourceLimit)
+		requireCode(t, err, contracts.InvalidArgument)
+		if strings.Contains(err.Error(), "synthetic-private") {
+			t.Fatal("large upstream error leaked")
+		}
 		return
 	}
 	diagnosticProtocolAcceptance(t)
@@ -93,15 +95,15 @@ func TestConnectionBoundary(t *testing.T) {
 			peer <- err
 			return
 		}
-		// Advertise a huge body without sending it: the cap must reject the header,
-		// before allocating/reading a body or waiting for the server deadline.
+		// A valid server error beyond the former message cap must keep its safe
+		// SQLSTATE classification, without exposing its arbitrarily large text.
 		if _, err = backend.Receive(); err != nil {
 			peer <- err
 			return
 		}
-		header := []byte{'T', 0, 0, 0, 0}
-		binary.BigEndian.PutUint32(header[1:], (2<<20)+5)
-		_, err = conn.Write(header)
+		backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "22000", Message: strings.Repeat("synthetic-private", 140000)})
+		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		err = backend.Flush()
 		peer <- err
 	}()
 	dir := t.TempDir()

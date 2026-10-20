@@ -21,37 +21,9 @@ func codecError() error {
 	return database.Fail(contracts.QueryUnsupported, "result value has an unsupported representation", false)
 }
 
-// JSON is retained as bounded RawMessage: exact numbers and duplicate object
+// JSON is retained as RawMessage: exact numbers and duplicate object
 // members survive, without allocating a potentially huge Go object graph.
 func jsonValue(b []byte) (json.RawMessage, error) {
-	if len(b) > 1<<20 {
-		return nil, database.Fail(contracts.ResourceLimit, "JSON value exceeds size limit", false)
-	}
-	depth := 0
-	quoted, escaped := false, false
-	for _, c := range b {
-		if quoted {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				quoted = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			quoted = true
-		case '[', '{':
-			depth++
-			if depth > 64 {
-				return nil, database.Fail(contracts.ResourceLimit, "JSON value exceeds nesting limit", false)
-			}
-		case ']', '}':
-			depth--
-		}
-	}
 	if !utf8.Valid(b) || !json.Valid(b) {
 		return nil, codecError()
 	}
@@ -153,16 +125,11 @@ func invalidParameters() error {
 
 // queryParameters preserves JSON number text and leaves type inference to PostgreSQL.
 func queryParameters(input []json.RawMessage) ([][]byte, error) {
-	if len(input) > 256 {
+	if len(input) > 1<<16-1 {
 		return nil, invalidParameters()
 	}
 	out := make([][]byte, len(input))
-	total := 0
 	for i, p := range input {
-		total += len(p)
-		if len(p) > 64<<10 || total > 256<<10 {
-			return nil, invalidParameters()
-		}
 		raw, err := jsonValue(p)
 		if err != nil {
 			return nil, invalidParameters()

@@ -209,14 +209,16 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 		t.Fatal("metadata hidden", e)
 	}
 	sql("GRANT USAGE ON SCHEMA catalog TO reader; GRANT USAGE ON TYPE catalog.mood TO reader; GRANT SELECT ON SEQUENCE catalog.counter TO reader")
-	// Enum collections have their own count bound independent of encoded size.
+	// The existing enum corpus crosses the removed collection count bound.
 	labels := make([]string, 4097)
 	for i := range labels {
 		labels[i] = fmt.Sprintf("'v%d'", i)
 	}
 	sql("CREATE TYPE catalog.many_labels AS ENUM (" + strings.Join(labels, ",") + ")")
-	_, err = d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "type", Schema: "catalog", Name: "many_labels"})
-	requireCode(t, err, contracts.ResourceLimit)
+	largeEnum, err := d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: "type", Schema: "catalog", Name: "many_labels"})
+	if err != nil || len(largeEnum.Type.EnumLabels) != len(labels) {
+		t.Fatal("large enum lost labels", err)
+	}
 	// A large stored body must fail as a whole, without a partial definition.
 	sql("CREATE FUNCTION catalog.large_body() RETURNS text LANGUAGE sql AS 'SELECT ''" + strings.Repeat("x", 20000) + "''::text'")
 	bounded := normalizedFixture(t, access)
