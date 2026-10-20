@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"os"
@@ -206,8 +207,40 @@ func TestMCPSessions(t *testing.T) {
 		}
 	}
 	r, raw := callTool(t, a, "list_connections", map[string]any{})
-	if r.IsError || contracts.Validate("list_connections.output", raw) != nil || bytes.Contains(raw, []byte("synthetic-host")) || bytes.Contains(raw, []byte("synthetic-username")) || bytes.Contains(raw, []byte(p.ID)) {
+	if bytes.Contains(raw, []byte("synthetic-host")) || bytes.Contains(raw, []byte("synthetic-username")) || bytes.Contains(raw, []byte(p.ID)) {
 		t.Fatal("connection redaction")
+	}
+	// Ladder 2: extend the live connection-list scenario. Agents must see finite
+	// budgets before querying, omit disabled budgets and refresh them on this peer.
+	checkLimits := func(result *sdk.CallToolResult, raw []byte, name string, want map[string]int) {
+		t.Helper()
+		var body struct {
+			Connections []struct {
+				Limits map[string]int `json:"limits"`
+			} `json:"connections"`
+		}
+		if result.IsError || contracts.Validate("list_connections.output", raw) != nil || json.Unmarshal(raw, &body) != nil || len(body.Connections) != 1 {
+			t.Fatalf("%s: invalid connection limits: %.300s", name, raw)
+		}
+		if got := body.Connections[0].Limits; !maps.Equal(got, want) {
+			t.Fatalf("%s: connection limits = %v, want %v", name, got, want)
+		}
+	}
+	checkLimits(r, raw, "defaults", map[string]int{"max_rows": 50000})
+	for _, test := range []struct {
+		name   string
+		limits config.Limits
+		want   map[string]int
+	}{
+		{"bounded", config.Limits{QueryTimeoutMS: 750, MaxRows: 12, MaxResultBytes: 4096}, map[string]int{"max_rows": 12, "max_result_bytes": 4096, "query_timeout_ms": 750}},
+		{"timeout removed", config.Limits{MaxRows: 12, MaxResultBytes: 4096}, map[string]int{"max_rows": 12, "max_result_bytes": 4096}},
+		{"bytes removed", config.Limits{QueryTimeoutMS: 750, MaxRows: 12}, map[string]int{"max_rows": 12, "query_timeout_ms": 750}},
+		{"defaults restored", config.DefaultLimits(), map[string]int{"max_rows": 50000}},
+	} {
+		p.Limits = &test.limits
+		putProfiles(t, store, config.Profiles{Version: 1, Connections: []config.Profile{p}})
+		r, raw = callTool(t, a, "list_connections", map[string]any{})
+		checkLimits(r, raw, test.name, test.want)
 	}
 	for _, args := range []map[string]any{{"connection": "fixture", "sql": "select 1", "password": "synthetic-password"}, {"connection": "fixture", "sql": "select 1", "row_limit": 0}} {
 		_, err := a.CallTool(t.Context(), &sdk.CallToolParams{Name: "query", Arguments: args})

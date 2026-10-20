@@ -197,7 +197,12 @@ func (m *Manager) Connections(parent context.Context, prepare func([]mcp.Connect
 	}
 	items := make([]mcp.Connection, 0, len(p.Connections))
 	for _, p := range p.Connections {
-		items = append(items, mcp.Connection{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database})
+		items = append(items, mcp.Connection{
+			Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
+			Limits: mcp.ConnectionLimits{
+				MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
+			},
+		})
 	}
 	return prepare(items)
 }

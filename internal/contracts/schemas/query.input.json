@@ -16,11 +16,12 @@
       "type": "array",
       "items": {},
       "maxItems": 65535,
-      "description": "Ordered JSON values bound separately to $1, $2, etc. PostgreSQL infers types; use SQL casts when needed. Null means SQL NULL. Objects/arrays become JSON text; PostgreSQL array inputs use array-text strings with casts."
+      "description": "At most 65,535 ordered JSON values bound separately to $1, $2, etc. PostgreSQL infers types; use SQL casts when needed. Null means SQL NULL. Objects/arrays become JSON text; PostgreSQL array inputs use array-text strings with casts."
     },
     "row_limit": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "description": "Maximum rows to return. Defaults to this connection's limits.max_rows from list_connections and must not exceed it."
     }
   },
   "required": [

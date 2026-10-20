@@ -14,6 +14,32 @@
           "driver": {
             "const": "postgres"
           },
+          "limits": {
+            "type": "object",
+            "description": "Current finite Data Mate execution limits for this connection. Optional budgets appear only when enabled.",
+            "properties": {
+              "max_rows": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum query rows returned. query.row_limit may lower this limit."
+              },
+              "max_result_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum bytes in the complete MCP tool result for query and metadata tools, including structuredContent, text content and escaping, without the JSON-RPC wrapper."
+              },
+              "query_timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Execution timeout in milliseconds for query and metadata tools, including credential loading, driver admission, connection setup, execution and result reading. Earlier caller and database deadlines still apply."
+              }
+            },
+            "required": [
+              "max_rows"
+            ],
+            "additionalProperties": false
+          },
           "database": {
             "type": "string",
             "minLength": 1,
@@ -23,7 +49,8 @@
         "required": [
           "alias",
           "driver",
-          "database"
+          "database",
+          "limits"
         ],
         "additionalProperties": false
       },

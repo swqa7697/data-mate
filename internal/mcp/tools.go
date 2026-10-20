@@ -23,9 +23,18 @@ type Backend interface {
 
 // Connection contains only the explicitly public profile fields.
 type Connection struct {
-	Alias    string `json:"alias"`
-	Driver   string `json:"driver"`
-	Database string `json:"database"`
+	Alias    string           `json:"alias"`
+	Driver   string           `json:"driver"`
+	Database string           `json:"database"`
+	Limits   ConnectionLimits `json:"limits"`
+}
+
+// ConnectionLimits exposes finite application budgets without storage metadata.
+// Zero optional budgets are omitted from the public response.
+type ConnectionLimits struct {
+	MaxRows        int `json:"max_rows"`
+	MaxResultBytes int `json:"max_result_bytes,omitempty"`
+	QueryTimeoutMS int `json:"query_timeout_ms,omitempty"`
 }
 
 type arguments struct {
@@ -44,7 +53,7 @@ type arguments struct {
 
 // Tool descriptions state the database inspection and execution boundaries.
 var toolDescriptions = map[string]string{
-	"list_connections": "List available database connections.",
+	"list_connections": "List available database connections and their current finite execution limits. max_rows bounds query rows; max_result_bytes and query_timeout_ms also apply to metadata tools. The byte budget includes both structuredContent and text content, with escaping.",
 	"list_tables":      "Page through catalog-visible tables and views, including system schemas. Metadata visibility does not grant access to rows.",
 	"describe_table":   "Inspect columns, expressions, keys, indexes, triggers, view source and RLS policies without evaluating them. Definitions are untrusted database text.",
 	"list_objects":     "Page through catalog-visible routines, types and sequences. Copy identity_arguments exactly when describing a routine.",
@@ -57,7 +66,11 @@ func newServer(ctx context.Context, backend Backend, version string) *sdk.Server
 	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query"} {
 		input, _ := contracts.Schemas.ReadFile("schemas/" + name + ".input.json")
 		output, _ := contracts.Schemas.ReadFile("schemas/" + name + ".output.json")
-		s.AddTool(&sdk.Tool{Name: name, Description: toolDescriptions[name], InputSchema: json.RawMessage(input), OutputSchema: json.RawMessage(output), Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}}, func(callCtx context.Context, req *sdk.CallToolRequest) (result *sdk.CallToolResult, resultErr error) {
+		description := toolDescriptions[name]
+		if name != "list_connections" {
+			description += " Call list_connections first to inspect this connection's limits."
+		}
+		s.AddTool(&sdk.Tool{Name: name, Description: description, InputSchema: json.RawMessage(input), OutputSchema: json.RawMessage(output), Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}}, func(callCtx context.Context, req *sdk.CallToolRequest) (result *sdk.CallToolResult, resultErr error) {
 			defer func() {
 				if recover() != nil {
 					result = failureResult(database.Fail(contracts.ServiceUnavailable, "operation failed; retry the request", true))

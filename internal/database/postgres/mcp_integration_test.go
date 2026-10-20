@@ -29,7 +29,12 @@ func (b *wireBackend) Work(ctx context.Context, alias string, fn func(context.Co
 }
 func (b *wireBackend) Connections(_ context.Context, fn func([]protocol.Connection) error) error {
 	p := b.access.Profile
-	return fn([]protocol.Connection{{Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database}})
+	return fn([]protocol.Connection{{
+		Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
+		Limits: protocol.ConnectionLimits{
+			MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
+		},
+	}})
 }
 
 // Regression ladder 2: extend the existing PostgreSQL 16/18 acceptance scenario

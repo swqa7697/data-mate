@@ -73,17 +73,13 @@ Inspect one saved database with `data-mate db describe analytics`, or omit the a
 
 Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
 
-Queries return up to 50,000 complete rows by default. Set `--max-rows` on `db add/edit` to any positive row limit. Query execution and result bytes have no application limit by default; opt in with `--query-timeout` and `--max-result-bytes`, or set either to `0` to remove that limit. Database timeouts and caller cancellation still apply. SQL text, parameters, results and metadata have no application size or complexity caps; PostgreSQL, protocol and codec constraints still apply. Metadata lists retain pagination.
-
-On upgrade, all saved execution limits, including custom values from previous versions, reset to these defaults. Subsequent edits retain the limits you choose. Listing connections applies this conversion without changing stored files or accessing credentials.
-
 To copy connections to another machine, run `data-mate db export connections.csv`, then `data-mate db import connections.csv` there. Import asks for any passwords the file leaves empty.
 
 ## What agents can do
 
 | MCP tool           | Capability                                                                            |
 | ------------------ | ------------------------------------------------------------------------------------- |
-| `list_connections` | Find available aliases and database labels.                                           |
+| `list_connections` | Find available aliases, database labels, and current finite execution limits.         |
 | `list_tables`      | Browse visible tables.                                                                |
 | `describe_table`   | Inspect columns, defaults, keys, indexes, triggers, views, and row-security policies. |
 | `list_objects`     | Browse routines, types, and sequences.                                                |

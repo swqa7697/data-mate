@@ -43,7 +43,7 @@ The binary has three process roles:
 | ---------------- | -------------------------------------------------------------------------------------------------------- |
 | User CLI         | Forms, confirmed management requests, passive nonsecret reads, agent registration, and service lifecycle |
 | Internal service | Profile mutations, OS keyset access, Tink encryption, CLI database operations, and enabled MCP sessions  |
-| Internal bridge  | Relay MCP bytes between agent stdio and the service socket                                    |
+| Internal bridge  | Relay MCP bytes between agent stdio and the service socket                                               |
 
 Development agent registration invokes `data-mate mcp bridge --root <absolute-root>`. Production registration omits `--root` and uses the fixed installation described in section 13.2. A private service entry point runs under launchd on macOS or systemd on Linux, initially in management-only mode unless started through `mcp start`. These internal commands require no separate user setup. The bridge has no database connection, keyset, or management API. Each bridge creates one socket connection and an independent MCP session. Stdout carries protocol messages only; diagnostics use stderr.
 
@@ -281,10 +281,10 @@ Strict decoding rejects unknown fields/versions, recursive duplicate keys, trail
 
 Transport objects contain TLS `{mode:"disabled"|"verify-full",ca_file?:absolute-path}`, optional SSH `{host,port,user,auth:"password"|"key"}`, or optional SOCKS5 `{kind:"socks5",host,port,username?}`. Authentication material stays in the vault. CA files require verified TLS; SSH and SOCKS5 are mutually exclusive.
 
-| Optional limit     | Default | Accepted range |
-| ------------------ | ------- | -------------- |
-| `query_timeout_ms` | 0       | 0–2147483647; zero means no application timeout |
-| `max_rows`         | 50000   | Positive representable integer |
+| Optional limit     | Default | Accepted range                                          |
+| ------------------ | ------- | ------------------------------------------------------- |
+| `query_timeout_ms` | 0       | 0–2147483647; zero means no application timeout         |
+| `max_rows`         | 50000   | Positive representable integer                          |
 | `max_result_bytes` | 0       | Nonnegative representable integer; zero means unlimited |
 
 Saved limits include `version: 2`. Unversioned historical limits, including custom values, normalize to all new defaults during decoding. A normal subsequent save writes version 2; new custom limits then survive decoding. This logical migration leaves SQLite, credentials and keyset state untouched during passive reads and requires no SQLite schema migration. Omitted current-version members take individual defaults. Profile digests include the normalized limits and their version, with normalized UUIDs, explicit defaults, and sorted profiles. Formatting and profile order do not change the digest; settings and limits do. A revision also carries a database generation incremented in the same transaction for every profile or credential change, so credential-only edits invalidate stale previews and service resources.
@@ -435,16 +435,16 @@ Direct and indirect application/extension routines, aggregates, windows, samplin
 
 ### 9.4 Bounds and codecs
 
-| Resource              | Contract |
-| --------------------- | -------- |
+| Resource              | Contract                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------- |
 | Query deadline        | Unlimited by default; optional positive profile timeout and caller/database deadlines |
-| Lock wait             | Database setting and caller cancellation |
+| Lock wait             | Database setting and caller cancellation                                              |
 | Returned rows         | Default 50,000; positive profile cap without an application maximum; caller may lower |
-| Result envelope       | Unlimited by default; optional positive profile byte cap |
-| Protocol message body | No application cap |
-| SQL                   | No application byte or complexity cap |
-| Parameters            | PostgreSQL extended-protocol count limit of 65,535; no application byte caps |
-| Result type metadata  | No count/depth cap; dependency cycles fail safely |
+| Result envelope       | Unlimited by default; optional positive profile byte cap                              |
+| Protocol message body | No application cap                                                                    |
+| SQL                   | No application byte or complexity cap                                                 |
+| Parameters            | PostgreSQL extended-protocol count limit of 65,535; no application byte caps          |
+| Result type metadata  | No count/depth cap; dependency cycles fail safely                                     |
 
 Native parsing cannot be interrupted by a Go context; the worst-shape regression runs in a deadline-controlled subprocess. Timeouts and cancellation return failures without partial results. Row truncation or an enabled byte budget returns complete rows with `truncated: true`; column metadata exceeding an enabled byte budget fails with `RESOURCE_LIMIT`. Encoded-size accounting includes escaping, base64 and both MCP result representations.
 
@@ -462,7 +462,7 @@ Six tools expose strict embedded [input/output schemas](../internal/contracts/sc
 
 | Tool               | Input                                                                                   | Output                                                                      |
 | ------------------ | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `list_connections` | Empty object                                                                            | Aliases, drivers, and database labels                                       |
+| `list_connections` | Empty object                                                                            | Aliases, drivers, database labels, and current finite execution limits      |
 | `list_tables`      | `connection`; optional `schema`, `cursor`, `page_size`                                  | Visible table names, kinds, and next cursor                                 |
 | `describe_table`   | `connection`, `schema`, `table`                                                         | Columns, expressions, keys, relationships, indexes, triggers, views and RLS |
 | `list_objects`     | `connection`; optional `kind`, `schema`, `cursor`, `page_size`                          | Routine/type/sequence identities, extension membership and next cursor      |
@@ -470,6 +470,10 @@ Six tools expose strict embedded [input/output schemas](../internal/contracts/sc
 | `query`            | `connection`, `sql`; optional JSON-value `parameters`, `row_limit`                      | Columns, rows, row count, truncation, and elapsed time                      |
 
 All tools declare read-only intent, enforced server-side. Inputs reject additional fields. No tool accepts connection overrides, credentials, DSNs, hosts, or arbitrary file paths; no tool modifies profiles or grants privileges. Schema validation alone does not authorize execution. Connection listing reads only the public profile snapshot and never loads credentials.
+
+Every listed connection includes a `limits` object with its current positive `max_rows` (default 50,000). Positive `max_result_bytes` and `query_timeout_ms` are included only when configured; omitted optional members mean Data Mate imposes no corresponding budget. No zero, null, or storage-version members are exposed. Timeout and byte budgets apply to query and metadata tools. The byte budget counts the complete MCP tool result envelope, including both structured and text content and escaping, without the JSON-RPC wrapper. The timeout is measured in milliseconds and follows the execution scope in [section 8.2](#82-pools-admission-and-cleanup). Earlier caller and database deadlines still apply. Each listing reads the normalized configuration under its state lease; a later listing on the same session reflects edits. Execution uses the configuration effective when its own state lease is acquired.
+
+Database tool descriptions direct agents to call `list_connections` before work. The query input schema declares the 65,535-parameter maximum and explains that an omitted `row_limit` uses `limits.max_rows`; an explicit value must be positive and cannot exceed that connection limit.
 
 Each handler calls the shared service manager and prepares both `structuredContent` and identical compact JSON text under the state lease. A positive profile cap bounds the combined envelope for database tools; zero disables that budget. Serialization/output after preparation holds no state lease. A session never caches successful live authorization.
 
