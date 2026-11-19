@@ -139,6 +139,10 @@ From the source checkout, run `make upgrade` to update direct Go dependencies an
 
 Use `make upgrade MAJOR=1` to discover new major module paths and rewrite imports. Crossing several major versions can take multiple runs. Transitive dependencies can change in either mode. Review the diff, then run `make lint` and `make test`.
 
+## CI caches
+
+Pull requests targeting `main` or `dev` restore separate Go module and build caches on macOS and Linux. Creating a stable release tag such as `v1.2.3` triggers `release-cache-signal`. After that signal succeeds, `go-cache-warm` checks out the `main` revision, runs setup, lint and build, and compiles both ordinary and race tests with `make compile-tests`. The warmed caches belong to `main`, so subsequent pull requests can reuse them. Both cache workflows must be on `main` before creating the tag.
+
 ## License
 
 [GNU General Public License v3](LICENSE).

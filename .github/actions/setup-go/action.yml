@@ -1,0 +1,38 @@
+name: Set up Go with shared caches
+description: Restore Go module and build caches for CI and release-tag warming.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      id: go
+      uses: actions/setup-go@v7.0.0
+      with:
+        go-version-file: go.mod
+        cache: false
+
+    - name: Locate Go caches
+      id: paths
+      shell: bash
+      run: |
+        printf 'modules=%s\n' "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+        printf 'build=%s\n' "$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+        printf 'image=%s\n' "$ImageOS" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Go modules
+      uses: actions/cache@v6.1.0
+      with:
+        path: ${{ steps.paths.outputs.modules }}
+        key: data-mate-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.image }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+        restore-keys: |
+          data-mate-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.image }}-${{ steps.go.outputs.go-version }}-
+
+    # Include embedded assets and build inputs. Go validates individual
+    # entries before reusing a build cache restored by prefix.
+    - name: Cache Go build outputs
+      uses: actions/cache@v6.1.0
+      with:
+        path: ${{ steps.paths.outputs.build }}
+        key: data-mate-go-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.image }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum', 'cmd/**', 'internal/**', 'VERSION', 'Makefile', 'scripts/**', '.github/workflows/ci.yml', '.github/workflows/go-cache-warm.yml', '.github/actions/setup-go/action.yml') }}
+        restore-keys: |
+          data-mate-go-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.image }}-${{ steps.go.outputs.go-version }}-

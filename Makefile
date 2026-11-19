@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup upgrade install build dev clean uninstall format tidy format-check lint test test-race test-integration release bump-major bump-minor bump-patch release-commit tag
+.PHONY: help setup upgrade install build dev clean uninstall format tidy format-check lint test test-race compile-tests test-integration release bump-major bump-minor bump-patch release-commit tag
 
 VERBOSE ?= 0
 export VERBOSE
@@ -45,6 +45,10 @@ test: ## Run isolated offline unit and regression tests
 
 test-race: ## Run the same suite with Go's race detector
 	@./scripts/test.sh -race
+
+compile-tests: ## Compile ordinary and race tests without running them
+	@./scripts/test.sh -c -o /dev/null
+	@./scripts/test.sh -c -race -o /dev/null
 
 test-integration: ## Run owned Docker fixtures for DB_DRIVER=postgres|mysql|mariadb (never in CI)
 	@./scripts/test-integration.sh

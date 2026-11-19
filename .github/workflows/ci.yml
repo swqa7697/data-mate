@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   quality-platform:
     name: Format and lint (${{ matrix.os }})
@@ -22,10 +26,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: '1.27.4'
-          cache: true
+      - uses: ./.github/actions/setup-go
       - name: Record native toolchain
         run: |
           uname -m
@@ -57,10 +58,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: '1.27.4'
-          cache: true
+      - uses: ./.github/actions/setup-go
       - name: Record native toolchain
         run: |
           uname -m
@@ -92,10 +90,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: '1.27.4'
-          cache: true
+      - uses: ./.github/actions/setup-go
       - name: Record native toolchain
         run: |
           uname -m
