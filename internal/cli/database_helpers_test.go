@@ -55,6 +55,15 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 		return database.DatabaseDescription{}, d.describeError
 	}
 	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	if a.Profile.Driver == "redis" {
+		cursor := "more-keys"
+		out.Schemas = nil
+		out.RedisKeys = &database.KeyPage{Connection: out.Alias, Driver: out.Driver, Keys: []database.KeyInfo{
+			{Key: database.KeyBytes{Value: "line\n\x1b[31m", Encoding: "utf8"}, Type: "string"},
+			{Key: database.KeyBytes{Value: "/wA=", Encoding: "base64"}, Type: "hash"},
+		}, NextCursor: &cursor}
+		return out, nil
+	}
 	if !d.emptyCatalog {
 		for _, name := range []string{"Dot.Schema", "empty", "private", "public"} {
 			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.IndexName{}, Functions: []database.CatalogName{}}

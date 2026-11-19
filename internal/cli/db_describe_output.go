@@ -46,6 +46,20 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		scope, unit, units = "driver="+displayName(description.Driver), "Database", "databases"
 	}
 	fmt.Fprintf(&out, "%s — %s\n", displayName(description.Alias), scope)
+	if page := description.RedisKeys; page != nil {
+		fmt.Fprintf(&out, "\nRedis keys on this page: %d\n", len(page.Keys))
+		for _, item := range page.Keys {
+			name := strconv.Quote(item.Key.Value)
+			if item.Key.Encoding == "base64" {
+				name = "base64 " + name
+			}
+			fmt.Fprintf(&out, "  %s  %s\n", name, displayName(item.Type))
+		}
+		if page.NextCursor != nil {
+			fmt.Fprintf(&out, "\nContinue with list_keys using cursor %q.\n", *page.NextCursor)
+		}
+		return out.String()
+	}
 	if len(description.Schemas) == 0 {
 		fmt.Fprintf(&out, "\nNo application %s.\n", units)
 		return out.String()

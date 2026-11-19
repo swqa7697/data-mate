@@ -16,14 +16,15 @@
             "enum": [
               "postgres",
               "mysql",
-              "mariadb"
+              "mariadb",
+              "redis"
             ]
           },
           "database": {
             "type": "string",
             "minLength": 1,
             "pattern": "^[^\\x00]+$",
-            "description": "PostgreSQL only: the profile's database. MySQL and MariaDB connections reach every database their grants allow."
+            "description": "PostgreSQL database name or Redis logical database index. MySQL and MariaDB expose databases through account grants."
           },
           "limits": {
             "type": "object",
@@ -32,7 +33,7 @@
               "max_rows": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Maximum query rows returned. query.row_limit may lower this limit."
+                "description": "Maximum query rows or Redis entries returned per call."
               },
               "max_result_bytes": {
                 "type": "integer",
@@ -63,7 +64,10 @@
             "if": {
               "properties": {
                 "driver": {
-                  "const": "postgres"
+                  "enum": [
+                    "postgres",
+                    "redis"
+                  ]
                 }
               }
             },
@@ -77,6 +81,23 @@
                 "required": [
                   "database"
                 ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "redis"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "database": {
+                  "pattern": "^(0|[1-9][0-9]{0,9})$",
+                  "description": "Redis logical database index in canonical decimal, from 0 to 2147483647."
+                }
               }
             }
           }

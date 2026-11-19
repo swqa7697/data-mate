@@ -14,7 +14,8 @@
       "enum": [
         "postgres",
         "mysql",
-        "mariadb"
+        "mariadb",
+        "redis"
       ]
     },
     "database": {
@@ -150,13 +151,80 @@
         ],
         "additionalProperties": false
       }
+    },
+    "keyspace": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+        },
+        "driver": {
+          "const": "redis"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "object",
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8",
+                      "base64"
+                    ]
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "type": {
+                "enum": [
+                  "string",
+                  "hash",
+                  "list",
+                  "set",
+                  "zset",
+                  "stream"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "connection",
+        "driver",
+        "keys",
+        "next_cursor"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "version",
     "alias",
-    "driver",
-    "schemas"
+    "driver"
   ],
   "additionalProperties": false,
   "allOf": [
@@ -164,7 +232,10 @@
       "if": {
         "properties": {
           "driver": {
-            "const": "postgres"
+            "enum": [
+              "postgres",
+              "redis"
+            ]
           }
         }
       },
@@ -177,6 +248,41 @@
         "not": {
           "required": [
             "database"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "driver": {
+            "const": "redis"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "database": {
+            "pattern": "^(0|[1-9][0-9]{0,9})$",
+            "description": "Redis logical database index in canonical decimal, from 0 to 2147483647."
+          }
+        },
+        "required": [
+          "keyspace"
+        ],
+        "not": {
+          "required": [
+            "schemas"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "schemas"
+        ],
+        "not": {
+          "required": [
+            "keyspace"
           ]
         }
       }

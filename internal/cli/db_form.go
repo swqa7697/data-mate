@@ -41,8 +41,13 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 		{"driver", "Driver (" + strings.Join(config.Drivers, ", ") + ")", &profile.Driver}, {"alias", "Alias", &profile.Alias}, {"host", "Host", &profile.Connection.Host},
 		{"port", "Port", nil}, {"database", "Database", &profile.Connection.Database}, {"username", "Username", &profile.Connection.Username},
 	} {
-		if field.name == "database" && !config.NamesDatabase(profile.Driver) {
-			continue
+		if field.name == "database" {
+			if !config.NamesDatabase(profile.Driver) {
+				continue
+			}
+			if profile.Driver == "redis" {
+				field.label = "Logical database index"
+			}
 		}
 		missing := field.value != nil && *field.value == ""
 		if (fullForm && !changed(cmd, field.name)) || missing {
@@ -171,6 +176,11 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 // validateCandidate applies the CLI's secret and endpoint rules shared by
 // interactive, scripted and CSV-imported connections.
 func validateCandidate(profile config.Profile, patch secretPatch) error {
+	if profile.Driver == "redis" {
+		if _, err := config.RedisDatabaseIndex(profile.Connection.Database); err != nil {
+			return invalid(err.Error())
+		}
+	}
 	for key, value := range patch {
 		if len(value) > vault.MaxSecretBytes || !utf8.ValidString(value) {
 			return invalid("credential exceeds its UTF-8 byte limit")
@@ -205,6 +215,14 @@ func applyDriver(cmd *cobra.Command, action string, p *config.Profile, original 
 			return invalid(p.Driver + " profiles have no database; grants select the reachable databases and queries name tables as database.table")
 		}
 		p.Connection.Database = ""
+	} else if !changed(cmd, "database") && p.Driver != original.Driver {
+		// A PostgreSQL database name and a Redis database index have different
+		// meanings, even when both happen to be decimal strings.
+		if p.Driver == "redis" {
+			p.Connection.Database = "0"
+		} else if original.Driver == "redis" {
+			p.Connection.Database = ""
+		}
 	}
 	return nil
 }

@@ -669,6 +669,16 @@ func TestConnectionInputs(t *testing.T) {
 	if c := shop(); c.Port != 5432 || c.Database != "app" {
 		t.Fatalf("postgres switch: %+v", c)
 	}
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "redis", "--yes")
+	if c := shop(); c.Port != 6379 || c.Database != "0" {
+		t.Fatalf("redis switch retained PostgreSQL settings: %+v", c)
+	}
+	redisList, _ := command(t, root, keys, "", 0, "list", "--json")
+	if contracts.Validate("db-list.output", []byte(redisList)) != nil {
+		t.Fatal("redis listing contract", redisList)
+	}
+	// Redis indexes cannot become PostgreSQL names without an explicit choice.
+	command(t, root, keys, "", 2, "edit", "shop", "--driver", "postgres", "--yes")
 	command(t, root, keys, "", 0, "edit", "shop", "--driver", "mariadb", "--yes")
 	if c := shop(); c.Port != 3306 || c.Database != "" {
 		t.Fatalf("mariadb switch: %+v", c)
@@ -679,7 +689,7 @@ func TestConnectionInputs(t *testing.T) {
 	}
 	// CSV import must retain database-less drivers and their defaults.
 	transfer := filepath.Join(t.TempDir(), "drivers.csv")
-	if err := os.WriteFile(transfer, []byte("alias,driver,host,username,password\nshop,mariadb,localhost,reader,<none>\ncatalog,mysql,localhost,reader,<none>\n"), 0600); err != nil {
+	if err := os.WriteFile(transfer, []byte("alias,driver,host,username,password,database\nshop,mariadb,localhost,reader,<none>,\ncatalog,mysql,localhost,reader,<none>,\ncache,redis,localhost,reader,<none>,3\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	command(t, root, keys, "", 0, "import", transfer, "--on-conflict", "update", "--yes")
@@ -687,7 +697,11 @@ func TestConnectionInputs(t *testing.T) {
 		if (c.Alias == "shop" || c.Alias == "catalog") && (c.Connection.Port != 3306 || c.Connection.Database != "") {
 			t.Fatalf("CSV driver defaults: %+v", c)
 		}
+		if c.Alias == "cache" && (c.Connection.Port != 6379 || c.Connection.Database != "3") {
+			t.Fatalf("CSV Redis settings: %+v", c)
+		}
 	}
+	command(t, root, keys, "", 0, "remove", "cache", "--yes")
 	command(t, root, keys, "", 0, "remove", "catalog", "--yes")
 	command(t, root, keys, "", 0, "remove", "shop", "--yes")
 	// Change config as the preview is written: the confirmed stale mutation fails.

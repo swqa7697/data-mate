@@ -60,7 +60,7 @@ func Fail(code contracts.Code, message string, retry bool) error {
 	return &Error{contracts.Failure{Code: code, Message: message, Retryable: retry}}
 }
 
-// Readiness reports successful connection and read-only transaction checks without reading application rows.
+// Readiness reports the stages reached while checking connectivity and read-only access.
 type Readiness struct {
 	ServerVersion int
 	TLS           bool
@@ -75,15 +75,15 @@ type Stage struct {
 	Error *contracts.Failure `json:"error,omitempty"`
 }
 
-// DatabaseDescription is the complete user-facing catalog. It is never
-// an MCP result; it includes empty application schemas but excludes system schemas.
-// MySQL-family profiles have no database; their schemas are the visible databases.
+// DatabaseDescription is the CLI result for db describe. Relational drivers
+// return application schemas, including empty ones. Redis returns a keyspace sample.
 type DatabaseDescription struct {
-	Version  int                 `json:"version"`
-	Alias    string              `json:"alias"`
-	Driver   string              `json:"driver"`
-	Database string              `json:"database,omitempty"`
-	Schemas  []SchemaDescription `json:"schemas"`
+	Version   int                 `json:"version"`
+	Alias     string              `json:"alias"`
+	Driver    string              `json:"driver"`
+	Database  string              `json:"database,omitempty"`
+	Schemas   []SchemaDescription `json:"schemas,omitzero"`
+	RedisKeys *KeyPage            `json:"keyspace,omitempty"`
 }
 
 // SchemaDescription groups catalog-visible application objects in a schema.
@@ -204,26 +204,27 @@ type QueryResult struct {
 	ElapsedMS  int64          `json:"elapsed_ms"`
 }
 
-// Operations are the read-only operations one driver implements. Object pages
-// and descriptions are driver-shaped documents marshaled unchanged by callers;
-// only the owning driver reads their fields. No operation accepts
-// agent-controlled credentials or connection strings.
+// Operations is the connection lifecycle and CLI description shared by all drivers.
 type Operations interface {
 	ValidateProfile(config.Profile) error
 	Validate(Access) error
 	Test(context.Context, Access) (Readiness, error)
+	DescribeDatabase(context.Context, Access) (DatabaseDescription, error)
+}
+
+// RelationalOperations inspects catalogs and executes guarded SQL reads.
+type RelationalOperations interface {
 	ListTables(context.Context, Access, PageRequest) (TablePage, error)
 	ListObjects(context.Context, Access, ObjectPageRequest) (any, error)
 	DescribeObject(context.Context, Access, ObjectRequest) (any, error)
 	DescribeTable(context.Context, Access, config.Table) (any, error)
-	DescribeDatabase(context.Context, Access) (DatabaseDescription, error)
 	Query(context.Context, Access, QueryRequest) (QueryResult, error)
 }
 
-// Driver is the service boundary: driver operations plus the lifecycle of
-// shared pools, transports and cursors.
+// Driver is the service-facing router over the available database capabilities.
 type Driver interface {
 	Operations
-	Invalidate(string)
-	Close()
+	RelationalOperations
+	KeyOperations
+	Resources
 }

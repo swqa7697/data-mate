@@ -1,9 +1,7 @@
 package mysql
 
 import (
-	"context"
 	"encoding/json"
-	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -12,7 +10,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	protocol "github.com/swqa7697/data-mate/internal/mcp"
+	"github.com/swqa7697/data-mate/internal/testsupport/mcpfixture"
 )
 
 func validate(t *testing.T, contract string, v any) {
@@ -198,44 +196,11 @@ func catalogAcceptance(t *testing.T, f *fixture, d *Driver, a database.Access) {
 	}
 }
 
-// wireBackend serves the owned fixture through the real MCP handlers.
-type wireBackend struct {
-	driver database.Driver
-	access database.Access
-}
-
-func (b *wireBackend) Work(ctx context.Context, alias string, fn func(context.Context, database.Driver, database.Access) error) error {
-	if alias != b.access.Profile.Alias {
-		return database.Fail(contracts.ConnectionNotFound, "connection not found", false)
-	}
-	return fn(ctx, b.driver, b.access)
-}
-func (b *wireBackend) Connections(_ context.Context, fn func([]protocol.Connection) error) error {
-	p := b.access.Profile
-	return fn([]protocol.Connection{{
-		Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
-		Limits: protocol.ConnectionLimits{
-			MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
-		},
-	}})
-}
-
 // Every tool's MySQL-shaped output must satisfy its driver-keyed contract.
 func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	t.Helper()
-	// Decoded production profiles always carry limits; the MCP handler reads them.
-	limits := config.DefaultLimits()
-	a.Profile.Limits = &limits
-	backend := &wireBackend{database.NewRouter(d.pools, map[string]database.Operations{a.Profile.Driver: d.Operations()}), a}
-	server, client := net.Pipe()
-	done := make(chan error, 1)
-	go func() { done <- protocol.Serve(t.Context(), server, backend, "fixture") }()
-	session, err := sdk.NewClient(&sdk.Implementation{Name: "integration", Version: "1"}, nil).Connect(t.Context(), &sdk.IOTransport{Reader: client, Writer: client}, nil)
-	if err != nil {
-		client.Close()
-		t.Fatal(err)
-	}
-	defer func() { session.Close(); <-done }()
+	router := database.NewRouter(d.pools, map[string]database.Operations{a.Profile.Driver: d.Operations()})
+	session := mcpfixture.Connect(t, router, a)
 	call := func(name string, args map[string]any, code contracts.Code) []byte {
 		t.Helper()
 		r, err := session.CallTool(t.Context(), &sdk.CallToolParams{Name: name, Arguments: args})

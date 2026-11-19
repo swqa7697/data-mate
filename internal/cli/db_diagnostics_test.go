@@ -257,6 +257,25 @@ func TestConnectionDiagnostics(t *testing.T) {
 	saveProfiles(t, root, invalidProfile)
 	runCommand("describe", &fixtureDatabase{}, 2, "good", "--json")
 	saveProfiles(t, root, original)
+	// A Redis description returns a bounded page of key names and types,
+	// including binary names. The terminal must escape untrusted names.
+	redisProfiles := snapshot(t, root)
+	for i := range redisProfiles.Connections {
+		p := &redisProfiles.Connections[i]
+		if p.Alias == "good" {
+			p.Driver, p.Connection.Database, p.Connection.Port = "redis", "1", 6379
+		}
+	}
+	saveProfiles(t, root, redisProfiles)
+	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good", "--json")
+	if contracts.Validate("db-describe.output", []byte(out)) != nil || strings.Contains(out, `"schemas"`) {
+		t.Fatal("Redis description JSON", out)
+	}
+	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
+	if !strings.Contains(out, `"line\n\x1b[31m"`) || !strings.Contains(out, `base64 "/wA="`) || !strings.Contains(out, "more-keys") {
+		t.Fatal("Redis key name or continuation lost in terminal output", out)
+	}
+	saveProfiles(t, root, original)
 	keys.denied = true
 	runCommand("describe", &fixtureDatabase{}, 1, "good", "--json")
 	results, d = runJSON(1)

@@ -66,10 +66,19 @@ func TestProfiles(t *testing.T) {
 		// PostgreSQL profiles name one database; MySQL-family accounts name none.
 		"postgres without database": func(c map[string]any) { delete(c["connection"].(map[string]any), "database") },
 		"mysql with database":       func(c map[string]any) { c["driver"] = "mysql" },
-		"port zero":                 func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
-		"port high":                 func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
-		"embedded secret":           func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
-		"removed scope":             func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
+		"redis with database name":  func(c map[string]any) { c["driver"] = "redis" },
+		"redis index overflow": func(c map[string]any) {
+			c["driver"] = "redis"
+			c["connection"].(map[string]any)["database"] = "2147483648"
+		},
+		"redis index with leading zero": func(c map[string]any) {
+			c["driver"] = "redis"
+			c["connection"].(map[string]any)["database"] = "01"
+		},
+		"port zero":       func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
+		"port high":       func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
+		"embedded secret": func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
+		"removed scope":   func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
 		"tls ca disabled": func(c map[string]any) {
 			c["transport"].(map[string]any)["tls"] = map[string]any{"mode": "disabled", "ca_file": "/tmp/test.pem"}
 		},

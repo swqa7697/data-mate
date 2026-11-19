@@ -5,6 +5,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/database/mysql"
 	"github.com/swqa7697/data-mate/internal/database/pool"
 	"github.com/swqa7697/data-mate/internal/database/postgres"
+	"github.com/swqa7697/data-mate/internal/database/redis"
 )
 
 // NewDriver composes every supported database driver over one shared registry,
@@ -15,6 +16,7 @@ func NewDriver() (database.Driver, error) {
 		return nil, err
 	}
 	return database.NewRouter(r, map[string]database.Operations{
+		"redis":    redis.New(r),
 		"postgres": postgres.New(r).Operations(),
 		"mysql":    mysql.New(r, mysql.MySQL).Operations(),
 		"mariadb":  mysql.New(r, mysql.MariaDB).Operations(),

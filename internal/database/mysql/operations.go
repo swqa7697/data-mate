@@ -11,7 +11,7 @@ import (
 // MySQL-shaped documents unchanged.
 type operations struct{ *Driver }
 
-var _ database.Operations = operations{}
+var _ database.RelationalOperations = operations{}
 
 // Operations returns the shared-boundary view of the driver.
 func (d *Driver) Operations() database.Operations { return operations{d} }

@@ -26,6 +26,17 @@ type Cursor struct {
 	Schema   string
 	Name     string
 	Epoch    uint64
+	// Position contains optional driver-native pagination state, covered by the signature.
+	Position json.RawMessage `json:",omitempty"`
+}
+
+// CursorDigest authenticates a hash of private scan data without exposing the
+// hash in a public cursor, where it could verify guesses about hidden keys.
+func (r *Registry) CursorDigest(hash [sha256.Size]byte) string {
+	mac := hmac.New(sha256.New, r.key[:])
+	mac.Write([]byte("scan batch\x00"))
+	mac.Write(hash[:])
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // Encode signs a cursor with this registry's process-local key.

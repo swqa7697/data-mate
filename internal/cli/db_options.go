@@ -20,16 +20,16 @@ import (
 func profileFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	for _, flag := range []struct{ name, value, help string }{
-		{"driver", "postgres", "Database driver: postgres, mysql or mariadb"}, {"alias", "", "Connection alias"}, {"host", "", "Database host"}, {"database", "", "Database name (postgres only)"}, {"username", "", "Database username"},
+		{"driver", "postgres", "Database driver: postgres, mysql, mariadb or redis"}, {"alias", "", "Connection alias"}, {"host", "", "Database host"}, {"database", "", "PostgreSQL database name or Redis logical database index (default 0 for Redis)"}, {"username", "", "Database username"},
 		{"tls-ca", "", "Absolute CA certificate path"}, {"ssh-host", "", "SSH jump host"}, {"ssh-user", "", "SSH username"}, {"ssh-key-file", "", "Import private key into the vault"}, {"proxy", "", "SOCKS5 endpoint without credentials"}, {"proxy-user", "", "Proxy username"},
 	} {
 		f.String(flag.name, flag.value, flag.help)
 	}
-	f.Int("port", 0, "Database port (default 5432 for postgres, 3306 for mysql and mariadb)")
+	f.Int("port", 0, "Database port (default 5432 for postgres, 3306 for mysql and mariadb, 6379 for redis)")
 	f.Int("ssh-port", 22, "SSH port")
 	f.Bool("ssh-enroll", false, "Interactively verify and save an SSH host fingerprint")
 	f.Duration("query-timeout", config.DefaultQueryTimeout, "Query timeout (0 disables the application timeout)")
-	f.Int("max-rows", config.DefaultLimits().MaxRows, "Maximum rows")
+	f.Int("max-rows", config.DefaultLimits().MaxRows, "Maximum query rows or Redis entries per call")
 	f.Int("max-result-bytes", 0, "Maximum result bytes (0 means unlimited)")
 	for _, flag := range []struct{ name, help string }{
 		{"tls", "Enable verified TLS"}, {"password-stdin", "Read one password line from stdin"}, {"credentials-stdin", "Read strict credential JSON from stdin"}, {"passwordless", "Explicitly use no database password"},

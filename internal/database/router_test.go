@@ -12,6 +12,7 @@ import (
 // named answers every operation with its own name, so dispatch is observable.
 type named struct {
 	Operations
+	RelationalOperations
 	name string
 }
 
@@ -20,6 +21,15 @@ func (n named) Test(context.Context, Access) (Readiness, error) {
 	return Readiness{Stage: n.name}, nil
 }
 func (n named) DescribeTable(context.Context, Access, config.Table) (any, error) { return n.name, nil }
+
+type keyDriver struct {
+	Operations
+	KeyOperations
+}
+
+func (keyDriver) ListKeys(context.Context, Access, KeyPageRequest) (KeyPage, error) {
+	return KeyPage{Driver: "redis"}, nil
+}
 
 type resources struct{ invalidated, closed int }
 
@@ -30,7 +40,7 @@ func (r *resources) Close()            { r.closed++ }
 // configuration, and lifecycle calls reach the shared resources once.
 func TestRouter(t *testing.T) {
 	shared := &resources{}
-	r := NewRouter(shared, map[string]Operations{"postgres": named{name: "postgres"}, "mysql": named{name: "mysql"}})
+	r := NewRouter(shared, map[string]Operations{"postgres": named{name: "postgres"}, "mysql": named{name: "mysql"}, "redis": keyDriver{}})
 	for _, driver := range []string{"postgres", "mysql"} {
 		a := NewAccess(config.Profile{Driver: driver}, "")
 		ready, err := r.Test(t.Context(), a)
@@ -44,6 +54,18 @@ func TestRouter(t *testing.T) {
 	var e *Error
 	if !errors.As(err, &e) || e.Code != contracts.ConfigInvalid || !errors.As(r.ValidateProfile(unknown.Profile), &e) {
 		t.Fatal("unknown driver", err)
+	}
+	redis := NewAccess(config.Profile{Driver: "redis"}, "")
+	page, err := r.ListKeys(t.Context(), redis, KeyPageRequest{})
+	if err != nil || page.Driver != "redis" {
+		t.Fatal("key dispatch", err)
+	}
+	_, redisErr := r.Query(t.Context(), redis, QueryRequest{})
+	_, sqlErr := r.ReadKey(t.Context(), NewAccess(config.Profile{Driver: "mysql"}, ""), KeyReadRequest{})
+	for _, err := range []error{redisErr, sqlErr} {
+		if !errors.As(err, &e) || e.Code != contracts.QueryUnsupported {
+			t.Fatal("incompatible tool", err)
+		}
 	}
 	r.Invalidate("id")
 	r.Close()

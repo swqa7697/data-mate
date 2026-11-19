@@ -6,10 +6,11 @@ case "${DB_DRIVER:-}" in
 postgres) allowed=(postgres:16 postgres:18) prefix=dm-pg port_spec=5432/tcp ;;
 mysql) allowed=(mysql:8.4 mysql:9.7) prefix=dm-my port_spec=3306/tcp ;;
 mariadb) allowed=(mariadb:10.11 mariadb:12.3) prefix=dm-my port_spec=3306/tcp ;;
+redis) allowed=(redis:7.0 redis:8.10) prefix=dm-redis port_spec=6379/tcp ;;
 *) allowed=() ;;
 esac
 if [[ -n "${CI:-}" || "${#allowed[@]}" == 0 || -n "${DATABASE_URL:-}${DB_URL:-}${DB_HOST:-}${DB_PORT:-}" ]]; then
-  echo 'Integration requires DB_DRIVER=postgres, mysql or mariadb, no external endpoint, and a non-CI session.' >&2
+  echo 'Integration requires DB_DRIVER=postgres, mysql, mariadb or redis, no external endpoint, and a non-CI session.' >&2
   exit 1
 fi
 images=()
@@ -97,6 +98,22 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=untrusted -keyout "$
 # The in-container client reads the synthetic admin password from an option
 # file in the private fixture directory, never from process arguments.
 printf '[client]\nuser=root\npassword=%s\nhost=127.0.0.1\nprotocol=TCP\n' "$(cat "$fixture_dir/admin-password")" >"$fixture_dir/client.cnf"
+if [[ "$DB_DRIVER" == redis ]]; then
+  # ACL files accept SHA-256 password hashes. Strip the password file newline.
+  python3 - "$fixture_dir" <<'PYTHON'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+def digest(file):
+    return hashlib.sha256((root / file).read_bytes().strip()).hexdigest()
+reader = (f"on #{digest('reader-password')} %R~view:* -@all "
+          "+hello +select +acl|whoami +acl|getuser +acl|cat +acl|dryrun "
+          "+scan +type +pttl +strlen +hlen +llen +scard +zcard +xlen "
+          "+getrange +hscan +lrange +sscan +zrange +xrange (+type ~*)")
+(root / 'redis.acl').write_text(
+    f"user default on #{digest('admin-password')} ~* &* +@all\n"
+    f"user reader {reader}\nuser unsafe {reader} (+set ~private:*)\n")
+PYTHON
+fi
 # start_fixture runs the owned server for one image with verified TLS enabled.
 start_fixture() {
   local image="$1" tls='mkdir -p /tmp/tls; cp /fixture/ca.crt /fixture/server.key /fixture/server.crt /tmp/tls/'
@@ -107,6 +124,12 @@ start_fixture() {
       --mount "type=bind,src=$fixture_dir,dst=/fixture,readonly" \
       -e POSTGRES_PASSWORD_FILE=/fixture/admin-password -e POSTGRES_DB=fixture -e PGDATA=/var/lib/postgresql/data \
       --entrypoint /bin/bash "$image" -c "$tls; chown -R postgres:postgres /tmp/tls; chmod 600 /tmp/tls/server.key; exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/tls/server.crt -c ssl_key_file=/tmp/tls/server.key -c log_statement=none -c shared_preload_libraries=pg_stat_statements" >/dev/null
+    ;;
+  redis)
+    docker run -d --name "$container_name" --label "$label" --network "$network_name" \
+      --publish 127.0.0.1::6379 --publish 127.0.0.1::6380 --mount "type=volume,src=$volume_name,dst=/data" \
+      --mount "type=bind,src=$fixture_dir,dst=/fixture,readonly" --entrypoint /bin/sh "$image" \
+      -ec "$tls; cp /fixture/redis.acl /tmp/tls/; chown -R redis:redis /tmp/tls; chmod 600 /tmp/tls/server.key; exec docker-entrypoint.sh redis-server --aclfile /tmp/tls/redis.acl --tls-port 6380 --tls-auth-clients no --tls-ca-cert-file /tmp/tls/ca.crt --tls-key-file /tmp/tls/server.key --tls-cert-file /tmp/tls/server.crt" >/dev/null
     ;;
   mysql)
     docker run -d --name "$container_name" --label "$label" --network "$network_name" \
@@ -126,6 +149,7 @@ start_fixture() {
 # temporary server that does not listen on TCP.
 fixture_ready() {
   case "$DB_DRIVER" in
+  redis) docker exec "$container_name" sh -ec 'export REDISCLI_AUTH="$(cat /fixture/admin-password)"; test "$(redis-cli ping)" = PONG' ;;
   postgres) docker exec "$container_name" pg_isready -h 127.0.0.1 -U postgres -d fixture ;;
   mysql) docker exec "$container_name" mysql --defaults-extra-file=/fixture/client.cnf -e 'SELECT 1' ;;
   mariadb) docker exec "$container_name" mariadb --defaults-extra-file=/fixture/client.cnf -e 'SELECT 1' ;;
@@ -167,6 +191,14 @@ PY
   if [[ "$DB_DRIVER" == postgres ]]; then
     DATA_MATE_PG_FIXTURE="$fixture_dir/manifest.json" GOPROXY=off GOSUMDB=off \
       go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestPostgresIntegration$' ./internal/database/postgres &
+  elif [[ "$DB_DRIVER" == redis ]]; then
+    (
+      export GOPROXY=off GOSUMDB=off
+      DATA_MATE_REDIS_FIXTURE="$fixture_dir/manifest.json" \
+        go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestRedisIntegration$' ./internal/database/redis
+      DATA_MATE_CLI_DIAGNOSTICS="$fixture_dir/manifest.json" \
+        go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestConnectionDiagnostics$' ./internal/cli
+    ) &
   else
     DATA_MATE_MYSQL_FIXTURE="$fixture_dir/manifest.json" GOPROXY=off GOSUMDB=off \
       go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestMySQLIntegration$' ./internal/database/mysql &

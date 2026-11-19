@@ -32,6 +32,8 @@ func liveDiagnostics(t *testing.T, path string) {
 	prefix, port, admin := "dm-pg-", "5432/tcp", "postgres"
 	if fixture.Driver == "mysql" || fixture.Driver == "mariadb" {
 		prefix, port, admin = "dm-my-", "3306/tcp", "root"
+	} else if fixture.Driver == "redis" {
+		prefix, port = "dm-redis-", "6379/tcp"
 	} else if fixture.Driver != "" && fixture.Driver != "postgres" {
 		t.Fatal("unknown fixture driver")
 	}
@@ -42,6 +44,18 @@ func liveDiagnostics(t *testing.T, path string) {
 	raw, err = exec.Command("docker", "port", fixture.Container, port).Output()
 	if err != nil || strings.TrimSpace(string(raw)) != "127.0.0.1:"+strconv.Itoa(fixture.Port) {
 		t.Fatal("diagnostic endpoint mismatch")
+	}
+	connectPort := strconv.Itoa(fixture.Port)
+	if fixture.Driver == "redis" {
+		// The fixture runs verified TLS on a separate loopback port.
+		raw, err = exec.Command("docker", "port", fixture.Container, "6380/tcp").Output()
+		endpoint := strings.TrimSpace(string(raw))
+		value, ok := strings.CutPrefix(endpoint, "127.0.0.1:")
+		n, parseErr := strconv.ParseUint(value, 10, 16)
+		if err != nil || !ok || parseErr != nil || n == 0 {
+			t.Fatal("invalid diagnostic TLS endpoint")
+		}
+		connectPort = strconv.FormatUint(n, 10)
 	}
 	postgres.SanitizeEnvironment()
 	root := privateRoot(t)
@@ -59,7 +73,9 @@ func liveDiagnostics(t *testing.T, path string) {
 		if alias == "bad-auth" {
 			secret = "synthetic-wrong-password"
 		}
-		if alias == "extra-grants" {
+		if alias == "extra-grants" && fixture.Driver == "redis" {
+			user = "unsafe" // Grants a write capability through an ACL selector.
+		} else if alias == "extra-grants" {
 			user = admin
 			raw, err = os.ReadFile(filepath.Join(fixture.Root, "admin-password"))
 			if err != nil {
@@ -69,11 +85,16 @@ func liveDiagnostics(t *testing.T, path string) {
 		}
 		if alias == "bad-tls" {
 			extra = []string{"--tls", "--tls-ca", filepath.Join(fixture.Root, "bad.crt")}
+		} else if fixture.Driver == "redis" {
+			extra = []string{"--tls", "--tls-ca", filepath.Join(fixture.Root, "ca.crt")}
 		}
-		args := []string{"add", "--alias", alias, "--host", "localhost", "--port", strconv.Itoa(fixture.Port), "--username", user, "--password-stdin", "--yes"}
-		if admin == "root" {
+		args := []string{"add", "--alias", alias, "--host", "localhost", "--port", connectPort, "--username", user, "--password-stdin", "--yes"}
+		switch fixture.Driver {
+		case "mysql", "mariadb":
 			args = append(args, "--driver", fixture.Driver)
-		} else {
+		case "redis":
+			args = append(args, "--driver", "redis", "--database", "1")
+		default:
 			args = append(args, "--database", "fixture")
 		}
 		command(t, root, keys, secret+"\n", 0, append(args, extra...)...)
@@ -113,17 +134,32 @@ func liveDiagnostics(t *testing.T, path string) {
 	if contracts.Validate("db-describe.output", []byte(out)) != nil || json.Unmarshal([]byte(out), &description) != nil || strings.Contains(out, password) {
 		t.Fatal("live description contract or redaction")
 	}
-	found := false
-	for _, s := range description.Schemas {
-		if s.Name == "hidden" {
-			found = true
-			if len(s.Tables) == 0 {
-				t.Fatal("readable catalog missing")
+	if fixture.Driver == "redis" {
+		if description.RedisKeys == nil || description.Database != "1" || strings.Contains(out, "private:secret") || strings.Contains(out, "view:wrongdatabase") {
+			t.Fatal("description returned keys outside the selected database or ACL")
+		}
+		found := false
+		for _, item := range description.RedisKeys.Keys {
+			if item.Key.Value == "view:hash" && item.Type == "hash" {
+				found = true
 			}
 		}
-	}
-	if !found {
-		t.Fatal("description omitted accessible schema")
+		if !found {
+			t.Fatal("description omitted readable Redis hash")
+		}
+	} else {
+		found := false
+		for _, s := range description.Schemas {
+			if s.Name == "hidden" {
+				found = true
+				if len(s.Tables) == 0 {
+					t.Fatal("readable catalog missing")
+				}
+			}
+		}
+		if !found {
+			t.Fatal("description omitted accessible schema")
+		}
 	}
 	for _, alias := range []string{"bad-auth", "bad-tls"} {
 		out, stderr := command(t, root, keys, "", 1, "describe", alias, "--json")

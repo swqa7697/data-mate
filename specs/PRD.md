@@ -12,6 +12,7 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Broad DB Supports: Supports all mainstream DB types, such as PG, MySQL, MongoDB, etc.
   - First Implementation: Add PG supports in the first version (min 16), and should be able to add more later without pain because of abstraction design
   - MySQL and MariaDB: Supported through the same driver abstraction (MySQL min 8.4, MariaDB min 10.11); a MySQL-family connection names a server account, and grants choose its reachable databases
+  - Redis: Standalone Redis 7.0+ connections select one logical database. Agents discover authorized keys, inspect key metadata, and read the six core value types through native key tools.
 - OS Supports: macOS 15+ (Apple Silicon) and Linux x86_64 (Windows, Intel macOS, Linux arm64 are unsupported)
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
@@ -36,7 +37,7 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
   - `test`: Run test suite (regression tests and unit tests)
   - `test-integration`: Run optional integration tests involving Docker containers
 - Test Suite: Regression tests and optional unit tests for logic checks and CI, plus an optional real integration tests against Docker based local DB instances (not run in CI)
-  - Configurable Test Image: Can test against any DB types or versions available as Docker images; test PG 16 and 18, MySQL 8.4 and 9.7, and MariaDB 10.11 and 12.3
+  - Configurable Test Image: Can test against any DB types or versions available as Docker images; test PG 16 and 18, MySQL 8.4 and 9.7, MariaDB 10.11 and 12.3, and Redis 7.0 and 8.10
 - Git ignored directories:
   - `.dev`: For binary and configs of development environment
   - `.misc`: Implementation plan, status tracking, test results, complex logs, and binary environments (if needed)
@@ -66,14 +67,14 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 Pretty and colored CLI experience. Scrathed commands design below.
 
 - DB - Interactive | preivew & confirm (Y/N)
-  - `db add`: Config "driver (postgres, mysql or mariadb), connection alias ("c-alias" below), host, port, DB name (PostgreSQL only), username, password" only -- all advanced options are disabled by default
+  - `db add`: Config "driver (postgres, mysql, mariadb or redis), connection alias ("c-alias" below), host, port, PostgreSQL database name or Redis database index, username, password" only -- all advanced options are disabled by default
   - `db add [add-on-options]`: Add optional flags to add connection with advanced options like SSL/TLS, SSH tunnel and proxy
   - `db edit [c-alias(optional)]`: Modify a DB connection
   - `db remove [c-alias(optional)]` / `db rm [c-alias(optional)]`: Remove a DB connection
   - `db import <csv-file>`: Add, skip or update multiple DB connections from a CSV file; secrets are optional in the file and missing ones are entered in the terminal
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections
-  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a DB connection
+  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a relational connection, or sample visible Redis keys and types
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
   - `db export <csv-file>`: Export all DB connections to a CSV file without secrets; a secret a connection does not use is marked explicitly as `<none>`
 - MCP - One shot

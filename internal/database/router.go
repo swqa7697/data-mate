@@ -34,6 +34,20 @@ func (r *Router) pick(name string) (Operations, error) {
 	return nil, Fail(contracts.ConfigInvalid, "unsupported database driver", false)
 }
 
+// capability rejects incompatible tools before a driver can acquire a connection.
+func capability[T any](r *Router, driver string) (T, error) {
+	var zero T
+	d, err := r.pick(driver)
+	if err != nil {
+		return zero, err
+	}
+	ops, ok := d.(T)
+	if !ok {
+		return zero, Fail(contracts.QueryUnsupported, "operation unavailable for this database driver", false)
+	}
+	return ops, nil
+}
+
 // ValidateProfile checks driver-specific nonsecret settings before vault access.
 func (r *Router) ValidateProfile(p config.Profile) error {
 	d, err := r.pick(p.Driver)
@@ -63,7 +77,7 @@ func (r *Router) Test(ctx context.Context, a Access) (Readiness, error) {
 
 // ListTables returns one bounded page of catalog-visible relations.
 func (r *Router) ListTables(ctx context.Context, a Access, req PageRequest) (TablePage, error) {
-	d, err := r.pick(a.Profile.Driver)
+	d, err := capability[RelationalOperations](r, a.Profile.Driver)
 	if err != nil {
 		return TablePage{}, err
 	}
@@ -72,7 +86,7 @@ func (r *Router) ListTables(ctx context.Context, a Access, req PageRequest) (Tab
 
 // ListObjects returns one bounded, driver-shaped page of catalog objects.
 func (r *Router) ListObjects(ctx context.Context, a Access, req ObjectPageRequest) (any, error) {
-	d, err := r.pick(a.Profile.Driver)
+	d, err := capability[RelationalOperations](r, a.Profile.Driver)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +95,7 @@ func (r *Router) ListObjects(ctx context.Context, a Access, req ObjectPageReques
 
 // DescribeObject returns a driver-shaped description of one catalog object.
 func (r *Router) DescribeObject(ctx context.Context, a Access, req ObjectRequest) (any, error) {
-	d, err := r.pick(a.Profile.Driver)
+	d, err := capability[RelationalOperations](r, a.Profile.Driver)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +104,7 @@ func (r *Router) DescribeObject(ctx context.Context, a Access, req ObjectRequest
 
 // DescribeTable returns a driver-shaped description of one relation.
 func (r *Router) DescribeTable(ctx context.Context, a Access, t config.Table) (any, error) {
-	d, err := r.pick(a.Profile.Driver)
+	d, err := capability[RelationalOperations](r, a.Profile.Driver)
 	if err != nil {
 		return nil, err
 	}
@@ -108,11 +122,38 @@ func (r *Router) DescribeDatabase(ctx context.Context, a Access) (DatabaseDescri
 
 // Query executes one guarded read statement.
 func (r *Router) Query(ctx context.Context, a Access, req QueryRequest) (QueryResult, error) {
-	d, err := r.pick(a.Profile.Driver)
+	d, err := capability[RelationalOperations](r, a.Profile.Driver)
 	if err != nil {
 		return QueryResult{}, err
 	}
 	return d.Query(ctx, a, req)
+}
+
+// ListKeys returns a page of readable keys on a key-oriented driver.
+func (r *Router) ListKeys(ctx context.Context, a Access, req KeyPageRequest) (KeyPage, error) {
+	d, err := capability[KeyOperations](r, a.Profile.Driver)
+	if err != nil {
+		return KeyPage{}, err
+	}
+	return d.ListKeys(ctx, a, req)
+}
+
+// DescribeKey inspects one key without reading its value.
+func (r *Router) DescribeKey(ctx context.Context, a Access, req KeyRequest) (KeyDescription, error) {
+	d, err := capability[KeyOperations](r, a.Profile.Driver)
+	if err != nil {
+		return KeyDescription{}, err
+	}
+	return d.DescribeKey(ctx, a, req)
+}
+
+// ReadKey returns a bounded page of native values.
+func (r *Router) ReadKey(ctx context.Context, a Access, req KeyReadRequest) (KeyReadPage, error) {
+	d, err := capability[KeyOperations](r, a.Profile.Driver)
+	if err != nil {
+		return KeyReadPage{}, err
+	}
+	return d.ReadKey(ctx, a, req)
 }
 
 // Invalidate retires credentials, transports and cursors after a profile change.

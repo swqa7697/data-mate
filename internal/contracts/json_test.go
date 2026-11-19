@@ -51,6 +51,9 @@ func TestToolInputsFailClosed(t *testing.T) {
 		"list_objects.input":     {`{"connection":"analytics","kind":"trigger"}`, `{"connection":"analytics","page_size":0}`},
 		"describe_object.input":  {`{"connection":"analytics","kind":"routine","schema":"app","name":"f"}`, `{"connection":"analytics","kind":"type","schema":"app","name":"t","identity_arguments":""}`},
 		"describe_table.input":   {`{"connection":"analytics","schema":"public"}`},
+		"list_keys.input":        {`{"connection":"analytics","command":"KEYS"}`, `{"connection":"analytics","page_size":1001}`},
+		"describe_key.input":     {`{"connection":"cache","key":{"value":"a","encoding":"hex"}}`},
+		"read_key.input":         {`{"connection":"cache","key":"a"}`, `{"connection":"cache","key":{"value":"a","encoding":"utf8"},"database":1}`},
 		"query.input":            {`{"connection":"analytics","sql":"select 1","timeout":99}`, `{"connection":"analytics","sql":"select 1","row_limit":0}`, `{"connection":"analytics","sql":"select $1","parameters":{}}`},
 	}
 	for name, inputs := range cases {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,9 +44,8 @@ type Profile struct {
 	Limits        *Limits    `json:"limits,omitempty"`
 }
 
-// Connection identifies one database endpoint and account. PostgreSQL profiles
-// name the one database they reach; MySQL and MariaDB profiles name none, since
-// their accounts reach every database their grants allow.
+// Connection identifies one endpoint and account. Database holds a PostgreSQL
+// database name or a canonical Redis logical database index.
 type Connection struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
@@ -54,7 +54,7 @@ type Connection struct {
 }
 
 // Drivers lists the supported database drivers in presentation order.
-var Drivers = []string{"postgres", "mysql", "mariadb"}
+var Drivers = []string{"postgres", "mysql", "mariadb", "redis"}
 
 // DefaultPort returns a driver's standard TCP port, or 0 for an unknown driver.
 func DefaultPort(driver string) int {
@@ -63,12 +63,23 @@ func DefaultPort(driver string) int {
 		return 5432
 	case "mysql", "mariadb":
 		return 3306
+	case "redis":
+		return 6379
 	}
 	return 0
 }
 
-// NamesDatabase reports whether a driver's profiles name a database.
-func NamesDatabase(driver string) bool { return driver == "postgres" }
+// NamesDatabase reports whether a profile selects a database by name or index.
+func NamesDatabase(driver string) bool { return driver == "postgres" || driver == "redis" }
+
+// RedisDatabaseIndex parses a nonnegative, canonical decimal Redis database index.
+func RedisDatabaseIndex(value string) (int, error) {
+	n, err := strconv.ParseUint(value, 10, 31)
+	if err != nil || strconv.FormatUint(n, 10) != value {
+		return 0, errors.New("database index for Redis must be a decimal integer from 0 to 2147483647 without leading zeros")
+	}
+	return int(n), nil
+}
 
 // Transport selects explicit, optional transport protection.
 type Transport struct {
@@ -179,6 +190,11 @@ func DecodeProfiles(r io.Reader) (Profiles, Revision, error) {
 	ids, aliases, refs := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for i := range p.Connections {
 		c := &p.Connections[i]
+		if c.Driver == "redis" {
+			if _, err := RedisDatabaseIndex(c.Connection.Database); err != nil {
+				return Profiles{}, "", err
+			}
+		}
 		c.ID = strings.ToLower(c.ID)
 		c.CredentialRef = strings.ToLower(c.CredentialRef)
 		if ids[c.ID] || aliases[c.Alias] || (c.CredentialRef != "" && refs[c.CredentialRef]) {
