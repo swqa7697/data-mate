@@ -56,8 +56,10 @@ func (s *session) Closed() <-chan struct{} { return s.wire.done }
 func (s *session) Close() {
 	if !s.wire.closed() {
 		s.wire.bound(2 * time.Second)
-		_, _ = guarded(s.wire, func() (struct{}, error) { return struct{}{}, s.conn.Close() })
 	}
+	// Even after aborting unread rows at the socket, close the client to
+	// release its context watcher and any buffered results.
+	_, _ = guarded(s.wire, func() (struct{}, error) { return struct{}{}, s.conn.Close() })
 	_ = s.wire.Close()
 }
 
@@ -167,26 +169,34 @@ func (r *rows) close() error {
 	return err
 }
 
-// all reads the result, enforcing a row bound when limit is nonnegative.
-func (r *rows) all(limit int) ([][]driver.Value, error) {
-	var out [][]driver.Value
+// each visits rows while their driver-owned byte slices are valid. Abandoning
+// an unread result closes the socket before the library can drain it.
+func (r *rows) each(visit func([]driver.Value) error) error {
 	for {
 		ok, err := r.next()
+		if err == nil && !ok {
+			return r.close()
+		}
+		if err == nil {
+			err = visit(r.dest)
+		}
 		if err != nil {
-			_ = r.close()
-			return nil, err
-		}
-		if !ok {
-			return out, r.close()
-		}
-		if len(out) == limit {
 			_ = r.s.wire.Close()
 			_ = r.close()
-			return nil, catalogLimit()
+			return err
 		}
-		// The driver owns byte slices only until the next call to Next.
-		row := make([]driver.Value, len(r.dest))
-		for i, v := range r.dest {
+	}
+}
+
+// all copies a small result with a known row limit.
+func (r *rows) all(limit int) ([][]driver.Value, error) {
+	var out [][]driver.Value
+	err := r.each(func(values []driver.Value) error {
+		if len(out) == limit {
+			return catalogLimit()
+		}
+		row := make([]driver.Value, len(values))
+		for i, v := range values {
 			if b, ok := v.([]byte); ok {
 				row[i] = string(b)
 			} else {
@@ -194,7 +204,9 @@ func (r *rows) all(limit int) ([][]driver.Value, error) {
 			}
 		}
 		out = append(out, row)
-	}
+		return nil
+	})
+	return out, err
 }
 
 // text converts a catalog value to a string; NULL becomes "" and false.

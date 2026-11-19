@@ -80,9 +80,9 @@ A PostgreSQL connection names one database. A MySQL or MariaDB connection names 
 
 ## Read-only accounts
 
-Data Mate checks the account's privileges when you save a connection, on every `db test`, and before a new connection pool is used. It rejects accounts that can write data, change definitions, manage accounts or roles, or write files. The server's own privileges decide what agents can see and query, so grant only what you intend to share.
+Data Mate checks the account's privileges when you save a connection, on every `db test`, and before a new connection pool is used. After 30 minutes, the next pooled operation must pass a fresh check. Data Mate rejects accounts that can write data, change definitions, manage accounts or roles, or write files. The server's own privileges decide what agents can see and query, so grant only what you intend to share.
 
-PostgreSQL:
+For PostgreSQL, the audit permits effective membership in `pg_read_all_data`, `pg_monitor`, `pg_read_all_settings`, `pg_read_all_stats`, `pg_stat_scan_tables`, and `pg_use_reserved_connections`. Other predefined roles, including `pg_signal_backend`, fail the audit. A typical reader needs only ordinary grants.
 
 ```sql
 CREATE ROLE analytics_reader LOGIN PASSWORD '...';

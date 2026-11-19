@@ -65,19 +65,27 @@ func (d *Driver) ListTables(ctx context.Context, a database.Access, req database
 		if err != nil {
 			return err
 		}
-		values, err := r.all(req.PageSize + 1)
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
+		err = r.each(func(v []driver.Value) error {
+			if len(out.Tables) == req.PageSize {
+				if out.NextCursor != nil {
+					return catalogLimit()
+				}
+				last := out.Tables[len(out.Tables)-1]
+				pos.Schema, pos.Name = last.Schema, last.Name
+				next := d.pools.Encode(pos)
+				out.NextCursor = &next
+				return nil
+			}
+			item := database.Table{Schema: str(v[0]), Name: str(v[1]), Kind: str(v[2])}
+			if err := budget.Add(item); err != nil {
+				return err
+			}
+			out.Tables = append(out.Tables, item)
+			return nil
+		})
 		if err != nil {
 			return err
-		}
-		for _, v := range values {
-			out.Tables = append(out.Tables, database.Table{Schema: str(v[0]), Name: str(v[1]), Kind: str(v[2])})
-		}
-		if len(out.Tables) > req.PageSize {
-			out.Tables = out.Tables[:req.PageSize]
-			last := out.Tables[len(out.Tables)-1]
-			pos.Schema, pos.Name = last.Schema, last.Name
-			next := d.pools.Encode(pos)
-			out.NextCursor = &next
 		}
 		return database.PayloadBound(out, a)
 	})
@@ -150,12 +158,12 @@ func (d *Driver) DescribeTable(ctx context.Context, a database.Access, name conf
 	return out, nil
 }
 
-func (d *Driver) catalogRows(ctx context.Context, s *session, query string, args ...any) ([][]driver.Value, error) {
+func (s *session) singleRow(ctx context.Context, query string, args ...any) ([][]driver.Value, error) {
 	r, err := s.query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	return r.all(-1)
+	return r.all(1)
 }
 
 var numericTypes = []string{"tinyint", "smallint", "mediumint", "int", "bigint", "decimal", "float", "double", "bit", "year"}
@@ -180,11 +188,11 @@ func (d *Driver) columnDefault(value *string, extra, dataType string) *string {
 }
 
 func (d *Driver) columns(ctx context.Context, s *session, name config.Table, out *Description, budget *database.MetadataBudget) error {
-	values, err := d.catalogRows(ctx, s, `SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,GENERATION_EXPRESSION,DATA_TYPE FROM information_schema.COLUMNS WHERE `+relationSQL+` ORDER BY ORDINAL_POSITION`, relationArgs(name)...)
+	r, err := s.query(ctx, `SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,GENERATION_EXPRESSION,DATA_TYPE FROM information_schema.COLUMNS WHERE `+relationSQL+` ORDER BY ORDINAL_POSITION`, relationArgs(name)...)
 	if err != nil {
 		return err
 	}
-	for _, v := range values {
+	return r.each(func(v []driver.Value) error {
 		extra := str(v[4])
 		lower := strings.ToLower(extra)
 		c := Column{Column: database.Column{Name: str(v[0]), Type: str(v[1]), Nullable: str(v[2]) == "YES"}, AutoIncrement: strings.Contains(lower, "auto_increment")}
@@ -194,15 +202,20 @@ func (d *Driver) columns(ctx context.Context, s *session, name config.Table, out
 			c.Default = d.columnDefault(optional(v[3]), lower, str(v[6]))
 		}
 		if i := strings.Index(lower, "on update "); i >= 0 {
+			// The timestamp token may include a precision, followed by
+			// space- or comma-separated column attributes.
 			update := extra[i+len("on update "):]
+			if end := strings.IndexAny(update, " ,\t\r\n"); end >= 0 {
+				update = update[:end]
+			}
 			c.OnUpdate = &update
 		}
-		if err = budget.Add(c); err != nil {
+		if err := budget.Add(c); err != nil {
 			return err
 		}
 		out.Columns = append(out.Columns, c)
-	}
-	return nil
+		return nil
+	})
 }
 
 func quoteList(names []string) string {
@@ -216,85 +229,112 @@ func quoteList(names []string) string {
 // keys reads primary, unique and foreign keys with their column order.
 func (d *Driver) keys(ctx context.Context, s *session, name config.Table, out *Description, budget *database.MetadataBudget) error {
 	args := relationArgs(name)
-	values, err := d.catalogRows(ctx, s, `SELECT tc.CONSTRAINT_NAME,tc.CONSTRAINT_TYPE,k.COLUMN_NAME,k.REFERENCED_TABLE_SCHEMA,k.REFERENCED_TABLE_NAME,k.REFERENCED_COLUMN_NAME,rc.UPDATE_RULE,rc.DELETE_RULE
+	r, err := s.query(ctx, `SELECT tc.CONSTRAINT_NAME,tc.CONSTRAINT_TYPE,k.COLUMN_NAME,k.REFERENCED_TABLE_SCHEMA,k.REFERENCED_TABLE_NAME,k.REFERENCED_COLUMN_NAME,rc.UPDATE_RULE,rc.DELETE_RULE
  FROM information_schema.TABLE_CONSTRAINTS tc
- JOIN information_schema.KEY_COLUMN_USAGE k ON k.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND k.CONSTRAINT_NAME=tc.CONSTRAINT_NAME AND k.TABLE_SCHEMA=tc.TABLE_SCHEMA AND k.TABLE_NAME=tc.TABLE_NAME
- LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc ON rc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND rc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME AND rc.TABLE_NAME=tc.TABLE_NAME
+ JOIN information_schema.KEY_COLUMN_USAGE k ON k.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND k.CONSTRAINT_NAME=tc.CONSTRAINT_NAME
+ AND CAST(k.TABLE_SCHEMA AS BINARY)=CAST(tc.TABLE_SCHEMA AS BINARY) AND CAST(k.TABLE_NAME AS BINARY)=CAST(tc.TABLE_NAME AS BINARY)
+ LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc ON CAST(rc.CONSTRAINT_SCHEMA AS BINARY)=CAST(tc.CONSTRAINT_SCHEMA AS BINARY) AND rc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME
+ AND CAST(rc.TABLE_NAME AS BINARY)=CAST(tc.TABLE_NAME AS BINARY)
  WHERE tc.TABLE_SCHEMA=? AND tc.TABLE_NAME=? AND CAST(tc.TABLE_SCHEMA AS BINARY)=CAST(? AS BINARY) AND CAST(tc.TABLE_NAME AS BINARY)=CAST(? AS BINARY)
  AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
  ORDER BY tc.CONSTRAINT_TYPE,CAST(tc.CONSTRAINT_NAME AS BINARY),k.ORDINAL_POSITION`, args...)
 	if err != nil {
 		return err
 	}
-	for start := 0; start < len(values); {
-		end := start + 1
-		for end < len(values) && str(values[end][0]) == str(values[start][0]) && str(values[end][1]) == str(values[start][1]) {
-			end++
-		}
-		group := values[start:end]
-		start = end
-		constraint, kind := str(group[0][0]), str(group[0][1])
-		var columns, targets []string
-		for _, v := range group {
-			columns = append(columns, str(v[2]))
-			targets = append(targets, str(v[5]))
+	var constraint, kind, update, del string
+	var target config.Table
+	var columns, targets []string
+	finish := func() error {
+		if len(columns) == 0 {
+			return nil
 		}
 		var item any
 		var def database.Definition
 		switch kind {
-		case "PRIMARY KEY":
-			key := database.Key{Kind: "primary", Columns: columns}
+		case "PRIMARY KEY", "UNIQUE":
+			keyKind := "unique"
+			if kind == "PRIMARY KEY" {
+				keyKind = "primary"
+			}
+			key := database.Key{Kind: keyKind, Columns: columns}
 			out.Keys, item = append(out.Keys, key), key
-			def = database.Definition{Name: constraint, Kind: "primary", Definition: "PRIMARY KEY " + quoteList(columns)}
-		case "UNIQUE":
-			key := database.Key{Kind: "unique", Columns: columns}
-			out.Keys, item = append(out.Keys, key), key
-			def = database.Definition{Name: constraint, Kind: "unique", Definition: "UNIQUE " + quoteList(columns)}
+			def = database.Definition{Name: constraint, Kind: keyKind, Definition: kind + " " + quoteList(columns)}
 		default:
-			target := config.Table{Schema: str(group[0][3]), Name: str(group[0][4])}
 			rel := database.Relationship{Columns: columns, Target: target, TargetColumns: targets}
 			out.Relationships, item = append(out.Relationships, rel), rel
 			clause := "FOREIGN KEY " + quoteList(columns) + " REFERENCES " + sqlguard.Quote(target.Schema) + "." + sqlguard.Quote(target.Name) + " " + quoteList(targets)
-			if rule := str(group[0][6]); rule != "" {
-				clause += " ON UPDATE " + rule
+			if update != "" {
+				clause += " ON UPDATE " + update
 			}
-			if rule := str(group[0][7]); rule != "" {
-				clause += " ON DELETE " + rule
+			if del != "" {
+				clause += " ON DELETE " + del
 			}
 			def = database.Definition{Name: constraint, Kind: "foreign", Definition: clause}
 		}
-		if err = budget.Add(item); err != nil {
+		if err := budget.Add(item); err != nil {
 			return err
 		}
-		if err = budget.Add(def); err != nil {
+		if err := budget.Add(def); err != nil {
 			return err
 		}
 		out.Constraints = append(out.Constraints, def)
+		return nil
 	}
-	return nil
+	// Bound the current constraint as each column arrives. On completion
+	// charge its exact output to the cumulative budget.
+	partsBudget := *budget
+	err = r.each(func(v []driver.Value) error {
+		if c, k := str(v[0]), str(v[1]); constraint != c || kind != k {
+			if err := finish(); err != nil {
+				return err
+			}
+			partsBudget = *budget
+			constraint, kind = c, k
+			target = config.Table{Schema: str(v[3]), Name: str(v[4])}
+			update, del = str(v[6]), str(v[7])
+			columns, targets = nil, nil
+		}
+		col := str(v[2])
+		if err := partsBudget.Add(col); err != nil {
+			return err
+		}
+		columns = append(columns, col)
+		if kind == "FOREIGN KEY" {
+			ref := str(v[5])
+			if err := partsBudget.Add(ref); err != nil {
+				return err
+			}
+			targets = append(targets, ref)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return finish()
 }
 
 // checks reads CHECK constraints. MariaDB names them per table, MySQL per schema.
 func (d *Driver) checks(ctx context.Context, s *session, name config.Table, out *Description, budget *database.MetadataBudget) error {
 	join := ""
 	if d.flavor == MariaDB {
-		join = " AND cc.TABLE_NAME=tc.TABLE_NAME"
+		join = " AND CAST(cc.TABLE_NAME AS BINARY)=CAST(tc.TABLE_NAME AS BINARY)"
 	}
-	values, err := d.catalogRows(ctx, s, `SELECT tc.CONSTRAINT_NAME,cc.CHECK_CLAUSE FROM information_schema.TABLE_CONSTRAINTS tc
- JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME`+join+`
+	r, err := s.query(ctx, `SELECT tc.CONSTRAINT_NAME,cc.CHECK_CLAUSE FROM information_schema.TABLE_CONSTRAINTS tc
+ JOIN information_schema.CHECK_CONSTRAINTS cc ON CAST(cc.CONSTRAINT_SCHEMA AS BINARY)=CAST(tc.CONSTRAINT_SCHEMA AS BINARY) AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME`+join+`
  WHERE tc.TABLE_SCHEMA=? AND tc.TABLE_NAME=? AND CAST(tc.TABLE_SCHEMA AS BINARY)=CAST(? AS BINARY) AND CAST(tc.TABLE_NAME AS BINARY)=CAST(? AS BINARY)
  AND tc.CONSTRAINT_TYPE='CHECK' ORDER BY CAST(tc.CONSTRAINT_NAME AS BINARY)`, relationArgs(name)...)
 	if err != nil {
 		return err
 	}
-	for _, v := range values {
+	return r.each(func(v []driver.Value) error {
 		def := database.Definition{Name: str(v[0]), Kind: "check", Definition: "CHECK (" + str(v[1]) + ")"}
-		if err = budget.Add(def); err != nil {
+		if err := budget.Add(def); err != nil {
 			return err
 		}
 		out.Constraints = append(out.Constraints, def)
-	}
-	return nil
+		return nil
+	})
 }
 
 // indexes reads index parts in order; MySQL also reports functional parts.
@@ -303,52 +343,66 @@ func (d *Driver) indexes(ctx context.Context, s *session, name config.Table, out
 	if d.flavor == MariaDB {
 		expression = "NULL"
 	}
-	values, err := d.catalogRows(ctx, s, `SELECT INDEX_NAME,NON_UNIQUE,INDEX_TYPE,COLUMN_NAME,SUB_PART,COLLATION,`+expression+` FROM information_schema.STATISTICS WHERE `+relationSQL+` ORDER BY CAST(INDEX_NAME AS BINARY),SEQ_IN_INDEX`, relationArgs(name)...)
+	r, err := s.query(ctx, `SELECT INDEX_NAME,NON_UNIQUE,INDEX_TYPE,COLUMN_NAME,SUB_PART,COLLATION,`+expression+` FROM information_schema.STATISTICS WHERE `+relationSQL+` ORDER BY CAST(INDEX_NAME AS BINARY),SEQ_IN_INDEX`, relationArgs(name)...)
 	if err != nil {
 		return err
 	}
-	for start := 0; start < len(values); {
-		end := start + 1
-		for end < len(values) && str(values[end][0]) == str(values[start][0]) {
-			end++
-		}
-		group := values[start:end]
-		start = end
-		index, kind := str(group[0][0]), strings.ToUpper(str(group[0][2]))
-		var parts []string
-		for _, v := range group {
-			part := ""
-			if column, ok := text(v[3]); ok {
-				part = sqlguard.Quote(column)
-				if size, ok := text(v[4]); ok {
-					part += "(" + size + ")"
-				}
-			} else {
-				part = "(" + str(v[6]) + ")"
-			}
-			if str(v[5]) == "D" {
-				part += " DESC"
-			}
-			parts = append(parts, part)
-		}
-		prefix := "KEY " + sqlguard.Quote(index)
-		switch {
-		case index == "PRIMARY":
-			prefix = "PRIMARY KEY"
-		case kind == "FULLTEXT" || kind == "SPATIAL":
-			prefix = kind + " KEY " + sqlguard.Quote(index)
-		case str(group[0][1]) == "0":
-			prefix = "UNIQUE KEY " + sqlguard.Quote(index)
+	var index, kind, prefix string
+	var parts []string
+	finish := func() error {
+		if len(parts) == 0 {
+			return nil
 		}
 		clause := prefix + " (" + strings.Join(parts, ",") + ")"
 		if kind == "BTREE" || kind == "HASH" {
 			clause += " USING " + kind
 		}
 		def := database.Definition{Name: index, Kind: strings.ToLower(kind), Definition: clause}
-		if err = budget.Add(def); err != nil {
+		if err := budget.Add(def); err != nil {
 			return err
 		}
 		out.Indexes = append(out.Indexes, def)
+		return nil
 	}
-	return nil
+	partsBudget := *budget
+	err = r.each(func(v []driver.Value) error {
+		if n := str(v[0]); index != n {
+			if err := finish(); err != nil {
+				return err
+			}
+			partsBudget = *budget
+			index, kind = n, strings.ToUpper(str(v[2]))
+			prefix = "KEY " + sqlguard.Quote(index)
+			switch {
+			case index == "PRIMARY":
+				prefix = "PRIMARY KEY"
+			case kind == "FULLTEXT" || kind == "SPATIAL":
+				prefix = kind + " KEY " + sqlguard.Quote(index)
+			case str(v[1]) == "0":
+				prefix = "UNIQUE KEY " + sqlguard.Quote(index)
+			}
+			parts = nil
+		}
+		var part string
+		if column, ok := text(v[3]); ok {
+			part = sqlguard.Quote(column)
+			if size, ok := text(v[4]); ok {
+				part += "(" + size + ")"
+			}
+		} else {
+			part = "(" + str(v[6]) + ")"
+		}
+		if str(v[5]) == "D" {
+			part += " DESC"
+		}
+		if err := partsBudget.Add(part); err != nil {
+			return err
+		}
+		parts = append(parts, part)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return finish()
 }

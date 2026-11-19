@@ -20,7 +20,7 @@ func readDefinitions(ctx context.Context, tx pgx.Tx, budget *database.MetadataBu
 			return nil, err
 		}
 		if err = budget.Add(v); err != nil {
-			return nil, err
+			return nil, abortCatalogRead(rows, err)
 		}
 		out = append(out, v)
 	}
@@ -65,7 +65,7 @@ func tableTriggers(ctx context.Context, tx pgx.Tx, oid uint32, out *Description,
 			return err
 		}
 		if err = budget.Add(v); err != nil {
-			return err
+			return abortCatalogRead(rows, err)
 		}
 		out.Triggers = append(out.Triggers, v)
 	}
@@ -88,7 +88,7 @@ func tablePolicies(ctx context.Context, tx pgx.Tx, oid uint32, out *Description,
 			return err
 		}
 		if err = budget.Add(v); err != nil {
-			return err
+			return abortCatalogRead(rows, err)
 		}
 		out.Policies = append(out.Policies, v)
 	}

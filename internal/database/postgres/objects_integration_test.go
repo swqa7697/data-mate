@@ -163,6 +163,9 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	if desc.Columns[0].Default == nil || desc.Columns[2].Generated == nil || len(desc.Indexes) != 1 || len(desc.Constraints) == 0 || len(desc.Triggers) != 1 || len(desc.Policies) != 1 || !desc.RowSecurity {
 		t.Fatal("table definition metadata", desc)
 	}
+	if !desc.Columns[0].Nullable || desc.Columns[1].Nullable {
+		t.Fatalf("expected nullable id and NOT NULL domain label, got %+v", desc.Columns)
+	}
 	raw, _ := json.Marshal(desc)
 	if contracts.Validate("describe_table.output", raw) != nil {
 		t.Fatalf("table output contract: %s", raw)

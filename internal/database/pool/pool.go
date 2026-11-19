@@ -20,6 +20,7 @@ import (
 
 const (
 	defaultIdleTTL           = 5 * time.Minute
+	approvalTTL              = 30 * time.Minute
 	maxConnectionsPerProfile = 8
 	maxPools                 = 16
 )
@@ -43,17 +44,17 @@ type Options struct {
 type admission struct{ active, waiting chan struct{} }
 
 type pool struct {
-	fingerprint string
-	slots       chan struct{}
-	idle        []Conn
-	users       int
-	ctx         context.Context
-	cancel      context.CancelFunc
-	timer       *time.Timer
-	live        map[Conn]bool
-	approved    bool
-	generation  uint64
-	validation  *validation
+	fingerprint   string
+	slots         chan struct{}
+	idle          []Conn
+	users         int
+	ctx           context.Context
+	cancel        context.CancelFunc
+	timer         *time.Timer
+	live          map[Conn]bool
+	approvedUntil time.Time
+	generation    uint64
+	validation    *validation
 }
 
 type validation struct {
@@ -70,8 +71,8 @@ func (p *pool) forgetClosed() {
 		default:
 		}
 	}
-	if len(p.live) == 0 && p.approved {
-		p.approved = false
+	if len(p.live) == 0 && !p.approvedUntil.IsZero() {
+		p.approvedUntil = time.Time{}
 		p.generation++
 	}
 }
@@ -153,7 +154,7 @@ func (r *Registry) retireLocked(id string) *pool {
 		return nil
 	}
 	delete(r.pools, id)
-	p.approved = false
+	p.approvedUntil = time.Time{}
 	p.generation++
 	p.cancel()
 	if p.timer != nil {
@@ -223,7 +224,7 @@ func (r *Registry) Stats(id string) Stats {
 	if p == nil {
 		return Stats{}
 	}
-	return Stats{Present: true, Users: p.users, Slots: len(p.slots), Idle: len(p.idle), Live: len(p.live), Approved: p.approved, Validating: p.validation != nil}
+	return Stats{Present: true, Users: p.users, Slots: len(p.slots), Idle: len(p.idle), Live: len(p.live), Approved: time.Now().Before(p.approvedUntil), Validating: p.validation != nil}
 }
 
 // Len reports the number of retained pools.
@@ -249,7 +250,8 @@ func (r *Registry) fingerprint(a database.Access, rev config.Revision) string {
 
 // Checkout acquires an approved connection for one operation. It reuses an idle
 // connection of the profile's live pool or opens one, and audits a pool's first
-// physical connection; concurrent openers share that validation. The returned
+// physical connection. The first checkout after approval expires refreshes the
+// audit. Concurrent checkouts share that validation. The returned
 // context is canceled when the pool retires. The caller must call release
 // exactly once, after its cleanup, passing whether the connection may be reused.
 func Checkout[C Conn](ctx context.Context, r *Registry, a database.Access, rev config.Revision, open func(context.Context) (C, error), approve func(context.Context, C) error) (C, context.Context, func(healthy bool), error) {
@@ -387,7 +389,7 @@ func approvePool[C Conn](ctx context.Context, r *Registry, p *pool, id string, c
 		p.live = make(map[Conn]bool)
 	}
 	p.live[c] = true
-	if p.approved {
+	if time.Now().Before(p.approvedUntil) {
 		r.mu.Unlock()
 		return nil
 	}
@@ -402,6 +404,7 @@ func approvePool[C Conn](ctx context.Context, r *Registry, p *pool, id string, c
 	}
 	pending := &validation{done: make(chan struct{})}
 	p.validation = pending
+	p.approvedUntil = time.Time{}
 	generation := p.generation
 	r.mu.Unlock()
 	err := approve(ctx, c)
@@ -410,7 +413,9 @@ func approvePool[C Conn](ctx context.Context, r *Registry, p *pool, id string, c
 	if err == nil && (r.closed || r.pools[id] != p || p.ctx.Err() != nil || ctx.Err() != nil || generation != p.generation || !c.Reusable()) {
 		err = database.Fail(contracts.Cancelled, "account validation was cancelled", false)
 	}
-	p.approved = err == nil
+	if err == nil {
+		p.approvedUntil = time.Now().Add(approvalTTL)
+	}
 	pending.err = err
 	p.validation = nil
 	close(pending.done)

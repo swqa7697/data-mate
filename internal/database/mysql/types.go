@@ -44,7 +44,7 @@ type ObjectDescription struct {
 	Sequence *Sequence `json:"sequence,omitempty"`
 }
 
-// Parameter is one routine parameter; Mode is set for procedures only.
+// Parameter is one routine parameter; Mode is null for ordinary function inputs.
 type Parameter struct {
 	Name string  `json:"name"`
 	Mode *string `json:"mode"`

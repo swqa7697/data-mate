@@ -2,9 +2,9 @@ package mysql
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql/driver"
+	"strings"
 
-	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
@@ -13,7 +13,7 @@ import (
 const describeSQL = `SELECT s.SCHEMA_NAME,o.name,o.kind,o.tbl FROM information_schema.SCHEMATA s LEFT JOIN (
  SELECT TABLE_SCHEMA AS sch,TABLE_NAME AS name,TABLE_TYPE AS kind,NULL AS tbl FROM information_schema.TABLES
  WHERE TABLE_TYPE IN ('BASE TABLE','VIEW','SYSTEM VERSIONED','SEQUENCE')
- UNION ALL SELECT DISTINCT TABLE_SCHEMA,INDEX_NAME,'INDEX',TABLE_NAME FROM information_schema.STATISTICS
+ UNION ALL SELECT DISTINCT CAST(TABLE_SCHEMA AS BINARY),CAST(INDEX_NAME AS BINARY),'INDEX',CAST(TABLE_NAME AS BINARY) FROM information_schema.STATISTICS
  UNION ALL SELECT ROUTINE_SCHEMA,ROUTINE_NAME,'FUNCTION',NULL FROM information_schema.ROUTINES WHERE ROUTINE_TYPE='FUNCTION'
  ) o ON CAST(o.sch AS BINARY)=CAST(s.SCHEMA_NAME AS BINARY)
  WHERE s.SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys')
@@ -35,45 +35,23 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 		if err != nil {
 			return err
 		}
-		values, err := r.all(-1)
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
+		err = r.each(func(v []driver.Value) error {
+			kind := str(v[2])
+			switch kind {
+			case "SEQUENCE", "INDEX", "FUNCTION", "VIEW":
+				kind = strings.ToLower(kind)
+			case "SYSTEM VERSIONED":
+				kind = "system_versioned_table"
+			case "BASE TABLE":
+				kind = "table"
+			}
+			return out.AddCatalogRow(&budget, str(v[0]), kind, str(v[1]), str(v[3]))
+		})
 		if err != nil {
 			return err
 		}
-		for _, v := range values {
-			schema := str(v[0])
-			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
-				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.IndexName{}, Functions: []database.CatalogName{}})
-			}
-			if name, ok := text(v[1]); ok {
-				i := len(out.Schemas) - 1
-				switch str(v[2]) {
-				case "SEQUENCE":
-					out.Schemas[i].Sequences = append(out.Schemas[i].Sequences, database.CatalogName{Name: name})
-				case "INDEX":
-					out.Schemas[i].Indexes = append(out.Schemas[i].Indexes, database.IndexName{Name: name, Table: str(v[3])})
-				case "FUNCTION":
-					out.Schemas[i].Functions = append(out.Schemas[i].Functions, database.CatalogName{Name: name})
-				case "VIEW":
-					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: name, Kind: "view"})
-				case "SYSTEM VERSIONED":
-					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: name, Kind: "system_versioned_table"})
-				default:
-					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: name, Kind: "table"})
-				}
-			}
-		}
-		// This CLI result has no duplicated MCP compatibility representation.
-		if a.Profile.Limits.MaxResultBytes == 0 {
-			return nil
-		}
-		encoded, err := json.Marshal(out)
-		if err != nil {
-			return err
-		}
-		if len(encoded) > a.Profile.Limits.MaxResultBytes {
-			return database.Fail(contracts.ResourceLimit, "database description exceeds profile result-byte limit", false)
-		}
-		return nil
+		return out.CheckSize(budget.Limit)
 	})
 	if err != nil {
 		return database.DatabaseDescription{}, err

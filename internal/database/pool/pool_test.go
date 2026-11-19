@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/swqa7697/data-mate/internal/config"
@@ -263,6 +264,41 @@ func TestPoolLifecycle(t *testing.T) {
 	r.Close()
 	_, _, _, err = checkout(t.Context(), a)
 	requireCode(t, err, contracts.ServiceUnavailable)
+
+	// Keep one operation active across expiry, so idle eviction cannot cause
+	// the recheck. A privilege change must block new work until a fresh audit passes.
+	synctest.Test(t, func(t *testing.T) {
+		busy := registry(t, Options{})
+		acquire := func() (context.Context, func(bool), error) {
+			_, ctx, release, err := Checkout(t.Context(), busy, a, "revision", open, approve)
+			return ctx, release, err
+		}
+		active, finish, err := acquire()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer finish(true)
+		auditErr.Store(&denied)
+		defer auditErr.Store(nil)
+		time.Sleep(approvalTTL - time.Second)
+		_, release, err := acquire()
+		if err != nil {
+			t.Fatalf("live pool lost approval before expiry: %v", err)
+		}
+		release(true)
+		time.Sleep(time.Second)
+		_, _, err = acquire()
+		requireCode(t, err, contracts.ReadOnlyViolation)
+		if active.Err() != nil {
+			t.Fatal("approval expiry cancelled an active operation")
+		}
+		auditErr.Store(nil)
+		_, release, err = acquire()
+		if err != nil {
+			t.Fatalf("failed to refresh pool approval: %v", err)
+		}
+		release(true)
+	})
 
 	// A pool without users retires after its idle TTL.
 	short := registry(t, Options{IdleTTL: 10 * time.Millisecond})

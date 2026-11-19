@@ -174,8 +174,17 @@ func catalogAcceptance(t *testing.T, d *Driver, a database.Access, password stri
 	}
 	sql("DROP TYPE describe_bound1.extra")
 	bounded.Limits.MaxResultBytes = 1024
-	_, err = d.DescribeDatabase(t.Context(), database.NewAccess(bounded, password))
+	limited := database.NewAccess(bounded, password)
+	result, err = d.DescribeDatabase(t.Context(), limited)
 	requireCode(t, err, contracts.ResourceLimit)
+	if len(result.Schemas) != 0 || d.pools.Stats(bounded.ID).Live != 0 {
+		t.Fatal("oversized description retained schemas or a connection with unread rows")
+	}
+	page, err := d.ListTables(t.Context(), limited, database.PageRequest{Schema: "pg_catalog", PageSize: 1000})
+	requireCode(t, err, contracts.ResourceLimit)
+	if len(page.Tables) != 0 || page.NextCursor != nil || d.pools.Stats(bounded.ID).Live != 0 {
+		t.Fatal("oversized page retained tables, a cursor or a connection with unread rows")
+	}
 	cleanupBounds()
 	sql("ALTER EXTENSION hstore DROP TYPE picker.status")
 	sql("DROP SEQUENCE picker.shared,picker.items_id_seq; DROP TYPE picker.priority,picker.status")

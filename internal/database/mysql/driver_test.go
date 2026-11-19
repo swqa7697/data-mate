@@ -104,6 +104,26 @@ func TestConnectionBoundary(t *testing.T) {
 	if out, err := cmd.Output(); err != nil || stderr.Len() != 0 {
 		t.Fatalf("receive budget child: %v %s; stderr: %q", err, out, stderr.String())
 	}
+	// A late server error distinguishes streaming byte enforcement from a
+	// collector that reads the entire catalog before it checks the limit.
+	ready := readyResponses("8.4.6", "1")
+	catalog := newFakeServer(t, "8.4.6", func(query string) ([]string, [][]string, uint16) {
+		if query == describeSQL {
+			return []string{"schema", "name", "kind", "table"}, [][]string{{"app", "items", "BASE TABLE", ""}}, 1064
+		}
+		return ready(query)
+	})
+	go catalog.serve()
+	capped := profile(MySQL)
+	capped.Connection.Host, capped.Connection.Port = "127.0.0.1", catalog.port()
+	limits := config.DefaultLimits()
+	limits.MaxResultBytes = 1
+	capped.Limits = &limits
+	_, err := driverWith(t, MySQL).DescribeDatabase(t.Context(), database.NewAccess(capped, ""))
+	requireCode(t, err, contracts.ResourceLimit)
+	if err := <-catalog.done; err != nil {
+		t.Fatal(err)
+	}
 	// Invalid settings and non-read statements fail before any dial.
 	d := driverWith(t, MySQL)
 	p := profile(MySQL)
@@ -125,6 +145,6 @@ func TestConnectionBoundary(t *testing.T) {
 	}()); err != nil {
 		t.Fatal("MariaDB accepts 80-character usernames", err)
 	}
-	_, err := d.Query(t.Context(), database.NewAccess(p, ""), database.QueryRequest{SQL: "DELETE FROM app.items"})
+	_, err = d.Query(t.Context(), database.NewAccess(p, ""), database.QueryRequest{SQL: "DELETE FROM app.items"})
 	requireCode(t, err, contracts.ReadOnlyViolation)
 }

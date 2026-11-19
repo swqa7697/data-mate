@@ -144,10 +144,12 @@ func (s *fakeServer) answer(conn net.Conn, query string) error {
 	if s.oversized > 0 {
 		columns, rows, failure, s.oversized = []string{"v"}, [][]string{{strings.Repeat("x", s.oversized)}}, 0, 0
 	}
+	var failurePacket []byte
 	if failure != 0 {
-		payload := []byte{0xff, byte(failure), byte(failure >> 8), '#'}
-		payload = append(payload, "42000synthetic failure"...)
-		return writePacket(conn, 1, payload)
+		failurePacket = append([]byte{0xff, byte(failure), byte(failure >> 8), '#'}, "42000synthetic failure"...)
+		if columns == nil {
+			return writePacket(conn, 1, failurePacket)
+		}
 	}
 	if columns == nil {
 		return writePacket(conn, 1, []byte{0, 0, 0, 2, 0, 0, 0})
@@ -175,7 +177,11 @@ func (s *fakeServer) answer(conn net.Conn, query string) error {
 		}
 		next(payload)
 	}
-	next([]byte{0xfe, 0, 0, 2, 0})
+	if failure != 0 {
+		next(failurePacket)
+	} else {
+		next([]byte{0xfe, 0, 0, 2, 0})
+	}
 	_, err := conn.Write(out.Bytes())
 	return err
 }

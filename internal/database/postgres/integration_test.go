@@ -438,6 +438,7 @@ func accountAcceptance(t *testing.T, d *Driver, a database.Access, version int, 
 		{"GRANT pg_write_all_data TO reader", "REVOKE pg_write_all_data FROM reader"},
 		{"GRANT pg_write_server_files TO reader", "REVOKE pg_write_server_files FROM reader"},
 		{"GRANT pg_execute_server_program TO reader", "REVOKE pg_execute_server_program FROM reader"},
+		{"GRANT pg_signal_backend TO reader", "REVOKE pg_signal_backend FROM reader"},
 		// SET followed by INHERIT can expose a capability unavailable to the login.
 		{"GRANT pg_write_server_files TO bridge WITH INHERIT TRUE, SET FALSE; GRANT bridge TO reader WITH INHERIT FALSE, SET TRUE", "REVOKE bridge FROM reader; REVOKE pg_write_server_files FROM bridge"},
 		{"GRANT bridge TO reader WITH ADMIN TRUE, INHERIT FALSE, SET FALSE", "REVOKE bridge FROM reader"},
@@ -456,10 +457,11 @@ func accountAcceptance(t *testing.T, d *Driver, a database.Access, version int, 
 			t.Fatalf("account case %d: %v", i, err)
 		}
 	}
-	// A membership that cannot be inherited or assumed conveys no write capability.
-	sql("GRANT writer TO reader WITH INHERIT FALSE, SET FALSE; GRANT TEMP ON DATABASE fixture TO reader; CREATE TEMP TABLE account_temp(id int); ALTER TABLE account_temp OWNER TO reader")
+	// Read and monitoring roles are permitted. A membership that cannot be
+	// inherited or assumed conveys no write capability.
+	sql("GRANT pg_read_all_data, pg_monitor, pg_use_reserved_connections TO reader; GRANT writer TO reader WITH INHERIT FALSE, SET FALSE; GRANT TEMP ON DATABASE fixture TO reader; CREATE TEMP TABLE account_temp(id int); ALTER TABLE account_temp OWNER TO reader")
 	_, err := d.Test(t.Context(), a)
-	sql("REVOKE writer FROM reader; DROP TABLE account_temp")
+	sql("REVOKE pg_read_all_data, pg_monitor, pg_use_reserved_connections, writer FROM reader; DROP TABLE account_temp")
 	if err != nil {
 		t.Fatal("read-only account with TEMP/unusable membership", err)
 	}

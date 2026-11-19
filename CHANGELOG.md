@@ -4,12 +4,19 @@
 
 ### Added
 
-- Add MySQL 8.4+ and MariaDB 10.11+ connections through the `mysql` and `mariadb` drivers, with the same direct, TLS, SSH and SOCKS5 routes, encrypted credentials, staged `db test` diagnostics, `db describe` and MCP tools as PostgreSQL. A MySQL-family connection names a server account and no database: grants choose the reachable databases, which appear as schemas, and queries name tables as `database.table`. Accounts are audited for read-only grants across every role they can activate; sessions run in pinned, verified read-only transactions; cancellation stops server-side work; and results keep exact 64-bit, decimal and binary values.
+- Add MySQL 8.4+ and MariaDB 10.11+ connections through the `mysql` and `mariadb` drivers, with the same direct, TLS, SSH and SOCKS5 routes, encrypted credentials, staged `db test` diagnostics, `db describe` and MCP tools as PostgreSQL. A MySQL-family connection names a server account and no database: grants choose the reachable databases, which appear as schemas, and queries name tables as `database.table`. Accounts are audited for read-only grants across every role they can activate; sessions run in pinned, verified read-only transactions; cancellation stops server-side work; and results keep exact 64-bit, decimal and binary values. Catalog descriptions distinguish indexes on tables whose names differ only by case, report MariaDB function output parameters, and return the `ON UPDATE` timestamp expression for invisible columns.
 - Default the connection port to the chosen driver's standard port and validate the driver as soon as it is entered.
 
 ### Changed
 
-- Report the connection's `driver` in `list_tables`, `describe_table`, `list_objects`, `describe_object` and `db describe` results, and shape metadata for each database: PostgreSQL results are otherwise unchanged, while MySQL and MariaDB results use their own object kinds and table attributes. Identifier names may now be up to 64 characters.
+- Report the connection's `driver` in `list_tables`, `describe_table`, `list_objects`, `describe_object` and `db describe` results, and shape metadata for each database: PostgreSQL retains its existing metadata fields, while MySQL and MariaDB results use their own object kinds and table attributes. Identifier names may now be up to 64 characters.
+- Recheck account privileges on the first pooled operation after 30 minutes of cached approval.
+- Restrict PostgreSQL predefined role membership to approved read, monitoring, and reserved-connection roles. The audit checks table privileges reported by the server.
+
+### Fixed
+
+- Report PostgreSQL columns declared with a `NOT NULL` domain as non-nullable.
+- Enforce configured metadata byte limits as catalog entries are read, including PostgreSQL table listings and database descriptions.
 
 ## [0.3.0] - 2026-10-20
 

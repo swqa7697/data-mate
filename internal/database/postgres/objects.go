@@ -77,7 +77,7 @@ func (d *Driver) ListObjects(ctx context.Context, a database.Access, req databas
 				break
 			}
 			if e = budget.Add(item); e != nil {
-				return e
+				return abortCatalogRead(rows, e)
 			}
 			out.Objects = append(out.Objects, item)
 			pos.Schema = item.Schema
@@ -192,7 +192,7 @@ func describeType(ctx context.Context, tx pgx.Tx, oid uint32, budget *database.M
 				return nil, e
 			}
 			if e = budget.Add(label); e != nil {
-				return nil, e
+				return nil, abortCatalogRead(rows, e)
 			}
 			out.EnumLabels = append(out.EnumLabels, label)
 		}

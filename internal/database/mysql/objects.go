@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql/driver"
 	"math"
 	"slices"
 	"strings"
@@ -70,24 +71,27 @@ func (d *Driver) ListObjects(ctx context.Context, a database.Access, req databas
 		if err != nil {
 			return err
 		}
-		values, err := r.all(req.PageSize + 1)
-		if err != nil {
-			return err
-		}
 		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
-		for _, v := range values {
+		err = r.each(func(v []driver.Value) error {
 			if len(out.Objects) == req.PageSize {
+				if out.NextCursor != nil {
+					return catalogLimit()
+				}
 				last := out.Objects[len(out.Objects)-1]
 				pos.Schema, pos.Name, pos.Kind = last.Schema, last.Name, last.Kind
 				next := d.pools.Encode(pos)
 				out.NextCursor = &next
-				break
+				return nil
 			}
 			item := Object{Schema: str(v[0]), Name: str(v[1]), Kind: str(v[2])}
-			if err = budget.Add(item); err != nil {
+			if err := budget.Add(item); err != nil {
 				return err
 			}
 			out.Objects = append(out.Objects, item)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 		return database.PayloadBound(out, a)
 	})
@@ -118,7 +122,8 @@ func (d *Driver) DescribeObject(ctx context.Context, a database.Access, req data
 		if req.Kind == "sequence" {
 			out.Sequence, err = d.describeSequence(ctx, s, req)
 		} else {
-			out.Routine, err = d.describeRoutine(ctx, s, req)
+			budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
+			out.Routine, err = d.describeRoutine(ctx, s, req, &budget)
 		}
 		if err != nil {
 			return err
@@ -135,13 +140,13 @@ func unavailableObject() error {
 	return database.Fail(contracts.PermissionDenied, "object is unavailable or inaccessible", false)
 }
 
-func (d *Driver) describeRoutine(ctx context.Context, s *session, req database.ObjectRequest) (*Routine, error) {
+func (d *Driver) describeRoutine(ctx context.Context, s *session, req database.ObjectRequest, budget *database.MetadataBudget) (*Routine, error) {
 	language := "COALESCE(EXTERNAL_LANGUAGE,ROUTINE_BODY)"
 	if d.flavor == MariaDB {
 		language = "ROUTINE_BODY"
 	}
 	kind := strings.ToUpper(req.Kind)
-	values, err := d.catalogRows(ctx, s, `SELECT DTD_IDENTIFIER,`+language+`,IS_DETERMINISTIC,SQL_DATA_ACCESS,SECURITY_TYPE,ROUTINE_DEFINITION,SPECIFIC_NAME FROM information_schema.ROUTINES
+	values, err := s.singleRow(ctx, `SELECT DTD_IDENTIFIER,`+language+`,IS_DETERMINISTIC,SQL_DATA_ACCESS,SECURITY_TYPE,ROUTINE_DEFINITION,SPECIFIC_NAME FROM information_schema.ROUTINES
  WHERE ROUTINE_SCHEMA=? AND ROUTINE_NAME=? AND CAST(ROUTINE_SCHEMA AS BINARY)=CAST(? AS BINARY) AND CAST(ROUTINE_NAME AS BINARY)=CAST(? AS BINARY) AND ROUTINE_TYPE=?`, req.Schema, req.Name, req.Schema, req.Name, kind)
 	if err != nil {
 		return nil, err
@@ -162,21 +167,29 @@ func (d *Driver) describeRoutine(ctx context.Context, s *session, req database.O
 		out.ReturnType = optional(v[0])
 	}
 	specific := str(v[6])
-	params, err := d.catalogRows(ctx, s, `SELECT PARAMETER_MODE,PARAMETER_NAME,DTD_IDENTIFIER FROM information_schema.PARAMETERS
+	if err := budget.Add(out); err != nil {
+		return nil, err
+	}
+	r, err := s.query(ctx, `SELECT PARAMETER_MODE,PARAMETER_NAME,DTD_IDENTIFIER FROM information_schema.PARAMETERS
  WHERE SPECIFIC_SCHEMA=? AND SPECIFIC_NAME=? AND CAST(SPECIFIC_SCHEMA AS BINARY)=CAST(? AS BINARY) AND CAST(SPECIFIC_NAME AS BINARY)=CAST(? AS BINARY)
  AND ROUTINE_TYPE=? AND ORDINAL_POSITION>0 ORDER BY ORDINAL_POSITION`, req.Schema, specific, req.Schema, specific, kind)
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range params {
+	err = r.each(func(p []driver.Value) error {
 		param := Parameter{Name: str(p[1]), Type: str(p[2])}
-		if kind == "PROCEDURE" {
-			if mode, ok := text(p[0]); ok {
-				mode = strings.ToLower(mode)
-				param.Mode = &mode
-			}
+		if mode, ok := text(p[0]); ok && (kind == "PROCEDURE" || !strings.EqualFold(mode, "in")) {
+			mode = strings.ToLower(mode)
+			param.Mode = &mode
+		}
+		if err := budget.Add(param); err != nil {
+			return err
 		}
 		out.Parameters = append(out.Parameters, param)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -184,7 +197,7 @@ func (d *Driver) describeRoutine(ctx context.Context, s *session, req database.O
 // describeSequence reads a MariaDB sequence's configuration row, which needs
 // SELECT on the sequence and never advances it.
 func (d *Driver) describeSequence(ctx context.Context, s *session, req database.ObjectRequest) (*Sequence, error) {
-	values, err := d.catalogRows(ctx, s, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_TYPE='SEQUENCE' AND `+relationSQL, req.Schema, req.Name, req.Schema, req.Name)
+	values, err := s.singleRow(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_TYPE='SEQUENCE' AND `+relationSQL, req.Schema, req.Name, req.Schema, req.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +220,7 @@ func (d *Driver) describeSequence(ctx context.Context, s *session, req database.
 	out := &Sequence{DataType: "bigint", Start: str(v[0]), Min: str(v[1]), Max: str(v[2]), Increment: str(v[3]), Cache: str(v[4]), Cycle: str(v[5]) == "1"}
 	if s.info.version >= 110500 {
 		// MariaDB 11.5 added typed sequences and information_schema.SEQUENCES.
-		types, err := d.catalogRows(ctx, s, `SELECT DATA_TYPE FROM information_schema.SEQUENCES WHERE SEQUENCE_SCHEMA=? AND SEQUENCE_NAME=? AND CAST(SEQUENCE_SCHEMA AS BINARY)=CAST(? AS BINARY) AND CAST(SEQUENCE_NAME AS BINARY)=CAST(? AS BINARY)`, req.Schema, req.Name, req.Schema, req.Name)
+		types, err := s.singleRow(ctx, `SELECT DATA_TYPE FROM information_schema.SEQUENCES WHERE SEQUENCE_SCHEMA=? AND SEQUENCE_NAME=? AND CAST(SEQUENCE_SCHEMA AS BINARY)=CAST(? AS BINARY) AND CAST(SEQUENCE_NAME AS BINARY)=CAST(? AS BINARY)`, req.Schema, req.Name, req.Schema, req.Name)
 		if err != nil {
 			return nil, err
 		}

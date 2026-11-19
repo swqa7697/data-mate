@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -71,7 +72,7 @@ func catalogAcceptance(t *testing.T, f *fixture, d *Driver, a database.Access) {
 	for _, c := range desc.Columns {
 		columns[c.Name] = c
 	}
-	if len(desc.Columns) != 6 || !columns["id"].AutoIncrement || columns["doubled"].Generated == nil || columns["updated"].OnUpdate == nil || columns["name"].Default == nil || *columns["name"].Default != "'it''s'" || desc.Engine == nil || *desc.Engine != "InnoDB" {
+	if len(desc.Columns) != 6 || !columns["id"].AutoIncrement || columns["doubled"].Generated == nil || columns["updated"].OnUpdate == nil || !strings.EqualFold(*columns["updated"].OnUpdate, "current_timestamp(3)") || columns["name"].Default == nil || *columns["name"].Default != "'it''s'" || desc.Engine == nil || *desc.Engine != "InnoDB" {
 		t.Fatalf("columns: %+v", desc.Columns)
 	}
 	if len(desc.Keys) != 2 || len(desc.Relationships) != 1 || desc.Relationships[0].Target != (config.Table{Schema: "hidden", Name: "target"}) {
@@ -134,6 +135,15 @@ func catalogAcceptance(t *testing.T, f *fixture, d *Driver, a database.Access) {
 		t.Fatalf("procedure: %+v %v", proc.Routine, err)
 	}
 	if f.flavor == MariaDB {
+		f.sql(t, "CREATE FUNCTION app.output_args(OUT answer INT, INOUT total INT) RETURNS INT DETERMINISTIC NO SQL RETURN 0")
+		fn, err := d.DescribeObject(t.Context(), a, database.ObjectRequest{Kind: "function", Schema: "app", Name: "output_args"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		params := fn.Routine.Parameters
+		if len(params) != 2 || params[0].Mode == nil || *params[0].Mode != "out" || params[1].Mode == nil || *params[1].Mode != "inout" {
+			t.Fatalf("function parameter modes: %+v", params)
+		}
 		seq, err := d.DescribeObject(t.Context(), a, database.ObjectRequest{Kind: "sequence", Schema: "app", Name: "counter"})
 		if err != nil {
 			t.Fatal(err)
@@ -150,6 +160,7 @@ func catalogAcceptance(t *testing.T, f *fixture, d *Driver, a database.Access) {
 	_, err = d.DescribeObject(t.Context(), a, database.ObjectRequest{Kind: "function", Schema: "app", Name: "missing"})
 	requireCode(t, err, contracts.PermissionDenied)
 
+	f.sql(t, "CREATE TABLE app.CaseThing(id INT, other INT, PRIMARY KEY(id,other))", "CREATE TABLE app.casething(small_id INT PRIMARY KEY)")
 	described, err := d.DescribeDatabase(t.Context(), a)
 	if err != nil {
 		t.Fatal(err)
@@ -165,6 +176,22 @@ func catalogAcceptance(t *testing.T, f *fixture, d *Driver, a database.Access) {
 	}
 	if !slices.Contains(app.Indexes, database.IndexName{Name: "PRIMARY", Table: "items"}) || !slices.Contains(app.Functions, database.CatalogName{Name: "double_it"}) || slices.Contains(app.Functions, database.CatalogName{Name: "report"}) {
 		t.Fatalf("app database: %+v", app)
+	}
+	for _, name := range []string{"CaseThing", "casething"} {
+		want := database.IndexName{Name: "PRIMARY", Table: name}
+		count := 0
+		for _, index := range app.Indexes {
+			if index == want {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one primary index for %s, got %d", name, count)
+		}
+	}
+	caseTable, err := d.DescribeTable(t.Context(), a, config.Table{Schema: "app", Name: "CaseThing"})
+	if err != nil || len(caseTable.Keys) != 1 || !slices.Equal(caseTable.Keys[0].Columns, []string{"id", "other"}) {
+		t.Fatalf("case-sensitive primary key: %+v %v", caseTable.Keys, err)
 	}
 	if f.flavor == MariaDB && !slices.Contains(app.Sequences, database.CatalogName{Name: "counter"}) {
 		t.Fatal("sequence missing from description")
