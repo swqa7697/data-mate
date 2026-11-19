@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup install build dev clean uninstall format tidy format-check lint test test-race test-integration release bump-major bump-minor bump-patch release-commit tag
+.PHONY: help setup upgrade install build dev clean uninstall format tidy format-check lint test test-race test-integration release bump-major bump-minor bump-patch release-commit tag
 
 VERBOSE ?= 0
 export VERBOSE
@@ -10,6 +10,9 @@ help: ## Show available development commands
 
 setup: ## Prepare pinned Go dependencies/tools without building the application
 	@./scripts/setup.sh
+
+upgrade: ## Upgrade Go dependencies and tools (MAJOR=1 enables major-version discovery)
+	@./scripts/upgrade.sh
 
 install: ## Download pinned Go dependencies/tools and install .dev/bin/data-mate
 	@./scripts/install.sh

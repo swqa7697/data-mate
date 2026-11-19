@@ -576,6 +576,7 @@ The bridge copies cancellable byte streams without frame parsing or size checks.
 | Target                     | Contract                                                                                                       |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `make setup`               | Prepare pinned dependencies/tools without building or creating `.dev`                                          |
+| `make upgrade`             | Upgrade direct Go dependencies and tools, then tidy. `MAJOR=1` enables major-version discovery and import rewrites. |
 | `make install`             | Prepare dependencies, build, and install `.dev/bin/data-mate`                                                  |
 | `make build`               | Atomically rebuild the development executable without agent/credential changes                                 |
 | `make dev ARGS="..."`      | Run the installed binary with this checkout's absolute root                                                    |

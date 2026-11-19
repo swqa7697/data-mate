@@ -133,6 +133,12 @@ Uninstall shows what it will remove and asks for confirmation. Saved connections
 
 Run `data-mate help` for the complete command reference.
 
+## Upgrade development dependencies
+
+From the source checkout, run `make upgrade` to update direct Go dependencies and developer tools noninteractively. Each run resolves `go-mod-upgrade@latest` and finishes with `go mod tidy`.
+
+Use `make upgrade MAJOR=1` to discover new major module paths and rewrite imports. Crossing several major versions can take multiple runs. Transitive dependencies can change in either mode. Review the diff, then run `make lint` and `make test`.
+
 ## License
 
 [GNU General Public License v3](LICENSE).

@@ -62,6 +62,7 @@ Use Make as the developer entry point; `make help` lists the available targets.
 | Command | Purpose |
 | --- | --- |
 | `make setup` | Prepare pinned dependencies/tools without building the application |
+| `make upgrade` | Update direct Go dependencies and tools, then tidy. Use `MAJOR=1` to include major-version discovery and import rewrites. |
 | `make install` | Download pinned Go dependencies/tools and install `.dev/bin/data-mate` |
 | `make build` | Rebuild and atomically replace the development executable |
 | `make dev ARGS="help"` | Invoke the installed executable with this checkout's root |
