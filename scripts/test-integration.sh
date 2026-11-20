@@ -7,10 +7,11 @@ postgres) allowed=(postgres:16 postgres:18) prefix=dm-pg port_spec=5432/tcp ;;
 mysql) allowed=(mysql:8.4 mysql:9.7) prefix=dm-my port_spec=3306/tcp ;;
 mariadb) allowed=(mariadb:10.11 mariadb:12.3) prefix=dm-my port_spec=3306/tcp ;;
 redis) allowed=(redis:7.0 redis:8.10) prefix=dm-redis port_spec=6379/tcp ;;
+mongodb) allowed=(mongo:7.0 mongo:9.0) prefix=dm-mongo port_spec=27017/tcp ;;
 *) allowed=() ;;
 esac
 if [[ -n "${CI:-}" || "${#allowed[@]}" == 0 || -n "${DATABASE_URL:-}${DB_URL:-}${DB_HOST:-}${DB_PORT:-}" ]]; then
-  echo 'Integration requires DB_DRIVER=postgres, mysql, mariadb or redis, no external endpoint, and a non-CI session.' >&2
+  echo 'Integration requires DB_DRIVER=postgres, mysql, mariadb, redis or mongodb, no external endpoint, and a non-CI session.' >&2
   exit 1
 fi
 images=()
@@ -131,6 +132,19 @@ start_fixture() {
       --mount "type=bind,src=$fixture_dir,dst=/fixture,readonly" --entrypoint /bin/sh "$image" \
       -ec "$tls; cp /fixture/redis.acl /tmp/tls/; chown -R redis:redis /tmp/tls; chmod 600 /tmp/tls/server.key; exec docker-entrypoint.sh redis-server --aclfile /tmp/tls/redis.acl --tls-port 6380 --tls-auth-clients no --tls-ca-cert-file /tmp/tls/ca.crt --tls-key-file /tmp/tls/server.key --tls-cert-file /tmp/tls/server.crt" >/dev/null
     ;;
+  mongodb)
+    # The entrypoint drops privileges before reading the password file, so root
+    # copies it first. Plaintext and TLS share port 27017; port 27018 serves a
+    # single-node replica set without authorization that admission must refuse.
+    # glibc keeps rseq (its default, as in mongo:7.0): MongoDB 8.0+ images hand
+    # it to tcmalloc, which refuses to start on Linux 6.19-7.0.13 (SERVER-121912).
+    docker run -d --name "$container_name" --label "$label" --network "$network_name" \
+      --publish 127.0.0.1::27017 --publish 127.0.0.1::27018 --mount "type=volume,src=$volume_name,dst=/data/db" \
+      --mount type=tmpfs,dst=/data/configdb --mount type=tmpfs,dst=/data/noauth \
+      --mount "type=bind,src=$fixture_dir,dst=/fixture,readonly" -e GLIBC_TUNABLES=glibc.pthread.rseq=1 \
+      -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD_FILE=/tmp/tls/admin-password \
+      --entrypoint /bin/bash "$image" -ec "$tls; cp /fixture/admin-password /tmp/tls/; cat /tmp/tls/server.crt /tmp/tls/server.key >/tmp/tls/server.pem; chown -R mongodb:mongodb /tmp/tls /data/noauth; chmod 600 /tmp/tls/server.key /tmp/tls/server.pem /tmp/tls/admin-password; gosu mongodb mongod --port 27018 --bind_ip_all --replSet dm0 --dbpath /data/noauth --wiredTigerCacheSizeGB 0.25 --fork --logpath /data/noauth/mongod.log; exec docker-entrypoint.sh mongod --tlsMode preferTLS --tlsCertificateKeyFile /tmp/tls/server.pem --tlsCAFile /tmp/tls/ca.crt --tlsAllowConnectionsWithoutCertificates" >/dev/null
+    ;;
   mysql)
     docker run -d --name "$container_name" --label "$label" --network "$network_name" \
       --publish 127.0.0.1::3306 --mount "type=volume,src=$volume_name,dst=/var/lib/mysql" \
@@ -145,11 +159,13 @@ start_fixture() {
     ;;
   esac
 }
-# fixture_ready checks the final server over TCP; image initialization runs a
-# temporary server that does not listen on TCP.
+# fixture_ready checks the final server over TCP. Image initialization runs a
+# temporary server that does not listen on TCP, except MongoDB's, which listens
+# on loopback without authorization; its check requires the final options.
 fixture_ready() {
   case "$DB_DRIVER" in
   redis) docker exec "$container_name" sh -ec 'export REDISCLI_AUTH="$(cat /fixture/admin-password)"; test "$(redis-cli ping)" = PONG' ;;
+  mongodb) docker exec --env HOME=/tmp --env DO_NOT_TRACK=1 "$container_name" mongosh --quiet --norc --eval 'db.auth("root", require("fs").readFileSync("/fixture/admin-password", "utf8").trim()); const o = db.adminCommand({ getCmdLineOpts: 1 }).parsed; if (o.security?.authorization !== "enabled" || (o.net?.bindIpAll !== true && o.net?.bindIp !== "*")) quit(1)' mongodb://127.0.0.1:27017/admin ;;
   postgres) docker exec "$container_name" pg_isready -h 127.0.0.1 -U postgres -d fixture ;;
   mysql) docker exec "$container_name" mysql --defaults-extra-file=/fixture/client.cnf -e 'SELECT 1' ;;
   mariadb) docker exec "$container_name" mariadb --defaults-extra-file=/fixture/client.cnf -e 'SELECT 1' ;;
@@ -196,6 +212,14 @@ PY
       export GOPROXY=off GOSUMDB=off
       DATA_MATE_REDIS_FIXTURE="$fixture_dir/manifest.json" \
         go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestRedisIntegration$' ./internal/database/redis
+      DATA_MATE_CLI_DIAGNOSTICS="$fixture_dir/manifest.json" \
+        go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestConnectionDiagnostics$' ./internal/cli
+    ) &
+  elif [[ "$DB_DRIVER" == mongodb ]]; then
+    (
+      export GOPROXY=off GOSUMDB=off
+      DATA_MATE_MONGODB_FIXTURE="$fixture_dir/manifest.json" \
+        go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestMongoDBIntegration$' ./internal/database/mongodb
       DATA_MATE_CLI_DIAGNOSTICS="$fixture_dir/manifest.json" \
         go test -mod=readonly -count=1 -timeout="$test_timeout" -v -run '^TestConnectionDiagnostics$' ./internal/cli
     ) &

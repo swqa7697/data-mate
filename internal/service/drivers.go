@@ -2,6 +2,7 @@ package service
 
 import (
 	"github.com/swqa7697/data-mate/internal/database"
+	"github.com/swqa7697/data-mate/internal/database/mongodb"
 	"github.com/swqa7697/data-mate/internal/database/mysql"
 	"github.com/swqa7697/data-mate/internal/database/pool"
 	"github.com/swqa7697/data-mate/internal/database/postgres"
@@ -20,5 +21,6 @@ func NewDriver() (database.Driver, error) {
 		"postgres": postgres.New(r).Operations(),
 		"mysql":    mysql.New(r, mysql.MySQL).Operations(),
 		"mariadb":  mysql.New(r, mysql.MariaDB).Operations(),
+		"mongodb":  mongodb.New(r),
 	}), nil
 }

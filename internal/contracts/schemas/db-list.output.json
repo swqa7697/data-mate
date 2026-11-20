@@ -20,7 +20,8 @@
               "postgres",
               "mysql",
               "mariadb",
-              "redis"
+              "redis",
+              "mongodb"
             ]
           },
           "connection": {
@@ -68,7 +69,8 @@
                 "driver": {
                   "enum": [
                     "postgres",
-                    "redis"
+                    "redis",
+                    "mongodb"
                   ]
                 }
               }
@@ -109,6 +111,27 @@
                     "database": {
                       "pattern": "^(0|[1-9][0-9]{0,9})$",
                       "description": "Redis logical database index in canonical decimal, from 0 to 2147483647."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "mongodb"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "connection": {
+                  "properties": {
+                    "database": {
+                      "pattern": "^[^/\\\\. \"$\\x00]{1,63}$",
+                      "description": "MongoDB SCRAM authentication database (authSource). It locates the account and does not limit the reachable databases."
                     }
                   }
                 }

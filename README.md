@@ -1,7 +1,7 @@
 <h1 align="center">Data Mate</h1>
 
 <p align="center">
-  <strong>Explore PostgreSQL, MySQL, MariaDB and Redis from Codex or Claude Code.</strong><br />
+  <strong>Explore PostgreSQL, MySQL, MariaDB, Redis and MongoDB from Codex or Claude Code.</strong><br />
   A local CLI and <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> (MCP) service for read-only database access on macOS and Linux.
 </p>
 
@@ -22,14 +22,14 @@
 
 ---
 
-Data Mate lets coding agents inspect relational databases with SQL and explore Redis by key. You control each connection and the data its account can read. Database passwords stay out of agent configuration and MCP responses.
+Data Mate lets coding agents inspect relational databases with SQL, explore Redis by key, and read MongoDB collections. You control each connection and the data its account can read. Database passwords stay out of agent configuration and MCP responses.
 
 ## At a glance
 
 | Feature               | What it gives you                                                             |
 | --------------------- | ----------------------------------------------------------------------------- |
-| Read-only tools       | Inspect relational catalogs, run SQL reads, and browse Redis keys and values.      |
-| Databases             | Connect to PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, and standalone Redis 7.0+.                    |
+| Read-only tools       | Inspect relational catalogs, run SQL reads, browse Redis keys and values, and query MongoDB collections. |
+| Databases             | Connect to PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, standalone Redis 7.0+, and MongoDB 7.0+. |
 | Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
 | Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
 | Agent setup           | Register the service with installed Codex and Claude Code clients.            |
@@ -37,7 +37,7 @@ Data Mate lets coding agents inspect relational databases with SQL and explore R
 
 ## Get started
 
-Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, or standalone Redis 7.0+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only database account with access only to the data you intend to share; see [Read-only accounts](#read-only-accounts).
+Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, standalone Redis 7.0+, or MongoDB 7.0+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only database account with access only to the data you intend to share; see [Read-only accounts](#read-only-accounts).
 
 Install the latest stable release:
 
@@ -53,7 +53,7 @@ data-mate db test analytics
 data-mate mcp start
 ```
 
-`db add` opens a form for the driver (`postgres`, `mysql`, `mariadb`, or `redis`), connection details, and a hidden password. The port defaults to the driver's standard port: 5432 for PostgreSQL, 3306 for MySQL and MariaDB, or 6379 for Redis. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
+`db add` opens a form for the driver (`postgres`, `mysql`, `mariadb`, `redis`, or `mongodb`), connection details, and a hidden password. The port defaults to the driver's standard port: 5432 for PostgreSQL, 3306 for MySQL and MariaDB, 6379 for Redis, or 27017 for MongoDB. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
 
 ## Manage connections
 
@@ -61,7 +61,7 @@ data-mate mcp start
 | -------------------------------- | ------------------------------------------------------------------------- |
 | `data-mate db add`               | Save a database connection.                          |
 | `data-mate db list`              | View aliases and nonsecret settings.                                      |
-| `data-mate db describe [alias]`  | Describe a relational catalog or sample readable Redis key names and types. |
+| `data-mate db describe [alias]`  | Describe a relational or MongoDB catalog, or sample readable Redis key names and types. |
 | `data-mate db test [alias]`      | Test one connection, or all connections if omitted.                       |
 | `data-mate db edit [alias]`      | Update settings or credentials.                                           |
 | `data-mate db remove [alias]`    | Remove a connection and its saved credentials.                            |
@@ -79,6 +79,8 @@ To copy connections to another machine, run `data-mate db export connections.csv
 A PostgreSQL connection names one database. A MySQL or MariaDB connection names only a server account: it has no database setting, and agents reach every database the account's grants allow. In tool results, a MySQL or MariaDB database appears as a schema, and queries name tables as `database.table`.
 
 For Redis, enter the ACL username and a logical database index (default `0`). You can also set the index with `--database` or the CSV `database` column. Each alias connects to one standalone endpoint.
+
+For MongoDB, enter the username and the database where the user was created, usually `admin` (the default). The account's roles choose which databases agents can read. Each alias connects directly to one standalone server, replica-set member or `mongos`.
 
 ## Read-only accounts
 
@@ -112,6 +114,20 @@ user data_mate_reader on #<sha256-of-password> %R~orders:* -@all +hello +select 
 
 Data Mate inspects the account and all of its ACL selectors. The `ACL GETUSER` grant can reveal password hashes for other accounts to anyone holding the reader credential. Data Mate uses this grant internally. The MCP tools expose only authorized keys and values. A Redis provider must permit ACL inspection for admission to succeed. [Redis ACL GETUSER](https://redis.io/docs/latest/commands/acl-getuser/)
 
+### MongoDB reader
+
+Create a dedicated user in `mongosh` as an administrator. This example lets the reader query the `analytics` database:
+
+```js
+db.getSiblingDB("admin").createUser({
+  user: "data_mate_reader",
+  pwd: passwordPrompt(),
+  roles: [{ role: "read", db: "analytics" }]
+})
+```
+
+Keep `admin`, where this user was created, as the authentication database. Grant `read` on each database you want to share, or `readAnyDatabase` for all of them. Data Mate rejects accounts that can do more than read and monitor, accounts that can read credential collections such as `admin.system.users`, and servers that do not enforce authorization. On MongoDB 8.2 and later it also accepts `clusterMonitor`, but on a replica set that role can read the oplog, which records every write, including credential changes; grant it only when that exposure is acceptable.
+
 ## What agents can do
 
 | MCP tool           | Capability                                                                            |
@@ -125,12 +141,17 @@ Data Mate inspects the account and all of its ACL selectors. The `ACL GETUSER` g
 | `list_keys`        | Browse readable Redis keys and types, optionally matching a Redis glob.              |
 | `describe_key`     | Inspect a Redis key’s type, length and remaining lifetime.                          |
 | `read_key`         | Read a page of string bytes, list or set members, hash fields, scores or stream entries. |
+| `list_collections` | Browse MongoDB collections, views, and time-series collections.                       |
+| `describe_collection` | Inspect a MongoDB collection's options, validator, view pipeline, and indexes. |
+| `find_documents`   | Run one MongoDB find with an optional filter, projection, and sort.                   |
+| `aggregate_documents` | Run one read-only MongoDB aggregation pipeline. |
 
 Results follow each connection's database, reported by `list_connections`:
 
 - PostgreSQL lists routines, types, and sequences, and reports identity columns, triggers, and row-security policies. Queries use `$1` placeholders and schema-qualified table names.
 - MySQL and MariaDB list functions and procedures, and MariaDB also lists sequences. Table descriptions report `AUTO_INCREMENT`, `ON UPDATE`, and the storage engine. MySQL shows triggers only to accounts with the `TRIGGER` privilege, which read-only accounts lack, so they are omitted. Queries use `?` placeholders and `database.table` names.
 - Redis readers can copy a `key` object from `list_keys` into either key tool, for example `{"encoding":"utf8","value":"orders:42"}`. Binary keys and values use base64. The default page size is 100, capped by the connection’s row limit. An explicit page can request up to 1,000 bytes for strings or 1,000 entries for collections, subject to that same limit. Follow `next_cursor` even after an empty page. Iteration over changing data may repeat entries or require a restart.
+- MongoDB tools name a `database` and `collection`. Filters, projections, sorts and pipelines use MongoDB Extended JSON, and documents come back as canonical Extended JSON, such as `{"$numberLong":"42"}`. Results stop at the row limit without a continuation; refine the filter, use `skip` with a `sort`, or count with a `$count` stage. Pipelines cannot use `$out`, `$merge` or server-side JavaScript.
 
 MCP tools cannot edit connections or retrieve saved passwords.
 

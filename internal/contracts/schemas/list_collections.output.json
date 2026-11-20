@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "driver": {
+      "const": "mongodb"
+    },
+    "collections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[^\\x00]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^\\x00]+$"
+          },
+          "type": {
+            "enum": [
+              "collection",
+              "view",
+              "timeseries",
+              "other"
+            ]
+          }
+        },
+        "required": [
+          "database",
+          "name",
+          "type"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "next_cursor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2048
+    }
+  },
+  "required": [
+    "connection",
+    "driver",
+    "collections",
+    "next_cursor"
+  ],
+  "additionalProperties": false
+}

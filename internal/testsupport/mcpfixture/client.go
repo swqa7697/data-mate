@@ -26,13 +26,7 @@ func (b *backend) Work(ctx context.Context, alias string, fn func(context.Contex
 	return fn(ctx, b.driver, b.access)
 }
 func (b *backend) Connections(_ context.Context, fn func([]protocol.Connection) error) error {
-	p := b.access.Profile
-	return fn([]protocol.Connection{{
-		Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
-		Limits: protocol.ConnectionLimits{
-			MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
-		},
-	}})
+	return fn([]protocol.Connection{protocol.NewConnection(b.access.Profile)})
 }
 
 // Connect starts a real MCP session over a private pipe for one immutable

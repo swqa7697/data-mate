@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "database": {
+      "type": "string",
+      "pattern": "^[^/\\\\. \"$\\x00]{1,63}$",
+      "description": "Exact MongoDB database that holds the collection."
+    },
+    "collection": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^$\\x00]+$",
+      "description": "Exact collection, view or time-series collection name."
+    },
+    "pipeline": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 1
+      },
+      "description": "Ordered read stages as MongoDB Extended JSON objects, each with exactly one stage operator, such as [{\"$match\": {}}, {\"$count\": \"n\"}]."
+    },
+    "row_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum documents to return. Defaults to this connection's limits.max_rows from list_connections and must not exceed it."
+    }
+  },
+  "required": [
+    "connection",
+    "database",
+    "collection",
+    "pipeline"
+  ],
+  "additionalProperties": false
+}

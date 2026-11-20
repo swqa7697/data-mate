@@ -11,7 +11,6 @@ import (
 
 	"github.com/rivo/uniseg"
 	"github.com/spf13/cobra"
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/database"
 	"golang.org/x/term"
 )
@@ -39,10 +38,16 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 	labels := [...]string{"Enum", "Table", "View", "Sequence", "Index", "Function"}
 	headings := [...]string{"Enums", "Tables", "Views", "Sequences", "Indexes", "Functions"}
 	tints := [...]string{"\x1b[35m", "\x1b[32m", "\x1b[36m", "\x1b[33m", "\x1b[34m", "\x1b[31m"}
+	if description.Driver == "mongodb" {
+		// Time-series and other collection kinds are listed with collections.
+		labels = [...]string{"", "Collection", "View", "", "Index", ""}
+		headings[1] = "Collections"
+	}
 	var out strings.Builder
-	// MySQL-family profiles name no database; each schema is a database.
+	// MySQL-family and MongoDB descriptions name no database; each schema is a
+	// database, and a MongoDB authentication database is not a scope.
 	scope, unit, units := "database="+displayName(description.Database), "Schema", "schemas"
-	if !config.NamesDatabase(description.Driver) {
+	if description.Database == "" {
 		scope, unit, units = "driver="+displayName(description.Driver), "Database", "databases"
 	}
 	fmt.Fprintf(&out, "%s — %s\n", displayName(description.Alias), scope)
@@ -67,6 +72,9 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 	if color {
 		out.WriteString("\x1b[1m" + unit + "\x1b[0m")
 		for i, label := range labels {
+			if label == "" {
+				continue
+			}
 			out.WriteString("  ")
 			out.WriteString(tints[i] + label + "\x1b[0m")
 		}

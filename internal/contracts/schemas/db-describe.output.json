@@ -15,7 +15,8 @@
         "postgres",
         "mysql",
         "mariadb",
-        "redis"
+        "redis",
+        "mongodb"
       ]
     },
     "database": {
@@ -41,7 +42,7 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 64,
+                  "maxLength": 255,
                   "pattern": "^[^\\x00]+$"
                 },
                 "kind": {
@@ -51,7 +52,10 @@
                     "view",
                     "materialized_view",
                     "foreign_table",
-                    "system_versioned_table"
+                    "system_versioned_table",
+                    "collection",
+                    "timeseries",
+                    "other"
                   ]
                 }
               },
@@ -106,14 +110,13 @@
                 "name": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 64,
                   "pattern": "^[^\\x00]+$"
                 },
                 "table": {
                   "type": "string",
                   "minLength": 1,
                   "pattern": "^[^\\x00]+$",
-                  "maxLength": 64
+                  "maxLength": 255
                 }
               },
               "required": [
@@ -284,6 +287,80 @@
           "required": [
             "keyspace"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "driver": {
+            "const": "mongodb"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "schemas": {
+            "items": {
+              "properties": {
+                "tables": {
+                  "items": {
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "collection",
+                          "view",
+                          "timeseries",
+                          "other"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "schemas": {
+            "items": {
+              "properties": {
+                "tables": {
+                  "items": {
+                    "properties": {
+                      "name": {
+                        "maxLength": 64
+                      },
+                      "kind": {
+                        "enum": [
+                          "table",
+                          "partitioned_table",
+                          "view",
+                          "materialized_view",
+                          "foreign_table",
+                          "system_versioned_table"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "indexes": {
+                  "items": {
+                    "properties": {
+                      "name": {
+                        "maxLength": 64
+                      },
+                      "table": {
+                        "maxLength": 64
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

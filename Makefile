@@ -50,7 +50,7 @@ compile-tests: ## Compile ordinary and race tests without running them
 	@./scripts/test.sh -c -o /dev/null
 	@./scripts/test.sh -c -race -o /dev/null
 
-test-integration: ## Run owned Docker fixtures for DB_DRIVER=postgres|mysql|mariadb|redis (never in CI)
+test-integration: ## Run owned Docker fixtures for DB_DRIVER=postgres|mysql|mariadb|redis|mongodb (never in CI)
 	@./scripts/test-integration.sh
 
 release: ## Build signed production artifacts; macOS also notarizes (signing settings required)

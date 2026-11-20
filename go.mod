@@ -18,6 +18,9 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
 	github.com/tink-crypto/tink-go/v2 v2.9.0
+	github.com/xdg-go/scram v1.4.0
+	github.com/xdg-go/stringprep v1.0.4
+	go.mongodb.org/mongo-driver/v2 v2.10.1
 	golang.org/x/crypto v0.59.0
 	golang.org/x/mod v0.43.0
 	golang.org/x/net v0.63.0

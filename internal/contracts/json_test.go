@@ -55,6 +55,11 @@ func TestToolInputsFailClosed(t *testing.T) {
 		"describe_key.input":     {`{"connection":"cache","key":{"value":"a","encoding":"hex"}}`},
 		"read_key.input":         {`{"connection":"cache","key":"a"}`, `{"connection":"cache","key":{"value":"a","encoding":"utf8"},"database":1}`},
 		"query.input":            {`{"connection":"analytics","sql":"select 1","timeout":99}`, `{"connection":"analytics","sql":"select 1","row_limit":0}`, `{"connection":"analytics","sql":"select $1","parameters":{}}`},
+		// MongoDB inputs reject dotted databases, string-encoded documents and multi-operator stages.
+		"list_collections.input":    {`{"connection":"shop","database":"a.b"}`, `{"connection":"shop","page_size":0}`},
+		"describe_collection.input": {`{"connection":"shop","database":"app"}`},
+		"find_documents.input":      {`{"connection":"shop","database":"app","collection":"items","filter":"{}"}`, `{"connection":"shop","database":"app","collection":"items","skip":-1}`},
+		"aggregate_documents.input": {`{"connection":"shop","database":"app","collection":"items","pipeline":{}}`, `{"connection":"shop","database":"app","collection":"items","pipeline":[{"$match":{},"$limit":1}]}`},
 	}
 	for name, inputs := range cases {
 		for i, input := range inputs {

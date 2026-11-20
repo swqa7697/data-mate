@@ -34,6 +34,8 @@ func liveDiagnostics(t *testing.T, path string) {
 		prefix, port, admin = "dm-my-", "3306/tcp", "root"
 	} else if fixture.Driver == "redis" {
 		prefix, port = "dm-redis-", "6379/tcp"
+	} else if fixture.Driver == "mongodb" {
+		prefix, port, admin = "dm-mongo-", "27017/tcp", "root"
 	} else if fixture.Driver != "" && fixture.Driver != "postgres" {
 		t.Fatal("unknown fixture driver")
 	}
@@ -94,6 +96,9 @@ func liveDiagnostics(t *testing.T, path string) {
 			args = append(args, "--driver", fixture.Driver)
 		case "redis":
 			args = append(args, "--driver", "redis", "--database", "1")
+		case "mongodb":
+			// The default admin authentication database holds every fixture user.
+			args = append(args, "--driver", "mongodb")
 		default:
 			args = append(args, "--database", "fixture")
 		}

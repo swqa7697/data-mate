@@ -25,7 +25,7 @@ import (
 func newDB(override *string, factory managementFactory, build Build) *cobra.Command {
 	db := &cobra.Command{Use: "db", Short: "Manage saved database connections", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, action := range []string{"add", "edit", "remove", "list", "describe"} {
-		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "describe": "Describe application catalog objects or browse a page of Redis keys"}[action], Args: cobra.MaximumNArgs(1)}
+		cmd := &cobra.Command{Use: action, Short: map[string]string{"add": "Save a connection", "edit": "Edit a connection", "remove": "Remove a connection and its credentials", "list": "List nonsecret connections", "describe": "Describe application catalog objects and MongoDB collections or browse a page of Redis keys"}[action], Args: cobra.MaximumNArgs(1)}
 		if action == "add" || action == "list" {
 			cmd.Args = cobra.NoArgs
 		}
@@ -343,7 +343,9 @@ func previewProfile(w io.Writer, action string, p config.Profile, secretsChanged
 	transport, _ := json.Marshal(p.Transport)
 	limits, _ := json.Marshal(p.Limits)
 	database := ""
-	if config.NamesDatabase(p.Driver) {
+	if config.AuthenticationDatabase(p.Driver) {
+		database = fmt.Sprintf("Authentication database: %q\n", p.Connection.Database)
+	} else if config.NamesDatabase(p.Driver) {
 		database = fmt.Sprintf("Database: %q\n", p.Connection.Database)
 	}
 	_, err := fmt.Fprintf(w, "%s\nAlias: %s\nDriver: %s\nHost: %q\nPort: %d\n%sUsername: %q\nTransport: %s\nLimits: %s\nCredentials: %s\n", title, p.Alias, p.Driver, p.Connection.Host, p.Connection.Port, database, p.Connection.Username, transport, limits, secretState)
@@ -378,7 +380,9 @@ func listProfiles(cmd *cobra.Command, p config.Profiles) error {
 	}
 	for _, e := range entries {
 		database := ""
-		if config.NamesDatabase(e.Driver) {
+		if config.AuthenticationDatabase(e.Driver) {
+			database = fmt.Sprintf("  auth_database=%q", e.Connection.Database)
+		} else if config.NamesDatabase(e.Driver) {
 			database = fmt.Sprintf("  database=%q", e.Connection.Database)
 		}
 		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %q:%d%s\n", e.Alias, e.Driver, e.Connection.Host, e.Connection.Port, database); err != nil {

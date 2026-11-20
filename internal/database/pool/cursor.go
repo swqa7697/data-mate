@@ -11,6 +11,10 @@ import (
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
+// MaxCursorLength is the longest cursor token Decode accepts. A driver must not
+// issue a longer token, which could never be resumed.
+const MaxCursorLength = 2048
+
 // Cursor is an authenticated keyset position. It binds the tool, profile
 // revision, filters and invalidation epoch; tokens expire on restart.
 type Cursor struct {
@@ -53,7 +57,7 @@ func (r *Registry) Decode(s string, want Cursor, validName func(string) bool) (C
 	bad := func() (Cursor, error) {
 		return Cursor{}, database.Fail(contracts.StaleCursor, "metadata cursor is invalid or stale", false)
 	}
-	if len(s) > 2048 {
+	if len(s) > MaxCursorLength {
 		return bad()
 	}
 	b, err := base64.RawURLEncoding.DecodeString(s)

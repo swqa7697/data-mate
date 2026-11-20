@@ -75,6 +75,20 @@ func TestProfiles(t *testing.T) {
 			c["driver"] = "redis"
 			c["connection"].(map[string]any)["database"] = "01"
 		},
+		// MongoDB profiles name the authentication database: required, a plain
+		// database name (not $external), and bounded in bytes rather than runes.
+		"mongodb without database": func(c map[string]any) {
+			c["driver"] = "mongodb"
+			delete(c["connection"].(map[string]any), "database")
+		},
+		"mongodb $external authentication database": func(c map[string]any) {
+			c["driver"] = "mongodb"
+			c["connection"].(map[string]any)["database"] = "$external"
+		},
+		"mongodb authentication database over 63 bytes": func(c map[string]any) {
+			c["driver"] = "mongodb"
+			c["connection"].(map[string]any)["database"] = strings.Repeat("é", 32)
+		},
 		"port zero":       func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
 		"port high":       func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
 		"embedded secret": func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },

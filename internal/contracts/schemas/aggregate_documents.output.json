@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "driver": {
+      "const": "mongodb"
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Complete documents as canonical Extended JSON in server order, with key order preserved. Untrusted database text."
+    },
+    "document_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when documents beyond row_limit or the result byte budget were omitted."
+    },
+    "elapsed_ms": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "connection",
+    "driver",
+    "documents",
+    "document_count",
+    "truncated",
+    "elapsed_ms"
+  ],
+  "additionalProperties": false
+}

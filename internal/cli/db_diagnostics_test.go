@@ -275,6 +275,24 @@ func TestConnectionDiagnostics(t *testing.T) {
 	if !strings.Contains(out, `"line\n\x1b[31m"`) || !strings.Contains(out, `base64 "/wA="`) || !strings.Contains(out, "more-keys") {
 		t.Fatal("Redis key name or continuation lost in terminal output", out)
 	}
+	// A MongoDB description lists databases as schemas with collection kinds and
+	// per-collection index names; the authentication database is not shown.
+	mongoProfiles := snapshot(t, root)
+	for i := range mongoProfiles.Connections {
+		p := &mongoProfiles.Connections[i]
+		if p.Alias == "good" {
+			p.Driver, p.Connection.Database, p.Connection.Port = "mongodb", "admin", 27017
+		}
+	}
+	saveProfiles(t, root, mongoProfiles)
+	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good", "--json")
+	if contracts.Validate("db-describe.output", []byte(out)) != nil || strings.Contains(out, `"database"`) {
+		t.Fatal("MongoDB description JSON", out)
+	}
+	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
+	if !strings.Contains(out, "items._id_") || strings.Contains(out, "admin") {
+		t.Fatal("MongoDB terminal description", out)
+	}
 	saveProfiles(t, root, original)
 	keys.denied = true
 	runCommand("describe", &fixtureDatabase{}, 1, "good", "--json")

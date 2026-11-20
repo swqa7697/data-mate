@@ -156,6 +156,42 @@ func (r *Router) ReadKey(ctx context.Context, a Access, req KeyReadRequest) (Key
 	return d.ReadKey(ctx, a, req)
 }
 
+// ListCollections returns a page of listable collections on a document-oriented driver.
+func (r *Router) ListCollections(ctx context.Context, a Access, req CollectionPageRequest) (CollectionPage, error) {
+	d, err := capability[DocumentOperations](r, a.Profile.Driver)
+	if err != nil {
+		return CollectionPage{}, err
+	}
+	return d.ListCollections(ctx, a, req)
+}
+
+// DescribeCollection inspects collection options and indexes without reading documents.
+func (r *Router) DescribeCollection(ctx context.Context, a Access, req CollectionRequest) (CollectionDescription, error) {
+	d, err := capability[DocumentOperations](r, a.Profile.Driver)
+	if err != nil {
+		return CollectionDescription{}, err
+	}
+	return d.DescribeCollection(ctx, a, req)
+}
+
+// FindDocuments runs one guarded find.
+func (r *Router) FindDocuments(ctx context.Context, a Access, req FindRequest) (DocumentResult, error) {
+	d, err := capability[DocumentOperations](r, a.Profile.Driver)
+	if err != nil {
+		return DocumentResult{}, err
+	}
+	return d.FindDocuments(ctx, a, req)
+}
+
+// AggregateDocuments runs one guarded read-only aggregation pipeline.
+func (r *Router) AggregateDocuments(ctx context.Context, a Access, req AggregateRequest) (DocumentResult, error) {
+	d, err := capability[DocumentOperations](r, a.Profile.Driver)
+	if err != nil {
+		return DocumentResult{}, err
+	}
+	return d.AggregateDocuments(ctx, a, req)
+}
+
 // Invalidate retires credentials, transports and cursors after a profile change.
 func (r *Router) Invalidate(id string) { r.resources.Invalidate(id) }
 

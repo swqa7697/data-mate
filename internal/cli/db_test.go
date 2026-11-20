@@ -687,9 +687,20 @@ func TestConnectionInputs(t *testing.T) {
 	if contracts.Validate("db-list.output", []byte(out)) != nil || strings.Contains(out, `"database":""`) {
 		t.Fatal("database-less listing contract", out)
 	}
+	// MongoDB defaults to the admin authentication database, which never
+	// becomes a PostgreSQL database name without an explicit choice.
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "mongodb", "--yes")
+	if c := shop(); c.Port != 27017 || c.Database != "admin" {
+		t.Fatalf("mongodb switch: %+v", c)
+	}
+	mongoList, _ := command(t, root, keys, "", 0, "list", "--json")
+	if contracts.Validate("db-list.output", []byte(mongoList)) != nil {
+		t.Fatal("mongodb listing contract", mongoList)
+	}
+	command(t, root, keys, "", 2, "edit", "shop", "--driver", "postgres", "--yes")
 	// CSV import must retain database-less drivers and their defaults.
 	transfer := filepath.Join(t.TempDir(), "drivers.csv")
-	if err := os.WriteFile(transfer, []byte("alias,driver,host,username,password,database\nshop,mariadb,localhost,reader,<none>,\ncatalog,mysql,localhost,reader,<none>,\ncache,redis,localhost,reader,<none>,3\n"), 0600); err != nil {
+	if err := os.WriteFile(transfer, []byte("alias,driver,host,username,password,database\nshop,mariadb,localhost,reader,<none>,\ncatalog,mysql,localhost,reader,<none>,\ncache,redis,localhost,reader,<none>,3\nvault,mongodb,localhost,reader,<none>,\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	command(t, root, keys, "", 0, "import", transfer, "--on-conflict", "update", "--yes")
@@ -700,7 +711,11 @@ func TestConnectionInputs(t *testing.T) {
 		if c.Alias == "cache" && (c.Connection.Port != 6379 || c.Connection.Database != "3") {
 			t.Fatalf("CSV Redis settings: %+v", c)
 		}
+		if c.Alias == "vault" && (c.Connection.Port != 27017 || c.Connection.Database != "admin") {
+			t.Fatalf("CSV MongoDB defaults: %+v", c)
+		}
 	}
+	command(t, root, keys, "", 0, "remove", "vault", "--yes")
 	command(t, root, keys, "", 0, "remove", "cache", "--yes")
 	command(t, root, keys, "", 0, "remove", "catalog", "--yes")
 	command(t, root, keys, "", 0, "remove", "shop", "--yes")

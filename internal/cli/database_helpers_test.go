@@ -7,6 +7,7 @@ import (
 	"github.com/swqa7697/data-mate/internal/vault"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/swqa7697/data-mate/internal/config"
@@ -62,6 +63,22 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 			{Key: database.KeyBytes{Value: "line\n\x1b[31m", Encoding: "utf8"}, Type: "string"},
 			{Key: database.KeyBytes{Value: "/wA=", Encoding: "base64"}, Type: "hash"},
 		}, NextCursor: &cursor}
+		return out, nil
+	}
+	if a.Profile.Driver == "mongodb" {
+		// MongoDB lists authorized databases as schemas; the profile's
+		// authentication database is never a scope. Collection names may exceed
+		// the relational 64-character bound.
+		out.Database = ""
+		out.Schemas = []database.SchemaDescription{{
+			Name: "app",
+			Tables: []database.RelationName{
+				{Name: "events", Kind: "timeseries"}, {Name: "items", Kind: "collection"},
+				{Name: "recent", Kind: "view"}, {Name: strings.Repeat("c", 100), Kind: "collection"},
+			},
+			Enums: []database.CatalogName{}, Sequences: []database.CatalogName{},
+			Indexes: []database.IndexName{{Name: "_id_", Table: "items"}}, Functions: []database.CatalogName{},
+		}}
 		return out, nil
 	}
 	if !d.emptyCatalog {

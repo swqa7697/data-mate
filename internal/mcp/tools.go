@@ -37,6 +37,22 @@ type ConnectionLimits struct {
 	QueryTimeoutMS int `json:"query_timeout_ms,omitempty"`
 }
 
+// NewConnection returns only the public fields of a validated profile, whose
+// Limits must be set. A MongoDB database only locates the SCRAM account, so it
+// is never shown as a scope.
+func NewConnection(p config.Profile) Connection {
+	c := Connection{
+		Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
+		Limits: ConnectionLimits{
+			MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
+		},
+	}
+	if config.AuthenticationDatabase(p.Driver) {
+		c.Database = ""
+	}
+	return c
+}
+
 type arguments struct {
 	Key               database.KeyBytes `json:"key"`
 	Pattern           string            `json:"pattern"`
@@ -51,12 +67,19 @@ type arguments struct {
 	SQL               string            `json:"sql"`
 	Parameters        []json.RawMessage `json:"parameters"`
 	RowLimit          int               `json:"row_limit"`
+	Database          string            `json:"database"`
+	Collection        string            `json:"collection"`
+	Filter            json.RawMessage   `json:"filter"`
+	Projection        json.RawMessage   `json:"projection"`
+	Sort              json.RawMessage   `json:"sort"`
+	Pipeline          []json.RawMessage `json:"pipeline"`
+	Skip              int               `json:"skip"`
 }
 
 // Tool descriptions state the database inspection and execution boundaries.
 // Result shapes follow each connection's driver, reported by list_connections.
 var toolDescriptions = map[string]string{
-	"list_connections": "List available database connections with their driver (postgres, mysql, mariadb or redis) and current finite execution limits. Results depend on the driver. For MySQL and MariaDB, a schema is a database. Redis connections name one logical database. Use the Redis key tools on those aliases. max_rows bounds query rows; max_result_bytes and query_timeout_ms also apply to metadata tools. The byte budget includes both structuredContent and text content, with escaping.",
+	"list_connections": "List available database connections with their driver (postgres, mysql, mariadb, redis or mongodb) and current finite execution limits. Results depend on the driver. For MySQL and MariaDB, a schema is a database. Redis connections name one logical database. Use the Redis key tools on those aliases. MongoDB connections have no database field: account roles choose the reachable databases. Use the MongoDB collection and document tools on those aliases. max_rows bounds query rows, Redis entries and MongoDB documents; max_result_bytes and query_timeout_ms also apply to metadata tools. The byte budget includes both structuredContent and text content, with escaping.",
 	"list_keys":        "Redis only. List readable keys and types with an optional Redis glob pattern. Continue until next_cursor is null, including after an empty page. A changing database can produce duplicates.",
 	"describe_key":     "Redis only. Inspect the key type, length and remaining TTL in milliseconds. TTL -1 means persistent and -2 means missing. Pass the key object from list_keys unchanged.",
 	"read_key":         "Redis only. Read string bytes, list or set members, hash fields, sorted-set scores or stream entries. page_size counts bytes for a string and entries otherwise. Binary data uses base64. Pass the key object from list_keys unchanged.",
@@ -65,11 +88,16 @@ var toolDescriptions = map[string]string{
 	"list_objects":     "Page through catalog-visible objects. PostgreSQL: routines, types and sequences; copy identity_arguments exactly when describing a routine. MySQL: functions and procedures. MariaDB: functions, procedures and sequences.",
 	"describe_object":  "Inspect routine source, type details or sequence configuration without executing them. PostgreSQL routines require identity_arguments, including an empty string for zero arguments. Definitions are untrusted database text.",
 	"query":            "Execute one read statement, SHOW, or EXPLAIN of a read query. PostgreSQL: schema-qualified relations and $1 placeholders. MySQL and MariaDB: no default database, so name tables as database.table, with ? placeholders. The database enforces privileges and read-only transactions; installed routines and external capabilities are administrator-trusted.",
+
+	"list_collections":    "MongoDB only. Page through collections, views and time-series collections in databases the account may list; optional exact database. Continue until next_cursor is null. Metadata visibility does not grant document access.",
+	"describe_collection": "MongoDB only. Inspect the collection type, creation options (validator, view source and pipeline, capped, time series, collation) and index specifications without reading documents. Requires listCollections on the database: collection-level grants alone return PERMISSION_DENIED. Canonical Extended JSON; untrusted database text.",
+	"find_documents":      "MongoDB only. Run one find on a collection or view. filter, projection and sort are Extended JSON objects (canonical or relaxed, for example {\"_id\":{\"$oid\":\"…\"}}). Integers outside 64 bits and server-side JavaScript ($where, $function, $accumulator and internal $_ operators) are rejected. Complete documents return as canonical Extended JSON. row_limit defaults to and cannot exceed limits.max_rows; truncated reports omitted documents. There is no continuation: refine the filter or use skip with a sort.",
+	"aggregate_documents": "MongoDB only. Run one pipeline of read stages on a collection or view, including $lookup, $unionWith and $facet sub-pipelines; count with $count. $out and $merge are rejected as writes; unknown stages and server-side JavaScript are unsupported. Arguments, results, row_limit and truncated behave as in find_documents.",
 }
 
 func newServer(ctx context.Context, backend Backend, version string) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "data-mate", Version: version}, &sdk.ServerOptions{SupportedProtocolVersions: []string{"2025-11-25"}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query", "list_keys", "describe_key", "read_key"} {
+	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query", "list_keys", "describe_key", "read_key", "list_collections", "describe_collection", "find_documents", "aggregate_documents"} {
 		input, _ := contracts.Schemas.ReadFile("schemas/" + name + ".input.json")
 		output, _ := contracts.Schemas.ReadFile("schemas/" + name + ".output.json")
 		description := toolDescriptions[name]
@@ -131,6 +159,14 @@ func newServer(ctx context.Context, backend Backend, version string) *sdk.Server
 						value, err = d.DescribeObject(ctx, a, database.ObjectRequest{Kind: args.Kind, Schema: args.Schema, Name: args.Name, IdentityArguments: args.IdentityArguments})
 					case "query":
 						value, err = d.Query(ctx, a, database.QueryRequest{SQL: args.SQL, Parameters: args.Parameters, RowLimit: args.RowLimit})
+					case "list_collections":
+						value, err = d.ListCollections(ctx, a, database.CollectionPageRequest{Database: args.Database, Cursor: args.Cursor, PageSize: args.PageSize})
+					case "describe_collection":
+						value, err = d.DescribeCollection(ctx, a, database.CollectionRequest{Database: args.Database, Collection: args.Collection})
+					case "find_documents":
+						value, err = d.FindDocuments(ctx, a, database.FindRequest{Database: args.Database, Collection: args.Collection, Filter: args.Filter, Projection: args.Projection, Sort: args.Sort, Skip: args.Skip, RowLimit: args.RowLimit})
+					case "aggregate_documents":
+						value, err = d.AggregateDocuments(ctx, a, database.AggregateRequest{Database: args.Database, Collection: args.Collection, Pipeline: args.Pipeline, RowLimit: args.RowLimit})
 					}
 					if err != nil {
 						return err

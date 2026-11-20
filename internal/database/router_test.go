@@ -31,6 +31,15 @@ func (keyDriver) ListKeys(context.Context, Access, KeyPageRequest) (KeyPage, err
 	return KeyPage{Driver: "redis"}, nil
 }
 
+type documentDriver struct {
+	Operations
+	DocumentOperations
+}
+
+func (documentDriver) FindDocuments(context.Context, Access, FindRequest) (DocumentResult, error) {
+	return DocumentResult{Driver: "mongodb"}, nil
+}
+
 type resources struct{ invalidated, closed int }
 
 func (r *resources) Invalidate(string) { r.invalidated++ }
@@ -40,7 +49,7 @@ func (r *resources) Close()            { r.closed++ }
 // configuration, and lifecycle calls reach the shared resources once.
 func TestRouter(t *testing.T) {
 	shared := &resources{}
-	r := NewRouter(shared, map[string]Operations{"postgres": named{name: "postgres"}, "mysql": named{name: "mysql"}, "redis": keyDriver{}})
+	r := NewRouter(shared, map[string]Operations{"postgres": named{name: "postgres"}, "mysql": named{name: "mysql"}, "redis": keyDriver{}, "mongodb": documentDriver{}})
 	for _, driver := range []string{"postgres", "mysql"} {
 		a := NewAccess(config.Profile{Driver: driver}, "")
 		ready, err := r.Test(t.Context(), a)
@@ -60,9 +69,18 @@ func TestRouter(t *testing.T) {
 	if err != nil || page.Driver != "redis" {
 		t.Fatal("key dispatch", err)
 	}
+	mongodb := NewAccess(config.Profile{Driver: "mongodb"}, "")
+	documents, err := r.FindDocuments(t.Context(), mongodb, FindRequest{})
+	if err != nil || documents.Driver != "mongodb" {
+		t.Fatal("document dispatch", err)
+	}
+	// Capabilities are exclusive in both directions: SQL and key tools refuse
+	// the other families, document tools refuse Redis, and MongoDB refuses SQL.
 	_, redisErr := r.Query(t.Context(), redis, QueryRequest{})
 	_, sqlErr := r.ReadKey(t.Context(), NewAccess(config.Profile{Driver: "mysql"}, ""), KeyReadRequest{})
-	for _, err := range []error{redisErr, sqlErr} {
+	_, mongoErr := r.Query(t.Context(), mongodb, QueryRequest{})
+	_, collectionErr := r.ListCollections(t.Context(), redis, CollectionPageRequest{})
+	for _, err := range []error{redisErr, sqlErr, mongoErr, collectionErr} {
 		if !errors.As(err, &e) || e.Code != contracts.QueryUnsupported {
 			t.Fatal("incompatible tool", err)
 		}

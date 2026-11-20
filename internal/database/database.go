@@ -76,7 +76,8 @@ type Stage struct {
 }
 
 // DatabaseDescription is the CLI result for db describe. Relational drivers
-// return application schemas, including empty ones. Redis returns a keyspace sample.
+// return application schemas, including empty ones. MongoDB returns authorized
+// databases as schemas and omits Database. Redis returns a keyspace sample.
 type DatabaseDescription struct {
 	Version   int                 `json:"version"`
 	Alias     string              `json:"alias"`
@@ -102,7 +103,7 @@ type CatalogName struct {
 }
 
 // IndexName identifies an index; Table is set where index names are only
-// unique per table, as in MySQL and MariaDB.
+// unique per table, as in MySQL and MariaDB, or per collection in MongoDB.
 type IndexName struct {
 	Name  string `json:"name"`
 	Table string `json:"table,omitempty"`
@@ -226,5 +227,6 @@ type Driver interface {
 	Operations
 	RelationalOperations
 	KeyOperations
+	DocumentOperations
 	Resources
 }
