@@ -8,6 +8,6 @@ case "${MAJOR:-0}" in
 1 | true | yes) ;;
 *) args+=(--no-major) ;;
 esac
-go run github.com/oligot/go-mod-upgrade@latest "${args[@]}"
+go tool go-mod-upgrade "${args[@]}"
 go mod tidy
 echo 'Review dependency and import changes, then run make lint and make test.'
