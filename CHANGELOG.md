@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-19
+
 ### Added
 
 - Add MongoDB 7.0+ connections through the `mongodb` driver, with the same direct, TLS, SSH and SOCKS5 routes, encrypted credentials, staged `db test` diagnostics and `db describe` as the other drivers. Each connection reaches one standalone server, replica-set member or `mongos` directly and names an account and its authentication database (default `admin`); the account's roles choose the reachable databases. Agents use `list_collections`, `describe_collection`, `find_documents` and `aggregate_documents` to browse authorized collections, inspect options, validators, views and indexes, and run bounded reads with Extended JSON filters and pipelines that return canonical Extended JSON documents. Each new pooled connection verifies that the server enforces authorization and that the account holds only read and monitoring privileges without access to credential collections; pipeline stages that write, unknown stages and server-side JavaScript are rejected.
