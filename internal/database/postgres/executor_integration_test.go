@@ -154,7 +154,7 @@ func executorLimits(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn,
 	if err != nil || !out.Truncated || out.RowCount != 0 {
 		t.Fatal("whole row omission", err)
 	}
-	size, _ := QueryPayloadSize(out)
+	size, _ := database.QueryPayloadSize(out)
 	if size > 1024 {
 		t.Fatal("result exceeded byte cap")
 	}
@@ -167,7 +167,7 @@ func executorLimits(t *testing.T, d *Driver, a database.Access, admin *pgx.Conn,
 	if err != nil || !out.Truncated || out.RowCount != 1 {
 		t.Fatalf("escaped byte budget: rows=%d truncated=%v %v", out.RowCount, out.Truncated, err)
 	}
-	size, _ = QueryPayloadSize(out)
+	size, _ = database.QueryPayloadSize(out)
 	if size > 1024 {
 		t.Fatal("escaped payload overflow")
 	}
@@ -220,7 +220,7 @@ func executorMemory(t *testing.T, d *Driver, a database.Access) {
 		if err != nil || !out.Truncated || out.RowCount < 40 {
 			t.Fatal("maximum result fixture", err)
 		}
-		n, _ := QueryPayloadSize(out)
+		n, _ := database.QueryPayloadSize(out)
 		if n > limits.MaxResultBytes {
 			t.Fatal("payload overflow")
 		}
@@ -309,7 +309,7 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 			runtime.Gosched()
 		}
 		if mode == "invalidate" {
-			d.Invalidate(p.ID)
+			d.pools.Invalidate(p.ID)
 		} else if mode == "cancel" {
 			cancel()
 		}
@@ -347,9 +347,9 @@ func executorCancellation(t *testing.T, d *Driver, a database.Access, admin *pgx
 		sql("ALTER ROLE reader RESET statement_timeout; ALTER ROLE reader RESET lock_timeout")
 		// ALTER ROLE changes future logins; discard sessions that observed the
 		// temporary operator settings before later concurrency scenarios run.
-		d.Invalidate(a.Profile.ID)
+		d.pools.Invalidate(a.Profile.ID)
 	}()
-	d.Invalidate(a.Profile.ID)
+	d.pools.Invalidate(a.Profile.ID)
 	settings, err := d.Query(t.Context(), database.NewAccess(defaultProfile, a.Password()), database.QueryRequest{SQL: "SELECT current_setting('statement_timeout'),current_setting('lock_timeout')"})
 	if err != nil || settings.Rows[0][0] != "200ms" || settings.Rows[0][1] != "100ms" {
 		t.Fatal("operator deadlines overridden", err)

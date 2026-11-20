@@ -569,6 +569,9 @@ func TestConnectionInputs(t *testing.T) {
 		{"fractional millisecond timeout", "", []string{"--passwordless", "--query-timeout", "1.5ms"}},
 		{"invalid limit", "", []string{"--passwordless", "--max-rows", "0"}},
 		{"no alias nonTTY", "", []string{"--passwordless", "--alias", ""}},
+		// MySQL-family accounts reach databases through grants; profiles name none.
+		{"mysql database", "", []string{"--passwordless", "--driver", "mysql"}},
+		{"unknown driver", "", []string{"--passwordless", "--driver", "oracle"}},
 	} {
 		root := privateRoot(t)
 		keys := &testKeys{}
@@ -597,6 +600,7 @@ func TestConnectionInputs(t *testing.T) {
 		{"malformed quote", header + "\na,\"localhost,app,reader,secret-sentinel\n", nil},
 		{"invalid utf8", header + "\na,localhost,\xff,reader,secret-sentinel\n", nil},
 		{"hex port", header + ",port\na,localhost,app,reader,secret-sentinel,0x10\n", nil},
+		{"mysql database", header + ",driver\na,localhost,app,reader,secret-sentinel,mysql\n", nil},
 		{"proxy secret without proxy", "alias,host,database,username,password,proxy_password\na,localhost,app,reader,<none>,secret-sentinel\n", nil},
 		{"credential URL host", header + "\na,postgres://reader:secret-sentinel@host/db,app,reader,<none>\n", nil},
 		{"missing password nonTTY", "alias,host,database,username\na,localhost,app,reader\n", nil},
@@ -645,6 +649,76 @@ func TestConnectionInputs(t *testing.T) {
 	if s.SSHPrivateKey != "" || s.ProxyPassword != "proxy-secret" {
 		t.Fatal("transport switch failed")
 	}
+	// Driver changes apply that driver's port and database rules.
+	command(t, root, keys, "", 0, "add", "--alias", "shop", "--host", "localhost", "--username", "reader", "--driver", "mysql", "--passwordless", "--yes")
+	shop := func() config.Connection {
+		t.Helper()
+		for _, c := range snapshot(t, root).Connections {
+			if c.Alias == "shop" {
+				return c.Connection
+			}
+		}
+		t.Fatal("shop profile missing")
+		return config.Connection{}
+	}
+	if c := shop(); c.Port != 3306 || c.Database != "" {
+		t.Fatalf("mysql defaults: %+v", c)
+	}
+	command(t, root, keys, "", 2, "edit", "shop", "--driver", "postgres", "--yes")
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "postgres", "--database", "app", "--yes")
+	if c := shop(); c.Port != 5432 || c.Database != "app" {
+		t.Fatalf("postgres switch: %+v", c)
+	}
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "redis", "--yes")
+	if c := shop(); c.Port != 6379 || c.Database != "0" {
+		t.Fatalf("redis switch retained PostgreSQL settings: %+v", c)
+	}
+	redisList, _ := command(t, root, keys, "", 0, "list", "--json")
+	if contracts.Validate("db-list.output", []byte(redisList)) != nil {
+		t.Fatal("redis listing contract", redisList)
+	}
+	// Redis indexes cannot become PostgreSQL names without an explicit choice.
+	command(t, root, keys, "", 2, "edit", "shop", "--driver", "postgres", "--yes")
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "mariadb", "--yes")
+	if c := shop(); c.Port != 3306 || c.Database != "" {
+		t.Fatalf("mariadb switch: %+v", c)
+	}
+	out, _ := command(t, root, keys, "", 0, "list", "--json")
+	if contracts.Validate("db-list.output", []byte(out)) != nil || strings.Contains(out, `"database":""`) {
+		t.Fatal("database-less listing contract", out)
+	}
+	// MongoDB defaults to the admin authentication database, which never
+	// becomes a PostgreSQL database name without an explicit choice.
+	command(t, root, keys, "", 0, "edit", "shop", "--driver", "mongodb", "--yes")
+	if c := shop(); c.Port != 27017 || c.Database != "admin" {
+		t.Fatalf("mongodb switch: %+v", c)
+	}
+	mongoList, _ := command(t, root, keys, "", 0, "list", "--json")
+	if contracts.Validate("db-list.output", []byte(mongoList)) != nil {
+		t.Fatal("mongodb listing contract", mongoList)
+	}
+	command(t, root, keys, "", 2, "edit", "shop", "--driver", "postgres", "--yes")
+	// CSV import must retain database-less drivers and their defaults.
+	transfer := filepath.Join(t.TempDir(), "drivers.csv")
+	if err := os.WriteFile(transfer, []byte("alias,driver,host,username,password,database\nshop,mariadb,localhost,reader,<none>,\ncatalog,mysql,localhost,reader,<none>,\ncache,redis,localhost,reader,<none>,3\nvault,mongodb,localhost,reader,<none>,\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command(t, root, keys, "", 0, "import", transfer, "--on-conflict", "update", "--yes")
+	for _, c := range snapshot(t, root).Connections {
+		if (c.Alias == "shop" || c.Alias == "catalog") && (c.Connection.Port != 3306 || c.Connection.Database != "") {
+			t.Fatalf("CSV driver defaults: %+v", c)
+		}
+		if c.Alias == "cache" && (c.Connection.Port != 6379 || c.Connection.Database != "3") {
+			t.Fatalf("CSV Redis settings: %+v", c)
+		}
+		if c.Alias == "vault" && (c.Connection.Port != 27017 || c.Connection.Database != "admin") {
+			t.Fatalf("CSV MongoDB defaults: %+v", c)
+		}
+	}
+	command(t, root, keys, "", 0, "remove", "vault", "--yes")
+	command(t, root, keys, "", 0, "remove", "cache", "--yes")
+	command(t, root, keys, "", 0, "remove", "catalog", "--yes")
+	command(t, root, keys, "", 0, "remove", "shop", "--yes")
 	// Change config as the preview is written: the confirmed stale mutation fails.
 	cmd := newCommand(Build{}, keys)
 	cmd.SetIn(strings.NewReader(""))

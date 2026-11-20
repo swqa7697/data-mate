@@ -48,7 +48,7 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
  GRANT SELECT ON ALL TABLES IN SCHEMA catalog TO reader;
  GRANT SELECT ON ALL SEQUENCES IN SCHEMA catalog TO reader;`)
 	defer sql(`DROP FUNCTION pg_catalog.fixture_call(); DROP FUNCTION pg_catalog.abs(text)`)
-	describe := func(kind, name string, signature *string) database.ObjectDescription {
+	describe := func(kind, name string, signature *string) ObjectDescription {
 		t.Helper()
 		out, err := d.DescribeObject(t.Context(), access, database.ObjectRequest{Kind: kind, Schema: "catalog", Name: name, IdentityArguments: signature})
 		if err != nil {
@@ -134,7 +134,7 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	}
 	_, err = d.ListObjects(t.Context(), access, database.ObjectPageRequest{PageRequest: database.PageRequest{Cursor: *tables.NextCursor}})
 	requireCode(t, err, contracts.StaleCursor)
-	d.Invalidate(access.Profile.ID)
+	d.pools.Invalidate(access.Profile.ID)
 	req.Kind = "routine"
 	_, err = d.ListObjects(t.Context(), access, req)
 	requireCode(t, err, contracts.StaleCursor)
@@ -162,6 +162,9 @@ func objectAcceptance(t *testing.T, d *Driver, access database.Access, admin *pg
 	}
 	if desc.Columns[0].Default == nil || desc.Columns[2].Generated == nil || len(desc.Indexes) != 1 || len(desc.Constraints) == 0 || len(desc.Triggers) != 1 || len(desc.Policies) != 1 || !desc.RowSecurity {
 		t.Fatal("table definition metadata", desc)
+	}
+	if !desc.Columns[0].Nullable || desc.Columns[1].Nullable {
+		t.Fatalf("expected nullable id and NOT NULL domain label, got %+v", desc.Columns)
 	}
 	raw, _ := json.Marshal(desc)
 	if contracts.Validate("describe_table.output", raw) != nil {

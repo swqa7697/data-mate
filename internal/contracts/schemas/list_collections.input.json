@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "database": {
+      "type": "string",
+      "pattern": "^[^/\\\\. \"$\\x00]{1,63}$",
+      "description": "Exact MongoDB database to list; omit to page through every database the account may list."
+    },
+    "cursor": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "connection"
+  ],
+  "additionalProperties": false
+}

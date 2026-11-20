@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
-need go 'Install Go 1.27.1 from https://go.dev/dl/.'
+need go 'Install Go 1.27.4 from https://go.dev/dl/.'
 if ! go tool shfmt --version >/dev/null 2>&1; then
   echo 'Pinned shfmt is unavailable. Run make install (or go mod download).' >&2
   exit 1

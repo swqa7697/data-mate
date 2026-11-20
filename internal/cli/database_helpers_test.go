@@ -7,12 +7,12 @@ import (
 	"github.com/swqa7697/data-mate/internal/vault"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres"
 )
 
 // Shared by command diagnostics and the PTY subprocess; no network or native keys.
@@ -55,15 +55,40 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 	if d.describeError != nil {
 		return database.DatabaseDescription{}, d.describeError
 	}
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	if a.Profile.Driver == "redis" {
+		cursor := "more-keys"
+		out.Schemas = nil
+		out.RedisKeys = &database.KeyPage{Connection: out.Alias, Driver: out.Driver, Keys: []database.KeyInfo{
+			{Key: database.KeyBytes{Value: "line\n\x1b[31m", Encoding: "utf8"}, Type: "string"},
+			{Key: database.KeyBytes{Value: "/wA=", Encoding: "base64"}, Type: "hash"},
+		}, NextCursor: &cursor}
+		return out, nil
+	}
+	if a.Profile.Driver == "mongodb" {
+		// MongoDB lists authorized databases as schemas; the profile's
+		// authentication database is never a scope. Collection names may exceed
+		// the relational 64-character bound.
+		out.Database = ""
+		out.Schemas = []database.SchemaDescription{{
+			Name: "app",
+			Tables: []database.RelationName{
+				{Name: "events", Kind: "timeseries"}, {Name: "items", Kind: "collection"},
+				{Name: "recent", Kind: "view"}, {Name: strings.Repeat("c", 100), Kind: "collection"},
+			},
+			Enums: []database.CatalogName{}, Sequences: []database.CatalogName{},
+			Indexes: []database.IndexName{{Name: "_id_", Table: "items"}}, Functions: []database.CatalogName{},
+		}}
+		return out, nil
+	}
 	if !d.emptyCatalog {
 		for _, name := range []string{"Dot.Schema", "empty", "private", "public"} {
-			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}, Functions: []database.CatalogName{}}
+			s := database.SchemaDescription{Name: name, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.IndexName{}, Functions: []database.CatalogName{}}
 			if name != "empty" {
 				s.Tables = append(s.Tables, database.RelationName{Name: "line\n\x1b[31m", Kind: "table"})
 			}
 			if name == "public" {
-				s.Indexes = append(s.Indexes, database.CatalogName{Name: "z_idx"}, database.CatalogName{Name: "a_idx"}, database.CatalogName{Name: "idx\n\x1b[31m"})
+				s.Indexes = append(s.Indexes, database.IndexName{Name: "z_idx"}, database.IndexName{Name: "a_idx"}, database.IndexName{Name: "idx\n\x1b[31m"})
 				s.Functions = append(s.Functions, database.CatalogName{Name: "z_fn"}, database.CatalogName{Name: "a_fn"}, database.CatalogName{Name: "fn\n\x1b[31m"})
 				s.Enums = append(s.Enums, database.CatalogName{Name: "status"})
 				s.Sequences = append(s.Sequences, database.CatalogName{Name: "items_id_seq"})
@@ -78,9 +103,14 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 	return out, nil
 }
 
+// ValidateProfile applies the real drivers' nonsecret checks without dialing.
 func (d *fixtureDatabase) ValidateProfile(p config.Profile) error {
-	var driver postgres.Driver
-	return driver.ValidateProfile(p)
+	drivers, err := service.NewDriver()
+	if err != nil {
+		return err
+	}
+	defer drivers.Close()
+	return drivers.ValidateProfile(p)
 }
 func (d *fixtureDatabase) Close() {
 	d.mu.Lock()
@@ -122,7 +152,7 @@ type databaseFactory func() (cliDatabase, error)
 
 func defaultDatabase() (cliDatabase, error) {
 	if os.Getenv("DATA_MATE_CLI_REAL_DRIVER") == "1" {
-		return postgres.New()
+		return service.NewDriver()
 	}
 	return &fixtureDatabase{acceptAll: true}, nil
 }
@@ -135,6 +165,9 @@ type testDriver struct {
 func (d testDriver) ValidateProfile(p config.Profile) error { return d.cliDatabase.ValidateProfile(p) }
 func (d testDriver) Test(c context.Context, a database.Access) (database.Readiness, error) {
 	return d.cliDatabase.Test(c, a)
+}
+func (d testDriver) DescribeDatabase(c context.Context, a database.Access) (database.DatabaseDescription, error) {
+	return d.cliDatabase.DescribeDatabase(c, a)
 }
 func (d testDriver) Close()            { d.cliDatabase.Close() }
 func (d testDriver) Invalidate(string) {}

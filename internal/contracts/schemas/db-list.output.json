@@ -15,7 +15,14 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$"
           },
           "driver": {
-            "const": "postgres"
+            "type": "string",
+            "enum": [
+              "postgres",
+              "mysql",
+              "mariadb",
+              "redis",
+              "mongodb"
+            ]
           },
           "connection": {
             "type": "object",
@@ -44,7 +51,6 @@
             "required": [
               "host",
               "port",
-              "database",
               "username"
             ],
             "additionalProperties": false
@@ -55,7 +61,84 @@
           "driver",
           "connection"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "enum": [
+                    "postgres",
+                    "redis",
+                    "mongodb"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "connection": {
+                  "required": [
+                    "database"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "connection": {
+                  "not": {
+                    "required": [
+                      "database"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "redis"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "connection": {
+                  "properties": {
+                    "database": {
+                      "pattern": "^(0|[1-9][0-9]{0,9})$",
+                      "description": "Redis logical database index in canonical decimal, from 0 to 2147483647."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "mongodb"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "connection": {
+                  "properties": {
+                    "database": {
+                      "pattern": "^[^/\\\\. \"$\\x00]{1,63}$",
+                      "description": "MongoDB SCRAM authentication database (authSource). It locates the account and does not limit the reachable databases."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     }
   },

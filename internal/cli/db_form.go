@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"github.com/swqa7697/data-mate/internal/vault"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -37,9 +38,19 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 		name, label string
 		value       *string
 	}{
-		{"driver", "Driver", &profile.Driver}, {"alias", "Alias", &profile.Alias}, {"host", "Host", &profile.Connection.Host},
+		{"driver", "Driver (" + strings.Join(config.Drivers, ", ") + ")", &profile.Driver}, {"alias", "Alias", &profile.Alias}, {"host", "Host", &profile.Connection.Host},
 		{"port", "Port", nil}, {"database", "Database", &profile.Connection.Database}, {"username", "Username", &profile.Connection.Username},
 	} {
+		if field.name == "database" {
+			if !config.NamesDatabase(profile.Driver) {
+				continue
+			}
+			if profile.Driver == "redis" {
+				field.label = "Logical database index"
+			} else if config.AuthenticationDatabase(profile.Driver) {
+				field.label = "Authentication database"
+			}
+		}
 		missing := field.value != nil && *field.value == ""
 		if (fullForm && !changed(cmd, field.name)) || missing {
 			f, err := getForm()
@@ -62,6 +73,11 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 				profile.Connection.Port = n
 			} else {
 				*field.value = value
+			}
+		}
+		if field.name == "driver" {
+			if err := applyDriver(cmd, action, &profile, original); err != nil {
+				return profile, nil, err
 			}
 		}
 	}
@@ -162,6 +178,9 @@ func collectProfile(cmd *cobra.Command, action string, profile, original config.
 // validateCandidate applies the CLI's secret and endpoint rules shared by
 // interactive, scripted and CSV-imported connections.
 func validateCandidate(profile config.Profile, patch secretPatch) error {
+	if err := config.ValidateDatabase(profile.Driver, profile.Connection.Database); err != nil {
+		return invalid(err.Error())
+	}
 	for key, value := range patch {
 		if len(value) > vault.MaxSecretBytes || !utf8.ValidString(value) {
 			return invalid("credential exceeds its UTF-8 byte limit")
@@ -174,6 +193,33 @@ func validateCandidate(profile config.Profile, patch secretPatch) error {
 		if strings.ContainsAny(host, "/@?=#\\\r\n\t ") {
 			return invalid("endpoint must be a hostname or IP address")
 		}
+	}
+	return nil
+}
+
+// applyDriver validates the chosen driver and applies its defaults before the
+// remaining fields are collected. A port left at the previous driver's default
+// follows a driver change; MySQL-family profiles name no database, because
+// their accounts reach every database their grants allow.
+func applyDriver(cmd *cobra.Command, action string, p *config.Profile, original config.Profile) error {
+	if !slices.Contains(config.Drivers, p.Driver) {
+		return invalid("driver must be one of " + strings.Join(config.Drivers, ", "))
+	}
+	if !changed(cmd, "port") {
+		if p.Connection.Port == 0 || (action == "edit" && p.Driver != original.Driver && p.Connection.Port == config.DefaultPort(original.Driver)) {
+			p.Connection.Port = config.DefaultPort(p.Driver)
+		}
+	}
+	if !config.NamesDatabase(p.Driver) {
+		if changed(cmd, "database") {
+			return invalid(p.Driver + " profiles have no database; grants select the reachable databases and queries name tables as database.table")
+		}
+		p.Connection.Database = ""
+	} else if !changed(cmd, "database") && p.Driver != original.Driver {
+		// A PostgreSQL database name, a Redis database index and a MongoDB
+		// authentication database have different meanings, even when the text
+		// happens to fit both drivers, so a driver change starts from its default.
+		p.Connection.Database = config.DefaultDatabase(p.Driver)
 	}
 	return nil
 }

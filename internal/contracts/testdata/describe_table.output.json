@@ -1,5 +1,6 @@
 {
   "connection": "analytics",
+  "driver": "postgres",
   "schema": "public",
   "table": "orders",
   "kind": "table",

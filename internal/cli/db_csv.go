@@ -35,7 +35,7 @@ var (
 	// settingColumns map to the db add flag of the same name with "_" as "-".
 	settingColumns  = []string{"alias", "driver", "host", "port", "database", "username", "tls", "tls_ca", "ssh_host", "ssh_port", "ssh_user", "proxy", "proxy_user", "query_timeout", "max_rows", "max_result_bytes"}
 	integerColumns  = []string{"port", "ssh_port", "max_rows", "max_result_bytes"}
-	requiredColumns = []string{"alias", "host", "database", "username"}
+	requiredColumns = []string{"alias", "host", "username"}
 	secretColumns   = []string{"password", "ssh_password", "ssh_key_passphrase", "proxy_password"}
 	// csvColumns is the export order and the complete import vocabulary.
 	csvColumns = []string{"alias", "driver", "host", "port", "database", "username", "tls", "tls_ca", "ssh_host", "ssh_port", "ssh_user", "ssh_auth", "proxy", "proxy_user", "query_timeout", "max_rows", "max_result_bytes", "password", "ssh_key_file", "ssh_password", "ssh_key_passphrase", "proxy_password"}
@@ -74,7 +74,7 @@ func decodeImport(ctx context.Context, data []byte) ([]importRow, error) {
 	}
 	for _, name := range requiredColumns {
 		if _, ok := index[name]; !ok {
-			return nil, invalid("CSV requires alias, host, database, and username columns")
+			return nil, invalid("CSV requires alias, host, and username columns")
 		}
 	}
 	var rows []importRow
@@ -144,7 +144,11 @@ func decodeRow(ctx context.Context, line int, cell func(string) string) (importR
 		}
 	}
 	row := importRow{line: line, profile: defaultProfile(placeholderID), secrets: secretPatch{}, keyFile: cell("ssh_key_file")}
-	if err := applyOptions(options, &row.profile); err != nil {
+	err := applyOptions(options, &row.profile)
+	if err == nil {
+		err = applyDriver(options, "add", &row.profile, config.Profile{})
+	}
+	if err != nil {
 		var public *Error
 		if errors.As(err, &public) {
 			return fail(public.Message)

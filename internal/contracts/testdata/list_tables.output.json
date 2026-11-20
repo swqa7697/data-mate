@@ -1,5 +1,6 @@
 {
   "connection": "analytics",
+  "driver": "postgres",
   "tables": [
     {
       "schema": "public",

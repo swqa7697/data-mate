@@ -1,58 +1,23 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	protocol "github.com/swqa7697/data-mate/internal/mcp"
+	"github.com/swqa7697/data-mate/internal/testsupport/mcpfixture"
 )
-
-// The owned fixture has immutable access. Production leases remain service-owned.
-type wireBackend struct {
-	driver database.Driver
-	access database.Access
-}
-
-func (b *wireBackend) Work(ctx context.Context, alias string, fn func(context.Context, database.Driver, database.Access) error) error {
-	if alias != b.access.Profile.Alias {
-		return database.Fail(contracts.ConnectionNotFound, "connection not found", false)
-	}
-	return fn(ctx, b.driver, b.access)
-}
-func (b *wireBackend) Connections(_ context.Context, fn func([]protocol.Connection) error) error {
-	p := b.access.Profile
-	return fn([]protocol.Connection{{
-		Alias: p.Alias, Driver: p.Driver, Database: p.Connection.Database,
-		Limits: protocol.ConnectionLimits{
-			MaxRows: p.Limits.MaxRows, MaxResultBytes: p.Limits.MaxResultBytes, QueryTimeoutMS: p.Limits.QueryTimeoutMS,
-		},
-	}})
-}
 
 // Regression ladder 2: extend the existing PostgreSQL 16/18 acceptance scenario
 // through MCP. Query/codec cases stay in the shared driver corpus.
 func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	t.Helper()
-	limits := config.DefaultLimits()
-	a.Profile.Limits = &limits
-	backend := &wireBackend{d, a}
-	server, client := net.Pipe()
-	done := make(chan error, 1)
-	go func() { done <- protocol.Serve(t.Context(), server, backend, "fixture") }()
-	session, err := sdk.NewClient(&sdk.Implementation{Name: "integration", Version: "1"}, nil).Connect(t.Context(), &sdk.IOTransport{Reader: client, Writer: client}, nil)
-	if err != nil {
-		client.Close()
-		t.Fatal(err)
-	}
-	defer func() { session.Close(); <-done }()
+	router := database.NewRouter(d.pools, map[string]database.Operations{a.Profile.Driver: d.Operations()})
+	session := mcpfixture.Connect(t, router, a)
 	call := func(name string, args map[string]any, code contracts.Code) []byte {
 		t.Helper()
 		r, err := session.CallTool(t.Context(), &sdk.CallToolParams{Name: name, Arguments: args})
@@ -91,7 +56,7 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	}
 	call("list_tables", map[string]any{"connection": "fixture", "cursor": *page.NextCursor}, "")
 	raw = call("describe_table", map[string]any{"connection": "fixture", "schema": "app", "table": "items"}, "")
-	var desc database.Description
+	var desc Description
 	_ = json.Unmarshal(raw, &desc)
 	if len(desc.Relationships) != 1 {
 		t.Fatal("readable cross-schema relationship missing")
@@ -126,7 +91,7 @@ func mcpAcceptance(t *testing.T, d *Driver, a database.Access) {
 	}
 	call("query", map[string]any{"connection": "fixture", "sql": "SELECT 1"}, "")
 	// Cursor validity is checked on later calls in the same initialized session.
-	d.Invalidate(a.Profile.ID)
+	d.pools.Invalidate(a.Profile.ID)
 	call("list_tables", map[string]any{"connection": "fixture", "cursor": *page.NextCursor}, contracts.StaleCursor)
 	t.Log("MCP SDK metadata, cross-schema endpoints, cursor invalidation, query and shared read-only rejection passed")
 }

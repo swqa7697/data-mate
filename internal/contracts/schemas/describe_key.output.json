@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "driver": {
+      "const": "redis"
+    },
+    "key": {
+      "type": "object",
+      "properties": {
+        "encoding": {
+          "enum": [
+            "utf8",
+            "base64"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "encoding",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "type": {
+      "enum": [
+        "string",
+        "hash",
+        "list",
+        "set",
+        "zset",
+        "stream",
+        "none"
+      ]
+    },
+    "ttl_ms": {
+      "type": "integer",
+      "minimum": -2
+    },
+    "length": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    }
+  },
+  "required": [
+    "connection",
+    "driver",
+    "key",
+    "type",
+    "ttl_ms",
+    "length"
+  ],
+  "additionalProperties": false
+}

@@ -2,22 +2,20 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
 // DescribeDatabase lists the role-accessible catalog for the user,
 // with one statement that preserves empty schemas and a consistent catalog.
 func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
-	a, rev, err := normalized(a)
+	a, rev, err := database.Normalize(a)
 	if err != nil {
 		return database.DatabaseDescription{}, err
 	}
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
-	err = d.runNormalized(ctx, a, rev, nil, func(ctx context.Context, tx pgx.Tx, _ int) error {
+	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
+	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, tx pgx.Tx, _ int) error {
 		// A left join preserves empty schemas in the same catalog snapshot.
 		rows, err := tx.Query(ctx, `WITH schemas AS MATERIALIZED (
  SELECT oid,nspname FROM pg_catalog.pg_namespace
@@ -32,50 +30,27 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
  UNION ALL
  SELECT DISTINCT p.pronamespace,p.proname::text COLLATE "C",'function'::text
  FROM pg_catalog.pg_proc p JOIN schemas n ON n.oid=p.pronamespace WHERE p.prokind IN ('f','w')
- ) SELECT n.nspname::text,o.name,o.kind
+ ) SELECT n.nspname::text,COALESCE(o.name,''),COALESCE(o.kind,'')
  FROM schemas n LEFT JOIN objects o ON o.namespace=n.oid
  ORDER BY n.nspname::text COLLATE "C",o.name COLLATE "C",o.kind COLLATE "C"`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
 		for rows.Next() {
-			var schema string
-			var name, relationKind *string
+			var schema, name, relationKind string
 			if err := rows.Scan(&schema, &name, &relationKind); err != nil {
 				return err
 			}
-			if len(out.Schemas) == 0 || out.Schemas[len(out.Schemas)-1].Name != schema {
-				out.Schemas = append(out.Schemas, database.SchemaDescription{Name: schema, Tables: []database.RelationName{}, Enums: []database.CatalogName{}, Sequences: []database.CatalogName{}, Indexes: []database.CatalogName{}, Functions: []database.CatalogName{}})
-			}
-			if name != nil {
-				i := len(out.Schemas) - 1
-				switch *relationKind {
-				case "enum":
-					out.Schemas[i].Enums = append(out.Schemas[i].Enums, database.CatalogName{Name: *name})
-				case "S":
-					out.Schemas[i].Sequences = append(out.Schemas[i].Sequences, database.CatalogName{Name: *name})
-				case "i", "I":
-					out.Schemas[i].Indexes = append(out.Schemas[i].Indexes, database.CatalogName{Name: *name})
-				case "function":
-					out.Schemas[i].Functions = append(out.Schemas[i].Functions, database.CatalogName{Name: *name})
-				default:
-					out.Schemas[i].Tables = append(out.Schemas[i].Tables, database.RelationName{Name: *name, Kind: kind(*relationKind)})
-				}
+			if err := out.AddCatalogRow(&budget, schema, kind(relationKind), name, ""); err != nil {
+				return abortCatalogRead(rows, err)
 			}
 		}
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		// This CLI result has no duplicated MCP compatibility representation.
-		encoded, err := json.Marshal(out)
-		if err != nil {
-			return err
-		}
-		if a.Profile.Limits.MaxResultBytes > 0 && len(encoded) > a.Profile.Limits.MaxResultBytes {
-			return database.Fail(contracts.ResourceLimit, "database description exceeds profile result-byte limit", false)
-		}
-		return nil
+		return out.CheckSize(budget.Limit)
 	})
 	if err != nil {
 		return database.DatabaseDescription{}, err

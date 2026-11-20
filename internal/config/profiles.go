@@ -11,8 +11,10 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/swqa7697/data-mate/internal/contracts"
 )
@@ -43,12 +45,86 @@ type Profile struct {
 	Limits        *Limits    `json:"limits,omitempty"`
 }
 
-// Connection identifies a single PostgreSQL endpoint.
+// Connection identifies one endpoint and account. Database holds a PostgreSQL
+// database name, a canonical Redis logical database index or a MongoDB
+// authentication database.
 type Connection struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
-	Database string `json:"database"`
+	Database string `json:"database,omitempty"`
 	Username string `json:"username"`
+}
+
+// Drivers lists the supported database drivers in presentation order.
+var Drivers = []string{"postgres", "mysql", "mariadb", "redis", "mongodb"}
+
+// DefaultPort returns a driver's standard TCP port, or 0 for an unknown driver.
+func DefaultPort(driver string) int {
+	switch driver {
+	case "postgres":
+		return 5432
+	case "mysql", "mariadb":
+		return 3306
+	case "redis":
+		return 6379
+	case "mongodb":
+		return 27017
+	}
+	return 0
+}
+
+// NamesDatabase reports whether a profile stores a database value.
+func NamesDatabase(driver string) bool {
+	return driver == "postgres" || driver == "redis" || driver == "mongodb"
+}
+
+// AuthenticationDatabase reports whether a profile's database only locates the
+// account, as MongoDB's authentication database does. Account roles, not this
+// value, choose the reachable databases, so it is never presented as a scope.
+func AuthenticationDatabase(driver string) bool { return driver == "mongodb" }
+
+// DefaultDatabase returns the database a driver uses when none is entered.
+func DefaultDatabase(driver string) string {
+	switch driver {
+	case "redis":
+		return "0"
+	case "mongodb":
+		return "admin"
+	}
+	return ""
+}
+
+// MongoDBDatabaseName checks a MongoDB database name: 1 to 63 bytes of UTF-8
+// without /, \, ., space, ", $ or NUL. The error never echoes the value.
+func MongoDBDatabaseName(value string) error {
+	if value == "" || len(value) > 63 || !utf8.ValidString(value) || strings.ContainsAny(value, "/\\. \"$\x00") {
+		return errors.New("database name for MongoDB must be 1 to 63 bytes of UTF-8 without /, \\, ., spaces, \", $ or NUL")
+	}
+	return nil
+}
+
+// ValidateDatabase checks a profile's database value for a driver that gives
+// it a fixed form: a Redis database index or a MongoDB authentication database
+// name. Other drivers' values are not checked here. The error never echoes the
+// value.
+func ValidateDatabase(driver, value string) error {
+	switch driver {
+	case "redis":
+		_, err := RedisDatabaseIndex(value)
+		return err
+	case "mongodb":
+		return MongoDBDatabaseName(value)
+	}
+	return nil
+}
+
+// RedisDatabaseIndex parses a nonnegative, canonical decimal Redis database index.
+func RedisDatabaseIndex(value string) (int, error) {
+	n, err := strconv.ParseUint(value, 10, 31)
+	if err != nil || strconv.FormatUint(n, 10) != value {
+		return 0, errors.New("database index for Redis must be a decimal integer from 0 to 2147483647 without leading zeros")
+	}
+	return int(n), nil
 }
 
 // Transport selects explicit, optional transport protection.
@@ -160,6 +236,9 @@ func DecodeProfiles(r io.Reader) (Profiles, Revision, error) {
 	ids, aliases, refs := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for i := range p.Connections {
 		c := &p.Connections[i]
+		if err := ValidateDatabase(c.Driver, c.Connection.Database); err != nil {
+			return Profiles{}, "", err
+		}
 		c.ID = strings.ToLower(c.ID)
 		c.CredentialRef = strings.ToLower(c.CredentialRef)
 		if ids[c.ID] || aliases[c.Alias] || (c.CredentialRef != "" && refs[c.CredentialRef]) {
