@@ -62,11 +62,37 @@ func TestProfiles(t *testing.T) {
 		"alias uppercase":     func(c map[string]any) { c["alias"] = "Analytics" },
 		"alias leading digit": func(c map[string]any) { c["alias"] = "1bad" },
 		"invalid uuid":        func(c map[string]any) { c["id"] = "no" },
-		"unknown driver":      func(c map[string]any) { c["driver"] = "mysql" },
-		"port zero":           func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
-		"port high":           func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
-		"embedded secret":     func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
-		"removed scope":       func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
+		"unknown driver":      func(c map[string]any) { c["driver"] = "oracle" },
+		// PostgreSQL profiles name one database; MySQL-family accounts name none.
+		"postgres without database": func(c map[string]any) { delete(c["connection"].(map[string]any), "database") },
+		"mysql with database":       func(c map[string]any) { c["driver"] = "mysql" },
+		"redis with database name":  func(c map[string]any) { c["driver"] = "redis" },
+		"redis index overflow": func(c map[string]any) {
+			c["driver"] = "redis"
+			c["connection"].(map[string]any)["database"] = "2147483648"
+		},
+		"redis index with leading zero": func(c map[string]any) {
+			c["driver"] = "redis"
+			c["connection"].(map[string]any)["database"] = "01"
+		},
+		// MongoDB profiles name the authentication database: required, a plain
+		// database name (not $external), and bounded in bytes rather than runes.
+		"mongodb without database": func(c map[string]any) {
+			c["driver"] = "mongodb"
+			delete(c["connection"].(map[string]any), "database")
+		},
+		"mongodb $external authentication database": func(c map[string]any) {
+			c["driver"] = "mongodb"
+			c["connection"].(map[string]any)["database"] = "$external"
+		},
+		"mongodb authentication database over 63 bytes": func(c map[string]any) {
+			c["driver"] = "mongodb"
+			c["connection"].(map[string]any)["database"] = strings.Repeat("é", 32)
+		},
+		"port zero":       func(c map[string]any) { c["connection"].(map[string]any)["port"] = 0 },
+		"port high":       func(c map[string]any) { c["connection"].(map[string]any)["port"] = 65536 },
+		"embedded secret": func(c map[string]any) { c["connection"].(map[string]any)["password"] = "secret-sentinel" },
+		"removed scope":   func(c map[string]any) { c["scope"] = map[string]any{"mode": "blacklist"} },
 		"tls ca disabled": func(c map[string]any) {
 			c["transport"].(map[string]any)["tls"] = map[string]any{"mode": "disabled", "ca_file": "/tmp/test.pem"}
 		},
@@ -101,6 +127,19 @@ func TestProfiles(t *testing.T) {
 				t.Fatal("secret in error")
 			}
 		})
+	}
+	for _, driver := range []string{"mysql", "mariadb"} {
+		var v map[string]any
+		if err := json.Unmarshal(original, &v); err != nil {
+			t.Fatal(err)
+		}
+		c := v["connections"].([]any)[0].(map[string]any)
+		c["driver"] = driver
+		delete(c["connection"].(map[string]any), "database")
+		b, _ := json.Marshal(v)
+		if p, _, err := DecodeProfiles(bytes.NewReader(b)); err != nil || p.Connections[0].Connection.Database != "" {
+			t.Fatalf("%s profile without database: %v", driver, err)
+		}
 	}
 	for _, b := range []string{string(original) + "{}", strings.Replace(string(original), `"version": 1`, `"version": 1, "version": 1`, 1), strings.Repeat(" ", MaxProfileBytes+1)} {
 		if _, _, err := DecodeProfiles(strings.NewReader(b)); err == nil {

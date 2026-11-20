@@ -194,8 +194,10 @@ eval "actual=${COMPREPLY[0]}"
 	// Integration preflight must fail before creating Docker resources.
 	for _, args := range [][]string{
 		{"make", "test-integration"},
-		{"make", "test-integration", "DB_DRIVER=mysql"},
+		{"make", "test-integration", "DB_DRIVER=oracle"},
 		{"make", "test-integration", "DB_DRIVER=postgres", "DB_IMAGE=postgres:15"},
+		{"make", "test-integration", "DB_DRIVER=mysql", "DB_IMAGE=mysql:8.0"},
+		{"make", "test-integration", "DB_DRIVER=mariadb", "DB_IMAGE=mysql:8.4"},
 		{"env", "CI=1", "make", "test-integration", "DB_DRIVER=postgres"},
 		{"env", "DATABASE_URL=postgres://unrelated", "make", "test-integration", "DB_DRIVER=postgres"},
 	} {

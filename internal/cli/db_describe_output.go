@@ -38,15 +38,43 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 	labels := [...]string{"Enum", "Table", "View", "Sequence", "Index", "Function"}
 	headings := [...]string{"Enums", "Tables", "Views", "Sequences", "Indexes", "Functions"}
 	tints := [...]string{"\x1b[35m", "\x1b[32m", "\x1b[36m", "\x1b[33m", "\x1b[34m", "\x1b[31m"}
+	if description.Driver == "mongodb" {
+		// Time-series and other collection kinds are listed with collections.
+		labels = [...]string{"", "Collection", "View", "", "Index", ""}
+		headings[1] = "Collections"
+	}
 	var out strings.Builder
-	fmt.Fprintf(&out, "%s — database=%s\n", displayName(description.Alias), displayName(description.Database))
+	// MySQL-family and MongoDB descriptions name no database; each schema is a
+	// database, and a MongoDB authentication database is not a scope.
+	scope, unit, units := "database="+displayName(description.Database), "Schema", "schemas"
+	if description.Database == "" {
+		scope, unit, units = "driver="+displayName(description.Driver), "Database", "databases"
+	}
+	fmt.Fprintf(&out, "%s — %s\n", displayName(description.Alias), scope)
+	if page := description.RedisKeys; page != nil {
+		fmt.Fprintf(&out, "\nRedis keys on this page: %d\n", len(page.Keys))
+		for _, item := range page.Keys {
+			name := strconv.Quote(item.Key.Value)
+			if item.Key.Encoding == "base64" {
+				name = "base64 " + name
+			}
+			fmt.Fprintf(&out, "  %s  %s\n", name, displayName(item.Type))
+		}
+		if page.NextCursor != nil {
+			fmt.Fprintf(&out, "\nContinue with list_keys using cursor %q.\n", *page.NextCursor)
+		}
+		return out.String()
+	}
 	if len(description.Schemas) == 0 {
-		out.WriteString("\nNo application schemas.\n")
+		fmt.Fprintf(&out, "\nNo application %s.\n", units)
 		return out.String()
 	}
 	if color {
-		out.WriteString("\x1b[1mSchema\x1b[0m")
+		out.WriteString("\x1b[1m" + unit + "\x1b[0m")
 		for i, label := range labels {
+			if label == "" {
+				continue
+			}
 			out.WriteString("  ")
 			out.WriteString(tints[i] + label + "\x1b[0m")
 		}
@@ -64,7 +92,7 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		}
 		for _, item := range schema.Tables {
 			group := 1
-			if item.Kind == "view" || item.Kind == "materialized_view" {
+			if item.Kind == "view" || item.Kind == "materialized_view" || item.Kind == "system_view" {
 				group = 2
 			}
 			groups[group] = append(groups[group], item.Name)
@@ -73,7 +101,12 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 			groups[3] = append(groups[3], item.Name)
 		}
 		for _, item := range schema.Indexes {
-			groups[4] = append(groups[4], item.Name)
+			// MySQL-family index names are only unique per table.
+			name := item.Name
+			if item.Table != "" {
+				name = item.Table + "." + item.Name
+			}
+			groups[4] = append(groups[4], name)
 		}
 		for _, item := range schema.Functions {
 			groups[5] = append(groups[5], item.Name)

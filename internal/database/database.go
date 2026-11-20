@@ -1,4 +1,5 @@
-// Package database defines the shared driver boundary used by CLI and MCP.
+// Package database defines the shared driver boundary used by CLI and MCP, and
+// the driver-neutral bounds, codecs and diagnostics every driver implements.
 package database
 
 import (
@@ -59,7 +60,7 @@ func Fail(code contracts.Code, message string, retry bool) error {
 	return &Error{contracts.Failure{Code: code, Message: message, Retryable: retry}}
 }
 
-// Readiness reports successful connection and read-only transaction checks without reading application rows.
+// Readiness reports the stages reached while checking connectivity and read-only access.
 type Readiness struct {
 	ServerVersion int
 	TLS           bool
@@ -74,13 +75,16 @@ type Stage struct {
 	Error *contracts.Failure `json:"error,omitempty"`
 }
 
-// DatabaseDescription is the complete user-facing catalog. It is never
-// an MCP result; it includes empty application schemas but excludes system schemas.
+// DatabaseDescription is the CLI result for db describe. Relational drivers
+// return application schemas, including empty ones. MongoDB returns authorized
+// databases as schemas and omits Database. Redis returns a keyspace sample.
 type DatabaseDescription struct {
-	Version  int                 `json:"version"`
-	Alias    string              `json:"alias"`
-	Database string              `json:"database"`
-	Schemas  []SchemaDescription `json:"schemas"`
+	Version   int                 `json:"version"`
+	Alias     string              `json:"alias"`
+	Driver    string              `json:"driver"`
+	Database  string              `json:"database,omitempty"`
+	Schemas   []SchemaDescription `json:"schemas,omitzero"`
+	RedisKeys *KeyPage            `json:"keyspace,omitempty"`
 }
 
 // SchemaDescription groups catalog-visible application objects in a schema.
@@ -89,7 +93,7 @@ type SchemaDescription struct {
 	Tables    []RelationName `json:"tables"`
 	Enums     []CatalogName  `json:"enums"`
 	Sequences []CatalogName  `json:"sequences"`
-	Indexes   []CatalogName  `json:"indexes"`
+	Indexes   []IndexName    `json:"indexes"`
 	Functions []CatalogName  `json:"functions"`
 }
 
@@ -98,13 +102,20 @@ type CatalogName struct {
 	Name string `json:"name"`
 }
 
+// IndexName identifies an index; Table is set where index names are only
+// unique per table, as in MySQL and MariaDB, or per collection in MongoDB.
+type IndexName struct {
+	Name  string `json:"name"`
+	Table string `json:"table,omitempty"`
+}
+
 // RelationName describes a relation without reading its columns or rows.
 type RelationName struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
 }
 
-// Table identifies a catalog-visible relation.
+// Table identifies a catalog-visible relation; Kind uses the driver's vocabulary.
 type Table struct {
 	Schema string `json:"schema"`
 	Name   string `json:"name"`
@@ -121,18 +132,19 @@ type PageRequest struct {
 // TablePage is the bounded list_tables result.
 type TablePage struct {
 	Connection string  `json:"connection"`
+	Driver     string  `json:"driver"`
 	Tables     []Table `json:"tables"`
 	NextCursor *string `json:"next_cursor"`
 }
 
-// Column exposes type metadata and stored expressions without evaluating them.
+// Column holds the column fields every driver describes; drivers embed it to add
+// their native attributes. Stored expressions are exposed, never evaluated.
 type Column struct {
 	Name      string  `json:"name"`
 	Type      string  `json:"type"`
 	Nullable  bool    `json:"nullable"`
 	Default   *string `json:"default"`
 	Generated *string `json:"generated"`
-	Identity  string  `json:"identity"`
 }
 
 // Key contains a primary or unique key without its server definition.
@@ -148,22 +160,24 @@ type Relationship struct {
 	TargetColumns []string     `json:"target_columns"`
 }
 
-// Description is the bounded describe_table result.
-type Description struct {
-	Connection       string         `json:"connection"`
-	Schema           string         `json:"schema"`
-	Table            string         `json:"table"`
-	Kind             string         `json:"kind"`
-	Columns          []Column       `json:"columns"`
-	Keys             []Key          `json:"keys"`
-	Relationships    []Relationship `json:"relationships"`
-	Constraints      []Definition   `json:"constraints"`
-	Indexes          []Definition   `json:"indexes"`
-	Triggers         []Trigger      `json:"triggers"`
-	Policies         []Policy       `json:"policies"`
-	ViewDefinition   *string        `json:"view_definition"`
-	RowSecurity      bool           `json:"row_security"`
-	ForceRowSecurity bool           `json:"force_row_security"`
+// RelationCore holds the describe_table fields every driver returns; drivers
+// embed it in their driver-shaped descriptions.
+type RelationCore struct {
+	Connection     string         `json:"connection"`
+	Driver         string         `json:"driver"`
+	Schema         string         `json:"schema"`
+	Table          string         `json:"table"`
+	Kind           string         `json:"kind"`
+	Keys           []Key          `json:"keys"`
+	Relationships  []Relationship `json:"relationships"`
+	Constraints    []Definition   `json:"constraints"`
+	Indexes        []Definition   `json:"indexes"`
+	ViewDefinition *string        `json:"view_definition"`
+}
+
+// NewRelationCore starts a description with empty, never-null collections.
+func NewRelationCore(a Access, schema, table string) RelationCore {
+	return RelationCore{Connection: a.Profile.Alias, Driver: a.Profile.Driver, Schema: schema, Table: table, Keys: []Key{}, Relationships: []Relationship{}, Constraints: []Definition{}, Indexes: []Definition{}}
 }
 
 // ResultColumn preserves result labels and optional value encoding.
@@ -191,15 +205,28 @@ type QueryResult struct {
 	ElapsedMS  int64          `json:"elapsed_ms"`
 }
 
-// Driver never accepts agent-controlled credentials or connection strings.
-type Driver interface {
+// Operations is the connection lifecycle and CLI description shared by all drivers.
+type Operations interface {
+	ValidateProfile(config.Profile) error
 	Validate(Access) error
 	Test(context.Context, Access) (Readiness, error)
+	DescribeDatabase(context.Context, Access) (DatabaseDescription, error)
+}
+
+// RelationalOperations inspects catalogs and executes guarded SQL reads.
+type RelationalOperations interface {
 	ListTables(context.Context, Access, PageRequest) (TablePage, error)
-	ListObjects(context.Context, Access, ObjectPageRequest) (ObjectPage, error)
-	DescribeObject(context.Context, Access, ObjectRequest) (ObjectDescription, error)
-	DescribeTable(context.Context, Access, config.Table) (Description, error)
+	ListObjects(context.Context, Access, ObjectPageRequest) (any, error)
+	DescribeObject(context.Context, Access, ObjectRequest) (any, error)
+	DescribeTable(context.Context, Access, config.Table) (any, error)
 	Query(context.Context, Access, QueryRequest) (QueryResult, error)
-	Invalidate(string)
-	Close()
+}
+
+// Driver is the service-facing router over the available database capabilities.
+type Driver interface {
+	Operations
+	RelationalOperations
+	KeyOperations
+	DocumentOperations
+	Resources
 }

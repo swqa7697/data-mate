@@ -22,7 +22,6 @@ import (
 	"github.com/swqa7697/data-mate/internal/config"
 	"github.com/swqa7697/data-mate/internal/contracts"
 	"github.com/swqa7697/data-mate/internal/database"
-	"github.com/swqa7697/data-mate/internal/database/postgres"
 	relay "github.com/swqa7697/data-mate/internal/mcp"
 	"golang.org/x/sys/unix"
 )
@@ -40,21 +39,21 @@ func (d *sessionDriver) ListTables(ctx context.Context, a database.Access, q dat
 	}
 	return d.Driver.ListTables(ctx, a, q)
 }
-func (d *sessionDriver) ListObjects(ctx context.Context, a database.Access, q database.ObjectPageRequest) (database.ObjectPage, error) {
+func (d *sessionDriver) ListObjects(ctx context.Context, a database.Access, q database.ObjectPageRequest) (any, error) {
 	if q.Schema == "fault" {
-		return database.ObjectPage{}, database.Fail(contracts.StaleCursor, "synthetic metadata failure", false)
+		return nil, database.Fail(contracts.StaleCursor, "synthetic metadata failure", false)
 	}
 	return d.Driver.ListObjects(ctx, a, q)
 }
-func (d *sessionDriver) DescribeTable(ctx context.Context, a database.Access, q config.Table) (database.Description, error) {
+func (d *sessionDriver) DescribeTable(ctx context.Context, a database.Access, q config.Table) (any, error) {
 	if q.Name == "fault" {
-		return database.Description{}, database.Fail(contracts.PermissionDenied, "synthetic metadata failure", false)
+		return nil, database.Fail(contracts.PermissionDenied, "synthetic metadata failure", false)
 	}
 	return d.Driver.DescribeTable(ctx, a, q)
 }
-func (d *sessionDriver) DescribeObject(ctx context.Context, a database.Access, q database.ObjectRequest) (database.ObjectDescription, error) {
+func (d *sessionDriver) DescribeObject(ctx context.Context, a database.Access, q database.ObjectRequest) (any, error) {
 	if q.Name == "fault" {
-		return database.ObjectDescription{}, database.Fail(contracts.QueryUnsupported, "synthetic metadata failure", false)
+		return nil, database.Fail(contracts.QueryUnsupported, "synthetic metadata failure", false)
 	}
 	return d.Driver.DescribeObject(ctx, a, q)
 }
@@ -171,11 +170,11 @@ func awaitSignal(t *testing.T, ch <-chan struct{}) {
 // wire dispatch, cancellation or relay. This scenario owns that new boundary.
 func TestMCPSessions(t *testing.T) {
 	c, f, store := controllerFixture(t)
-	pg, err := postgres.New()
+	router, err := NewDriver()
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &sessionDriver{Driver: pg, entered: make(chan struct{}, 16), exited: make(chan struct{}, 16), release: make(chan struct{})}
+	d := &sessionDriver{Driver: router, entered: make(chan struct{}, 16), exited: make(chan struct{}, 16), release: make(chan struct{})}
 	f.driver = d
 	p := fixtureProfile()
 	p.Connection.Host = "synthetic-host"
@@ -187,7 +186,7 @@ func TestMCPSessions(t *testing.T) {
 	a, _ := sessionClient(t, c)
 	b, _ := sessionClient(t, c)
 	listed, err := a.ListTools(t.Context(), nil)
-	if err != nil || len(listed.Tools) != 6 {
+	if err != nil || len(listed.Tools) != 13 {
 		t.Fatal("tools", err)
 	}
 	names := map[string]bool{}
@@ -203,7 +202,7 @@ func TestMCPSessions(t *testing.T) {
 			t.Fatal("loose schema")
 		}
 	}
-	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query"} {
+	for _, name := range []string{"list_connections", "list_tables", "describe_table", "list_objects", "describe_object", "query", "list_keys", "describe_key", "read_key", "list_collections", "describe_collection", "find_documents", "aggregate_documents"} {
 		if !names[name] {
 			t.Fatal("missing tool", name)
 		}
@@ -218,11 +217,15 @@ func TestMCPSessions(t *testing.T) {
 		t.Helper()
 		var body struct {
 			Connections []struct {
+				Driver string         `json:"driver"`
 				Limits map[string]int `json:"limits"`
 			} `json:"connections"`
 		}
 		if result.IsError || contracts.Validate("list_connections.output", raw) != nil || json.Unmarshal(raw, &body) != nil || len(body.Connections) != 1 {
 			t.Fatalf("%s: invalid connection limits: %.300s", name, raw)
+		}
+		if got := body.Connections[0].Driver; got != p.Driver {
+			t.Fatalf("%s: driver = %s, want %s", name, got, p.Driver)
 		}
 		if got := body.Connections[0].Limits; !maps.Equal(got, want) {
 			t.Fatalf("%s: connection limits = %v, want %v", name, got, want)
@@ -230,15 +233,19 @@ func TestMCPSessions(t *testing.T) {
 	}
 	checkLimits(r, raw, "defaults", map[string]int{"max_rows": 50000})
 	for _, test := range []struct {
-		name   string
-		limits config.Limits
-		want   map[string]int
+		name, driver, database string
+		limits                 config.Limits
+		want                   map[string]int
 	}{
-		{"bounded", config.Limits{QueryTimeoutMS: 750, MaxRows: 12, MaxResultBytes: 4096}, map[string]int{"max_rows": 12, "max_result_bytes": 4096, "query_timeout_ms": 750}},
-		{"timeout removed", config.Limits{MaxRows: 12, MaxResultBytes: 4096}, map[string]int{"max_rows": 12, "max_result_bytes": 4096}},
-		{"bytes removed", config.Limits{QueryTimeoutMS: 750, MaxRows: 12}, map[string]int{"max_rows": 12, "query_timeout_ms": 750}},
-		{"defaults restored", config.DefaultLimits(), map[string]int{"max_rows": 50000}},
+		{"bounded", "postgres", "fixture", config.Limits{QueryTimeoutMS: 750, MaxRows: 12, MaxResultBytes: 4096}, map[string]int{"max_rows": 12, "max_result_bytes": 4096, "query_timeout_ms": 750}},
+		{"timeout removed", "mysql", "", config.Limits{MaxRows: 12, MaxResultBytes: 4096}, map[string]int{"max_rows": 12, "max_result_bytes": 4096}},
+		{"bytes removed", "mariadb", "", config.Limits{QueryTimeoutMS: 750, MaxRows: 12}, map[string]int{"max_rows": 12, "query_timeout_ms": 750}},
+		// The output contract forbids database for MongoDB: its authentication
+		// database locates the account and is not a reachable-database scope.
+		{"mongodb omits authentication database", "mongodb", "admin", config.DefaultLimits(), map[string]int{"max_rows": 50000}},
+		{"defaults restored", "postgres", "fixture", config.DefaultLimits(), map[string]int{"max_rows": 50000}},
 	} {
+		p.Driver, p.Connection.Database = test.driver, test.database
 		p.Limits = &test.limits
 		putProfiles(t, store, config.Profiles{Version: 1, Connections: []config.Profile{p}})
 		r, raw = callTool(t, a, "list_connections", map[string]any{})
@@ -298,6 +305,33 @@ func TestMCPSessions(t *testing.T) {
 			t.Fatal("metadata failure lost", test.name)
 		}
 		callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"})
+	}
+	// Ladder 2: complete MongoDB arguments pass their input schemas and reach a
+	// switch case, and the real router refuses them on a PostgreSQL alias before
+	// checkout without poisoning the session.
+	for name, args := range map[string]map[string]any{
+		"list_collections":    {"connection": "fixture", "database": "app", "cursor": "synthetic", "page_size": 1},
+		"describe_collection": {"connection": "fixture", "database": "app", "collection": "items"},
+		"find_documents": {
+			"connection": "fixture", "database": "app", "collection": "items",
+			"filter": json.RawMessage(`{"_id":{"$oid":"0123456789abcdef01234567"}}`), "projection": map[string]any{"name": 1},
+			"sort": json.RawMessage(`{"_id":-1}`), "skip": 1, "row_limit": 1,
+		},
+		"aggregate_documents": {
+			"connection": "fixture", "database": "app", "collection": "items",
+			"pipeline": json.RawMessage(`[{"$match":{}},{"$count":"n"}]`), "row_limit": 1,
+		},
+	} {
+		r, raw = callTool(t, a, name, args)
+		var body struct {
+			Error contracts.Failure `json:"error"`
+		}
+		if json.Unmarshal(raw, &body) != nil || !r.IsError || body.Error.Code != contracts.QueryUnsupported {
+			t.Fatalf("%s on postgres: %.200s", name, raw)
+		}
+		if probe, _ := callTool(t, a, "query", map[string]any{"connection": "fixture", "sql": "select 1"}); probe.IsError {
+			t.Fatal("document tool poisoned session", name)
+		}
 	}
 	// A genuine broken configuration must recover after repair on this session,
 	// including list_connections, without reopening the bridge or service.

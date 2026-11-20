@@ -10,7 +10,7 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^[^\\x00]+$",
-      "maxLength": 63
+      "maxLength": 64
     },
     "cursor": {
       "type": "string",

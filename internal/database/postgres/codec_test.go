@@ -127,7 +127,7 @@ func TestQueryCodecs(t *testing.T) {
 		Structured json.RawMessage     `json:"structuredContent"`
 	}{[]map[string]string{{"type": "text", "text": string(raw)}}, raw}
 	full, _ := json.Marshal(envelope)
-	n, e := QueryPayloadSize(out)
+	n, e := database.QueryPayloadSize(out)
 	if e != nil || n != len(full) {
 		t.Fatalf("payload budget %d != %d: %v", n, len(full), e)
 	}
@@ -149,4 +149,14 @@ func fixtureParameter(f codecFixture) json.RawMessage {
 	}
 	b, _ := json.Marshal(*f.Wire)
 	return b
+}
+
+// queryParameters is the production parameter path: shared bounds, then
+// PostgreSQL text encoding.
+func queryParameters(input []json.RawMessage) ([][]byte, error) {
+	params, err := database.Parameters(input)
+	if err != nil {
+		return nil, err
+	}
+	return textParameters(params), nil
 }

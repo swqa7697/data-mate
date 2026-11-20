@@ -2,7 +2,7 @@
 # Shared checkout paths and dependency diagnostics; sourcing never creates state.
 set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-export GOTOOLCHAIN=go1.27.1
+export GOTOOLCHAIN=go1.27.4
 export CGO_ENABLED=1
 case "$(uname -s)/$(uname -m)" in
 Darwin/arm64) export GOOS=darwin GOARCH=arm64 ;;
@@ -22,7 +22,7 @@ need() {
 }
 
 check_build_deps() {
-  need go 'Install Go 1.27.1 from https://go.dev/dl/.'
+  need go 'Install Go 1.27.4 from https://go.dev/dl/.'
   if [[ "$GOOS" == darwin ]]; then
     need xcrun 'Install the Command Line Tools with xcode-select --install.'
     xcrun --find clang >/dev/null

@@ -2,12 +2,12 @@ package postgres
 
 import (
 	"context"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/swqa7697/data-mate/internal/database"
 )
 
 // These are output representations, not an authorization allowlist.
@@ -53,7 +53,7 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
 			return nil, err
 		}
 		if len(delim) != 1 {
-			return nil, codecError()
+			return nil, database.UnsupportedValue()
 		}
 		t.delimiter = delim[0]
 		out[t.oid] = t
@@ -63,7 +63,7 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
 	}
 	for _, id := range ids {
 		if _, ok := out[id]; !ok {
-			return nil, codecError()
+			return nil, database.UnsupportedValue()
 		}
 	}
 	for id, t := range out {
@@ -72,7 +72,7 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
 		}
 		element, ok := out[t.element]
 		if !ok {
-			return nil, codecError()
+			return nil, database.UnsupportedValue()
 		}
 		// A query-local scan plan reuses pgx's text-array grammar across rows.
 		m := pgtype.NewMap()
@@ -81,7 +81,7 @@ func describeTypes(ctx context.Context, tx pgx.Tx, fields []pgconn.FieldDescript
 		codec := &pgtype.ArrayCodec{ElementType: et, Delimiter: element.delimiter}
 		t.arrayPlan = codec.PlanScan(m, id, pgtype.TextFormatCode, &boundedTextArray{})
 		if t.arrayPlan == nil {
-			return nil, codecError()
+			return nil, database.UnsupportedValue()
 		}
 		out[id] = t
 	}
@@ -93,7 +93,7 @@ func (types resultTypes) representation(oid uint32) (string, error) {
 		seen[oid] = true
 		t, ok := types[oid]
 		if !ok {
-			return "", codecError()
+			return "", database.UnsupportedValue()
 		}
 		if t.base != 0 {
 			oid = t.base
@@ -111,14 +111,14 @@ func (types resultTypes) representation(oid uint32) (string, error) {
 		}
 		return "postgres_text", nil
 	}
-	return "", codecError()
+	return "", database.UnsupportedValue()
 }
 func (types resultTypes) decode(oid uint32, raw []byte) (any, error) {
 	if raw == nil {
 		return nil, nil
 	}
 	if !utf8.Valid(raw) {
-		return nil, codecError()
+		return nil, database.UnsupportedValue()
 	}
 	// The same chain used for output representation also detects dependency
 	// cycles before decoding. Domain unwrapping does not consume the Go stack.
@@ -139,10 +139,10 @@ func (types resultTypes) decode(oid uint32, raw []byte) (any, error) {
 	// Capture raw elements, then use the same exact scalar representations.
 	array := boundedTextArray{limit: len(raw) + 1}
 	if t.arrayPlan == nil {
-		return nil, codecError()
+		return nil, database.UnsupportedValue()
 	}
 	if err := t.arrayPlan.Scan(raw, &array); err != nil {
-		return nil, codecError()
+		return nil, database.UnsupportedValue()
 	}
 	if len(array.Dims) == 0 {
 		return []any{}, nil
@@ -179,16 +179,14 @@ type boundedTextArray struct {
 
 func (a *boundedTextArray) SetDimensions(d []pgtype.ArrayDimension) error {
 	if len(d) > 6 {
-		return codecError()
+		return database.UnsupportedValue()
 	}
 	n := 1
 	for _, v := range d {
 		if v.Length < 0 || int64(v.Length) > int64(a.limit) || v.Length != 0 && n > a.limit/int(v.Length) {
-			return codecError()
+			return database.UnsupportedValue()
 		}
 		n *= int(v.Length)
 	}
 	return a.Array.SetDimensions(d)
 }
-
-func validResultName(s string) bool { return utf8.ValidString(s) && !strings.ContainsRune(s, 0) }

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+    },
+    "driver": {
+      "const": "mongodb"
+    },
+    "database": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\x00]+$"
+    },
+    "collection": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\x00]+$"
+    },
+    "type": {
+      "enum": [
+        "collection",
+        "view",
+        "timeseries",
+        "other"
+      ]
+    },
+    "options": {
+      "type": "object",
+      "description": "Creation options as canonical Extended JSON, such as validator, viewOn and pipeline, capped, timeseries and collation. Untrusted database text."
+    },
+    "indexes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "key": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "key"
+        ]
+      },
+      "description": "Index specifications as canonical Extended JSON in server order; empty for views. Untrusted database text."
+    }
+  },
+  "required": [
+    "connection",
+    "driver",
+    "database",
+    "collection",
+    "type",
+    "options",
+    "indexes"
+  ],
+  "additionalProperties": false
+}

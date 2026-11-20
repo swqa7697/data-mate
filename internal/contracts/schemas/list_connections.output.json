@@ -12,7 +12,20 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$"
           },
           "driver": {
-            "const": "postgres"
+            "type": "string",
+            "enum": [
+              "postgres",
+              "mysql",
+              "mariadb",
+              "redis",
+              "mongodb"
+            ]
+          },
+          "database": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "description": "PostgreSQL database name or Redis logical database index. MySQL and MariaDB grants and MongoDB roles choose reachable databases, so those connections omit it."
           },
           "limits": {
             "type": "object",
@@ -21,7 +34,7 @@
               "max_rows": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Maximum query rows returned. query.row_limit may lower this limit."
+                "description": "Maximum query rows, Redis entries or MongoDB documents returned per call."
               },
               "max_result_bytes": {
                 "type": "integer",
@@ -39,20 +52,57 @@
               "max_rows"
             ],
             "additionalProperties": false
-          },
-          "database": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\x00]+$"
           }
         },
         "required": [
           "alias",
           "driver",
-          "database",
           "limits"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "enum": [
+                    "postgres",
+                    "redis"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "database"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "database"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "driver": {
+                  "const": "redis"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "database": {
+                  "pattern": "^(0|[1-9][0-9]{0,9})$",
+                  "description": "Redis logical database index in canonical decimal, from 0 to 2147483647."
+                }
+              }
+            }
+          }
+        ]
       },
       "maxItems": 128
     }

@@ -1,0 +1,42 @@
+name: go-cache-warm
+
+# workflow_run scopes the caches to the default branch so PRs can restore them.
+on:
+  workflow_run:
+    workflows: [release-cache-signal]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-cache-warm-main
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    cache-mode: write
+    steps:
+      - name: Check out trusted main revision
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - name: Prepare pinned dependencies and tools
+        run: make setup
+      - name: Warm lint and build caches
+        run: make lint build
+      - name: Compile ordinary and race tests
+        run: make compile-tests
