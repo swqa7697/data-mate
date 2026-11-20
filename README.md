@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="#supported-databases">Supported databases</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#manage-connections">Manage connections</a> ·
   <a href="#what-agents-can-do">Agent tools</a> ·
@@ -29,15 +30,24 @@ Data Mate lets coding agents inspect relational databases with SQL, explore Redi
 | Feature               | What it gives you                                                             |
 | --------------------- | ----------------------------------------------------------------------------- |
 | Read-only tools       | Inspect relational catalogs, run SQL reads, browse Redis keys and values, and query MongoDB collections. |
-| Databases             | Connect to PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, standalone Redis 7.0+, and MongoDB 7.0+ (see [MongoDB reader](#mongodb-reader) for deployment requirements). |
 | Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
 | Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
 | Agent setup           | Register the service with installed Codex and Claude Code clients.            |
 | Shell completion      | Complete commands and saved aliases in Bash or zsh.                           |
 
+## Supported databases
+
+| Database | Minimum version | Driver in `db add` |
+| --- | --- | --- |
+| PostgreSQL | 16 | `postgres` |
+| MySQL | 8.4 | `mysql` |
+| MariaDB | 10.11 | `mariadb` |
+| Redis (standalone) | 7.0 | `redis` |
+| [MongoDB](#mongodb-reader) | 7.0 | `mongodb` |
+
 ## Get started
 
-Data Mate supports **macOS 15+ on Apple Silicon**, **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+), and **PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, standalone Redis 7.0+, or MongoDB 7.0+**. Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only database account with access only to the data you intend to share; see [Read-only accounts](#read-only-accounts).
+Data Mate runs on **macOS 15+ on Apple Silicon** and **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+). Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only database account with access only to the data you intend to share; see [Read-only accounts](#read-only-accounts).
 
 Install the latest stable release:
 
