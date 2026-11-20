@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,20 +106,78 @@ func TestServerCursorCleanup(t *testing.T) {
 	})
 
 	t.Run("failed kill discards the connection", func(t *testing.T) {
-		_, stats, err := run(t, ready(newScramPeer(credentials), find, getMore(send(batch("nextBatch", item(2)))), kill(failure(8000))))
-		var safe *database.Error
-		if !errors.As(err, &safe) || safe.Code != contracts.ConnectFailed {
-			t.Fatalf("cleanup failure returned %v", err)
-		}
-		if stats.Idle != 0 || stats.Live != 0 {
-			t.Fatalf("%d idle and %d live connections after a failed kill", stats.Idle, stats.Live)
+		for _, reply := range []bson.D{
+			failure(8000),
+			ok(),
+			ok(kv("cursorsKilled", bson.A{int64(78)}), kv("cursorsNotFound", bson.A{}), kv("cursorsAlive", bson.A{}), kv("cursorsUnknown", bson.A{})),
+		} {
+			_, stats, err := run(t, ready(newScramPeer(credentials), find, getMore(send(batch("nextBatch", item(2)))), kill(reply)))
+			var safe *database.Error
+			if !errors.As(err, &safe) || safe.Code != contracts.ConnectFailed {
+				t.Fatalf("cleanup reply %v returned %v", reply, err)
+			}
+			if stats.Idle != 0 || stats.Live != 0 {
+				t.Fatalf("%d idle and %d live connections after a failed kill", stats.Idle, stats.Live)
+			}
 		}
 	})
 
+	t.Run("cancelled read stops before consuming a buffered document", func(t *testing.T) {
+		cur := serverCursor{batch: []bson.Raw{marshal(item(1))}}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		doc, more, err := cur.next(ctx, 0)
+		var safe *database.Error
+		if !errors.As(err, &safe) || safe.Code != contracts.Cancelled || more || doc != nil || len(cur.batch) != 1 {
+			t.Fatalf("cancelled buffered read: more=%t, remaining=%d, err=%v", more, len(cur.batch), err)
+		}
+	})
+
+	t.Run("unsupported legacy binary still closes the first batch cursor", func(t *testing.T) {
+		// The outer value is complete. Its obsolete inner length claims one
+		// byte of data where the payload is empty.
+		value := bson.RawValue{Type: bson.TypeBinary, Value: []byte{4, 0, 0, 0, 2, 1, 0, 0, 0}}
+		first := respond("find", batch("firstBatch", bson.D{kv("value", value)}))
+		out, stats, err := run(t, ready(newScramPeer(credentials), first, kill(killed)))
+		var safe *database.Error
+		if !errors.As(err, &safe) || safe.Code != contracts.QueryUnsupported || len(out.Documents) != 0 || stats.Idle != 1 {
+			t.Fatalf("unsupported result: documents=%d idle=%d err=%v", len(out.Documents), stats.Idle, err)
+		}
+	})
+
+	t.Run("oversized collection page kills its cursor before another batch", func(t *testing.T) {
+		// A page can exceed its cap in the first, unsorted batch. Getting
+		// the rest of the catalog cannot make a page of this size fit.
+		const coll = "$cmd.listCollections"
+		body := ok(kv("cursor", bson.D{kv("firstBatch", bson.A{
+			bson.D{kv("name", strings.Repeat("z", 230)), kv("type", "collection")},
+			bson.D{kv("name", strings.Repeat("a", 230)), kv("type", "collection")},
+		}), kv("id", int64(77)), kv("ns", "app."+coll)}))
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		peer := newPeer(t, cancel, false, ready(newScramPeer(credentials),
+			exchange{command: "listCollections", reply: send(body)},
+			exchange{command: "killCursors", reply: send(killed), check: func(req bson.Raw) error {
+				return expect(req, "killCursors", coll)
+			}},
+		))
+		r := fakeRegistry(t)
+		p := fakeProfile(peer.port(), limits)
+		p.Limits.MaxResultBytes = 512
+		_, err := New(r).ListCollections(ctx, database.NewAccess(p, fakeSecret), database.CollectionPageRequest{Database: "app", PageSize: 100000})
+		var safe *database.Error
+		if !errors.As(err, &safe) || safe.Code != contracts.ResourceLimit {
+			t.Fatalf("oversized collection page returned %v", err)
+		}
+		r.Close()
+		peer.wait(t)
+	})
+
 	t.Run("cancelled getMore kills the cursor from a side connection", func(t *testing.T) {
+		notFound := ok(kv("cursorsKilled", bson.A{}), kv("cursorsNotFound", bson.A{int64(77)}), kv("cursorsAlive", bson.A{}), kv("cursorsUnknown", bson.A{}))
 		_, _, err := run(t,
 			ready(newScramPeer(credentials), find, getMore(nil)),
-			handshake(newScramPeer(credentials), kill(killed)))
+			handshake(newScramPeer(credentials), kill(notFound)))
 		var safe *database.Error
 		if !errors.As(err, &safe) || safe.Code != contracts.Cancelled {
 			t.Fatalf("cancelled read returned %v", err)
@@ -128,20 +187,25 @@ func TestServerCursorCleanup(t *testing.T) {
 	// A peer can drop the connection after the last reply, so a read that
 	// otherwise succeeded must fail when the side kill is unconfirmed.
 	t.Run("unconfirmed side kill cannot report success", func(t *testing.T) {
+		unknown := ok(kv("cursorsKilled", bson.A{}), kv("cursorsNotFound", bson.A{}), kv("cursorsAlive", bson.A{}), kv("cursorsUnknown", bson.A{int64(77)}))
+		side := newPeer(t, nil, false, handshake(newScramPeer(credentials), kill(unknown)))
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
 		ln.Close()
-		raw, peer := net.Pipe()
-		defer peer.Close()
+		raw, remote := net.Pipe()
+		defer remote.Close()
 		s := newSession(raw, raw)
 		s.Close()
-		c := &serverCursor{s: s, a: database.NewAccess(fakeProfile(port, limits), fakeSecret), db: "app", coll: "items", id: 77}
-		var safe *database.Error
-		if err := c.close(); !errors.As(err, &safe) || safe.Code != contracts.ConnectFailed {
-			t.Fatalf("unconfirmed kill returned %v", err)
+		for _, endpoint := range []int{port, side.port()} {
+			c := &serverCursor{s: s, a: database.NewAccess(fakeProfile(endpoint, limits), fakeSecret), db: "app", coll: "items", id: 77}
+			var safe *database.Error
+			if err := c.close(); !errors.As(err, &safe) || safe.Code != contracts.ConnectFailed {
+				t.Fatalf("unconfirmed kill returned %v", err)
+			}
 		}
+		side.wait(t)
 	})
 }

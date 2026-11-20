@@ -12,6 +12,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -99,18 +100,23 @@ func (p *fakePeer) wait(t *testing.T) {
 }
 
 func (p *fakePeer) serve(scripts [][]exchange) error {
+	var wg sync.WaitGroup
+	errs := make([]error, len(scripts))
 	for i, script := range scripts {
 		c, err := p.ln.Accept()
 		if err != nil {
-			return fmt.Errorf("accept %d: %w", i, err)
+			errs[i] = fmt.Errorf("accept %d: %w", i, err)
+			break
 		}
-		err = p.session(c, script)
-		c.Close()
-		if err != nil {
-			return fmt.Errorf("connection %d: %w", i, err)
-		}
+		wg.Go(func() {
+			defer c.Close()
+			if err := p.session(c, script); err != nil {
+				errs[i] = fmt.Errorf("connection %d: %w", i, err)
+			}
+		})
 	}
-	return nil
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 func (p *fakePeer) session(c net.Conn, script []exchange) error {

@@ -46,6 +46,9 @@ func (s *session) openCursor(ctx context.Context, a database.Access, db string, 
 // getMore when the current batch is exhausted; zero leaves the size to the
 // server. getMore never carries maxTimeMS; the cursor's command already did.
 func (c *serverCursor) next(ctx context.Context, batchSize int64) (bson.Raw, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, database.CommonError(err)
+	}
 	for len(c.batch) == 0 {
 		if c.id == 0 {
 			return nil, false, nil
@@ -99,7 +102,7 @@ func (c *serverCursor) close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	body, err := c.s.control(ctx, c.db, killCursors(c.coll, id))
-	if err == nil && killed(body, id, false) {
+	if err == nil && killed(body, id) {
 		return nil
 	}
 	c.s.Close()
@@ -115,35 +118,28 @@ func killCursors(coll string, id int64) bson.D {
 }
 
 // killed reports that the server no longer holds the cursor: it was killed or
-// had already ended, and is not alive. On the cursor's own connection it must
-// also not be unknown; a side connection may find that the server already
-// reaped it, so there unknown means gone.
-func killed(body bson.Raw, id int64, unknownGone bool) bool {
+// had already ended. A single requested ID must have exactly one outcome.
+func killed(body bson.Raw, id int64) bool {
 	top, err := fields(body)
 	if err != nil {
 		return false
 	}
-	keys := []string{"cursorsAlive", "cursorsUnknown"}
-	if unknownGone {
-		keys = keys[:1]
-	}
-	for _, key := range keys {
-		v, ok := top[key]
-		if !ok {
-			continue
-		}
-		// One cursor was named, so each list holds at most that cursor.
-		list, err := values(v, 1)
+	confirmed := false
+	for _, key := range []string{"cursorsKilled", "cursorsNotFound", "cursorsAlive", "cursorsUnknown"} {
+		list, err := values(top[key], 1)
 		if err != nil {
 			return false
 		}
-		for _, item := range list {
-			if n, ok := item.Int64OK(); !ok || n == id {
-				return false
-			}
+		if len(list) == 0 {
+			continue
 		}
+		n, ok := list[0].Int64OK()
+		if !ok || n != id || confirmed || key == "cursorsAlive" || key == "cursorsUnknown" {
+			return false
+		}
+		confirmed = true
 	}
-	return true
+	return confirmed
 }
 
 // killOrphan stops a known cursor after its session closed and reports
@@ -159,7 +155,7 @@ func killOrphan(a database.Access, db, coll string, id int64) bool {
 	}
 	defer s.Close()
 	body, err := s.control(ctx, db, killCursors(coll, id))
-	return err == nil && killed(body, id, true)
+	return err == nil && killed(body, id)
 }
 
 // parseCursor reads a cursor envelope: an int64 id, a namespace in db and a

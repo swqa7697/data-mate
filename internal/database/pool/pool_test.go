@@ -300,6 +300,42 @@ func TestPoolLifecycle(t *testing.T) {
 		release(true)
 	})
 
+	// A connection-specific approval must never admit a newly opened socket.
+	// Stagger the audits to prove each expiry belongs to its own connection.
+	synctest.Test(t, func(t *testing.T) {
+		r := registry(t, Options{IdleTTL: 2 * approvalTTL})
+		acquire := func() (*fakeConn, func(bool), error) {
+			c, _, release, err := CheckoutConnection(t.Context(), r, a, "revision", open, approve)
+			return c, release, err
+		}
+		_, releaseFirst, err := acquire()
+		if err != nil {
+			t.Fatal(err)
+		}
+		auditErr.Store(&denied)
+		defer auditErr.Store(nil)
+		_, _, err = acquire()
+		requireCode(t, err, contracts.ReadOnlyViolation)
+
+		time.Sleep(approvalTTL / 2)
+		auditErr.Store(nil)
+		second, releaseSecond, err := acquire()
+		if err != nil {
+			t.Fatal(err)
+		}
+		releaseSecond(true)
+		releaseFirst(true)
+		auditErr.Store(&denied)
+		time.Sleep(approvalTTL / 2)
+		_, _, err = acquire() // the first socket was returned last
+		requireCode(t, err, contracts.ReadOnlyViolation)
+		c, release, err := acquire()
+		if err != nil || c != second {
+			t.Fatalf("second connection lost its unexpired approval: %v", err)
+		}
+		release(true)
+	})
+
 	// A pool without users retires after its idle TTL.
 	short := registry(t, Options{IdleTTL: 10 * time.Millisecond})
 	_, _, release, err = Checkout(t.Context(), short, a, "revision", open, approve)

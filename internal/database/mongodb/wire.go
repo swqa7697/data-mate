@@ -56,10 +56,18 @@ var (
 
 func kv(key string, value any) bson.E { return bson.E{Key: key, Value: value} }
 
+type bsonValidation uint8
+
+const (
+	controlReply bsonValidation = iota
+	resultFrame
+	resultText
+)
+
 // readReply reads one OP_MSG reply to request id. Server-controlled lengths
 // are checked against limit before any allocation, and the returned document
 // has passed structural validation.
-func readReply(r *bufio.Reader, id int32, limit int) (bson.Raw, error) {
+func readReply(r *bufio.Reader, id int32, limit int, mode bsonValidation) (bson.Raw, error) {
 	var header [headerSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return nil, err
@@ -103,7 +111,7 @@ func readReply(r *bufio.Reader, id int32, limit int) (bson.Raw, error) {
 	if size, ok := length32(doc); !ok || size != len(doc) {
 		return nil, errProtocol
 	}
-	if err := validateDocument(doc, 0, false); err != nil {
+	if err := validateDocument(doc, 0, mode); err != nil {
 		return nil, err
 	}
 	return bson.Raw(doc), nil
@@ -171,15 +179,6 @@ func valueLength(t byte, b []byte) (int, error) {
 		if !ok || n < 0 || n > len(b)-5 {
 			return 0, errProtocol
 		}
-		// The legacy subtype repeats its length inside the data. A reader that
-		// trusts the inner length would emit the remaining bytes as sibling
-		// fields, so both lengths must agree.
-		if b[4] == 0x02 {
-			inner, _ := length32(b[5:])
-			if n < 4 || inner != n-4 {
-				return 0, errProtocol
-			}
-		}
 		return 5 + n, nil
 	case 0x0b: // regular expression: pattern and options cstrings
 		p := bytes.IndexByte(b, 0)
@@ -210,11 +209,9 @@ func valueLength(t byte, b []byte) (int, error) {
 }
 
 // validateDocument walks a document and every nested document within the depth
-// bound. Structure mode checks framing only. Text mode, used before encoding
-// results, also requires UTF-8 keys and text and DBPointer namespaces that the
-// Extended JSON writer can emit without escaping; its failures are never
-// distinguished from malformed framing.
-func validateDocument(b []byte, depth int, text bool) error {
+// bound. Result frames use outer BSON lengths so a cursor can still be read
+// and closed if a document contains a value the encoder cannot represent.
+func validateDocument(b []byte, depth int, mode bsonValidation) error {
 	if depth > maxReplyDepth {
 		return errReplyLimit
 	}
@@ -228,7 +225,7 @@ func validateDocument(b []byte, depth int, text bool) error {
 		if end < 0 {
 			return errProtocol
 		}
-		if text && !utf8.Valid(rest[1:1+end]) {
+		if mode == resultText && !utf8.Valid(rest[1:1+end]) {
 			return errProtocol
 		}
 		rest = rest[2+end:]
@@ -236,7 +233,7 @@ func validateDocument(b []byte, depth int, text bool) error {
 		if err != nil {
 			return err
 		}
-		if err := validateValue(t, rest[:n], depth, text); err != nil {
+		if err := validateValue(t, rest[:n], depth, mode); err != nil {
 			return err
 		}
 		rest = rest[n:]
@@ -245,18 +242,27 @@ func validateDocument(b []byte, depth int, text bool) error {
 }
 
 // validateValue checks one value already sized by valueLength.
-func validateValue(t byte, v []byte, depth int, text bool) error {
+func validateValue(t byte, v []byte, depth int, mode bsonValidation) error {
 	switch t {
 	case 0x03, 0x04:
-		return validateDocument(v, depth+1, text)
+		return validateDocument(v, depth+1, mode)
+	case 0x05:
+		// Both control decoding and Extended JSON encoding require matching
+		// legacy binary lengths. Only the outer length determines frame offsets.
+		if mode != resultFrame && v[4] == 0x02 {
+			inner, ok := length32(v[5:])
+			if !ok || inner != len(v)-9 {
+				return errProtocol
+			}
+		}
 	case 0x0f:
 		s, _ := stringLength(v[4:])
-		if text && !utf8.Valid(v[8:3+s]) {
+		if mode == resultText && !utf8.Valid(v[8:3+s]) {
 			return errProtocol
 		}
-		return validateDocument(v[4+s:], depth+1, text)
+		return validateDocument(v[4+s:], depth+1, mode)
 	}
-	if !text {
+	if mode != resultText {
 		return nil
 	}
 	switch t {
@@ -305,9 +311,8 @@ func each(doc []byte, fn func(string, bson.RawValue) error) error {
 
 // fields indexes a reply document the driver interprets and rejects duplicate
 // keys, so the driver and the server cannot read different values. User
-// documents keep duplicates and are never indexed this way. Every value has
-// been sized by valueLength, so a RawValue ...OK accessor fails only on a type
-// mismatch, including the zero RawValue of a missing key.
+// documents keep duplicates and are never indexed this way. Each RawValue is
+// bounded by its outer BSON length.
 func fields(doc bson.Raw) (map[string]bson.RawValue, error) {
 	m := make(map[string]bson.RawValue)
 	err := each(doc, func(key string, v bson.RawValue) error {

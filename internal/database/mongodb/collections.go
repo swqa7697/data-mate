@@ -81,6 +81,12 @@ func (d *Driver) ListCollections(ctx context.Context, a database.Access, req dat
 			}
 		}
 		need := size + 1
+		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
+		// If even the smallest possible objects cannot fill the requested
+		// page within the cap, every observed entry must fit. More entries
+		// could only overflow the page after it already exceeded the cap.
+		const minEntryBytes = len(`{"database":"","name":"","type":""}`)
+		chargeWhileListing := budget.Limit > 0 && size > budget.Limit/minEntryBytes
 		var found []database.CollectionInfo
 		for _, db := range dbs {
 			if db < pos.Schema {
@@ -90,7 +96,13 @@ func (d *Driver) ListCollections(ctx context.Context, a database.Access, req dat
 			if db == pos.Schema {
 				after = pos.Name
 			}
-			entries, err := collections(ctx, s, a, db, after, need-len(found), nil)
+			var accept func(collectionEntry) (bool, error)
+			if chargeWhileListing {
+				accept = func(e collectionEntry) (bool, error) {
+					return true, budget.Add(database.CollectionInfo{Database: db, Name: e.name, Type: e.kind})
+				}
+			}
+			entries, err := collections(ctx, s, a, db, after, need-len(found), accept)
 			if err != nil {
 				return err
 			}
@@ -101,12 +113,15 @@ func (d *Driver) ListCollections(ctx context.Context, a database.Access, req dat
 				break
 			}
 		}
-		budget := database.MetadataBudget{Limit: a.Profile.Limits.MaxResultBytes}
-		for _, item := range found[:min(size, len(found))] {
-			if err := budget.Add(item); err != nil {
-				return err
+		if len(found) > 0 {
+			out.Collections = found[:min(size, len(found))]
+		}
+		if !chargeWhileListing && budget.Limit > 0 {
+			for _, item := range out.Collections {
+				if err := budget.Add(item); err != nil {
+					return err
+				}
 			}
-			out.Collections = append(out.Collections, item)
 		}
 		if len(found) > size {
 			last := found[size-1]
@@ -164,10 +179,10 @@ func databases(ctx context.Context, s *session, a database.Access) ([]string, er
 }
 
 // collections lists collection names in db after the given name, keeping the
-// keep byte-smallest when keep is positive. charge, when set, sees each entry
-// as it is kept and can stop the listing. An account without access to the
+// keep byte-smallest when keep is positive. accept can skip an entry or stop
+// the listing before the entry is retained. An account without access to the
 // database sees no collections.
-func collections(ctx context.Context, s *session, a database.Access, db, after string, keep int, charge func(collectionEntry) error) (out []collectionEntry, err error) {
+func collections(ctx context.Context, s *session, a database.Access, db, after string, keep int, accept func(collectionEntry) (bool, error)) (out []collectionEntry, err error) {
 	cmd := bson.D{kv("listCollections", int32(1)), kv("nameOnly", true), kv("authorizedCollections", true)}
 	if after != "" {
 		cmd = append(cmd, kv("filter", bson.D{kv("name", bson.D{kv("$gt", after)})}))
@@ -211,9 +226,13 @@ func collections(ctx context.Context, s *session, a database.Access, db, after s
 		}
 		kind, _ := m["type"].StringValueOK()
 		entry := collectionEntry{name: name, kind: collectionKind(kind)}
-		if charge != nil {
-			if err := charge(entry); err != nil {
+		if accept != nil {
+			include, err := accept(entry)
+			if err != nil {
 				return nil, err
+			}
+			if !include {
+				continue
 			}
 		}
 		out = append(out, entry)
@@ -404,19 +423,17 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 }
 
 func describeDatabase(ctx context.Context, s *session, a database.Access, db string, out *database.DatabaseDescription, budget *database.MetadataBudget) error {
-	system := func(e collectionEntry) bool { return strings.HasPrefix(e.name, "system.") }
 	// Charge entries while listing so a huge catalog fails before it is held.
 	listing := database.MetadataBudget{Limit: budget.Limit}
-	entries, err := collections(ctx, s, a, db, "", 0, func(e collectionEntry) error {
-		if system(e) {
-			return nil
+	entries, err := collections(ctx, s, a, db, "", 0, func(e collectionEntry) (bool, error) {
+		if strings.HasPrefix(e.name, "system.") {
+			return false, nil
 		}
-		return listing.Add(database.RelationName{Name: e.name, Kind: e.kind})
+		return true, listing.Add(database.RelationName{Name: e.name, Kind: e.kind})
 	})
 	if err != nil {
 		return err
 	}
-	entries = slices.DeleteFunc(entries, system)
 	if len(entries) == 0 {
 		return out.AddCatalogRow(budget, db, "", "", "")
 	}

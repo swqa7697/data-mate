@@ -46,8 +46,18 @@ func TestMongoDBConnectionBoundary(t *testing.T) {
 		{"hidden secondary reads with primaryPreferred", "read_only", "", true, func(sp *scramPeer) []exchange {
 			return append([]exchange{hello(send(secondary))}, ready(sp)[1:]...)
 		}},
+		{"mongos uses its router handshake", "read_only", "", false, func(sp *scramPeer) []exchange {
+			router := helloReply(25, kv("isWritablePrimary", true), kv("msg", "isdbgrid"))
+			return append([]exchange{hello(send(router))}, ready(sp)[1:]...)
+		}},
 		{"arbiter is rejected before credentials", "version", contracts.QueryUnsupported, false, func(*scramPeer) []exchange {
 			return []exchange{hello(send(arbiter))}
+		}},
+		{"secondary without a set name", "version", contracts.QueryUnsupported, false, func(*scramPeer) []exchange {
+			return []exchange{hello(send(helloReply(25, kv("isWritablePrimary", false), kv("secondary", true))))}
+		}},
+		{"member reports two roles", "version", contracts.QueryUnsupported, false, func(*scramPeer) []exchange {
+			return []exchange{hello(send(helloReply(25, kv("setName", "rs0"), kv("isWritablePrimary", true), kv("secondary", true))))}
 		}},
 		{"wire version below 7.0", "version", contracts.QueryUnsupported, false, func(*scramPeer) []exchange {
 			return []exchange{hello(send(helloReply(17, kv("isWritablePrimary", true))))}
@@ -128,6 +138,31 @@ func TestMongoDBConnectionBoundary(t *testing.T) {
 			peer.wait(t)
 		})
 	}
+
+	t.Run("two checked-out connections each earn approval", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		empty := ok(kv("cursor", bson.D{kv("id", int64(0)), kv("ns", "app.items"), kv("firstBatch", bson.A{})}))
+		peer := newPeer(t, cancel, false,
+			ready(newScramPeer(credentials)),
+			ready(newScramPeer(credentials), respond("find", empty)))
+		a, rev, err := normalizeAccess(database.NewAccess(fakeProfile(peer.port(), config.DefaultLimits()), fakeSecret))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := fakeRegistry(t)
+		d := New(r)
+		// Hold the first lease while find opens a second physical session.
+		err = d.runNormalized(ctx, a, rev, func(ctx context.Context, _ *session) error {
+			_, err := d.FindDocuments(ctx, a, database.FindRequest{Database: "app", Collection: "items"})
+			return err
+		})
+		r.Close()
+		peer.wait(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	// Approval expires as soon as the final physical connection disconnects,
 	// even when no operation has checked the connection out since its last use.

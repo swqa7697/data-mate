@@ -21,7 +21,7 @@ func encodeDocument(doc bson.Raw) (out json.RawMessage, err error) {
 			out, err = nil, database.UnsupportedValue()
 		}
 	}()
-	if validateDocument(doc, 0, true) != nil {
+	if validateDocument(doc, 0, resultText) != nil {
 		return nil, database.UnsupportedValue()
 	}
 	b, err := bson.MarshalExtJSON(doc, true, false)

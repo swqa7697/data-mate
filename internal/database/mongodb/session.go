@@ -81,19 +81,19 @@ func (s *session) Close() {
 
 // control sends a driver command whose reply is small and bounded.
 func (s *session) control(ctx context.Context, db string, cmd bson.D) (bson.Raw, error) {
-	return s.roundTrip(ctx, db, cmd, controlReplyLimit)
+	return s.roundTrip(ctx, db, cmd, controlReplyLimit, controlReply)
 }
 
 // result sends a command whose reply can carry documents up to the server's
 // advertised object size.
 func (s *session) result(ctx context.Context, db string, cmd bson.D) (bson.Raw, error) {
-	return s.roundTrip(ctx, db, cmd, min(s.maxMessage, replyOverhead+s.maxDocument+documentSlack))
+	return s.roundTrip(ctx, db, cmd, min(s.maxMessage, replyOverhead+s.maxDocument+documentSlack), resultFrame)
 }
 
 // roundTrip sends one command and reads its reply. Transport, framing and
 // limit failures close the session and return safe errors. A server failure
 // returns serverError for the caller to classify.
-func (s *session) roundTrip(ctx context.Context, db string, cmd bson.D, limit int) (bson.Raw, error) {
+func (s *session) roundTrip(ctx context.Context, db string, cmd bson.D, limit int, mode bsonValidation) (bson.Raw, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, database.CommonError(err)
 	}
@@ -126,7 +126,7 @@ func (s *session) roundTrip(ctx context.Context, db string, cmd bson.D, limit in
 	err = s.write(body)
 	var reply bson.Raw
 	if err == nil {
-		reply, err = readReply(s.reader, s.id, limit)
+		reply, err = readReply(s.reader, s.id, limit, mode)
 	}
 	if err != nil {
 		s.Close()
@@ -328,13 +328,13 @@ func parseHello(reply bson.Raw) (helloInfo, error) {
 			info.mechanisms = append(info.mechanisms, mechanism)
 		}
 	}
-	var flags [4]bool
-	for i, key := range []string{"isreplicaset", "arbiterOnly", "isWritablePrimary", "secondary"} {
+	var flags [6]bool
+	for i, key := range []string{"isreplicaset", "arbiterOnly", "isWritablePrimary", "secondary", "hidden", "passive"} {
 		if flags[i], err = boolField(top, key); err != nil {
 			return helloInfo{}, err
 		}
 	}
-	ghost, arbiter, primary, secondary := flags[0], flags[1], flags[2], flags[3]
+	ghost, arbiter, primary, secondary, hidden, passive := flags[0], flags[1], flags[2], flags[3], flags[4], flags[5]
 	var text [2]string
 	for i, key := range []string{"msg", "setName"} {
 		v, ok := top[key]
@@ -345,19 +345,21 @@ func parseHello(reply bson.Raw) (helloInfo, error) {
 			return helloInfo{}, errProtocol
 		}
 	}
-	router, set := text[0] == "isdbgrid", text[1] != ""
+	_, hasMessage := top["msg"]
+	_, hasSet := top["setName"]
+	_, hasPrimary := top["isWritablePrimary"]
 	_, loadBalanced := top["serviceId"]
-	switch {
-	case loadBalanced, router && set, ghost:
-	case router:
-		info.supported = true
-	case set && !arbiter && (primary || secondary):
-		info.supported, info.member = true, true
-	case !set:
-		info.supported = true
+	if wire < minWireVersion || loadBalanced || ghost || arbiter || !hasPrimary {
+		return info, nil
 	}
-	if wire < minWireVersion {
-		info.supported = false
+	switch {
+	case hasSet:
+		info.supported = text[1] != "" && !hasMessage && primary != secondary && !(primary && (hidden || passive))
+		info.member = info.supported
+	default:
+		// Standalones and routers are writable primaries and carry no
+		// secondary member flags. Only a router identifies itself in msg.
+		info.supported = primary && !secondary && !hidden && !passive && (!hasMessage || text[0] == "isdbgrid")
 	}
 	return info, nil
 }

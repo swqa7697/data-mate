@@ -29,7 +29,7 @@ Data Mate lets coding agents inspect relational databases with SQL, explore Redi
 | Feature               | What it gives you                                                             |
 | --------------------- | ----------------------------------------------------------------------------- |
 | Read-only tools       | Inspect relational catalogs, run SQL reads, browse Redis keys and values, and query MongoDB collections. |
-| Databases             | Connect to PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, standalone Redis 7.0+, and MongoDB 7.0+. |
+| Databases             | Connect to PostgreSQL 16+, MySQL 8.4+, MariaDB 10.11+, standalone Redis 7.0+, and MongoDB 7.0+ (see [MongoDB reader](#mongodb-reader) for deployment requirements). |
 | Protected credentials | Keep saved credentials protected with macOS Keychain or Linux Secret Service. |
 | Connection options    | Use direct TCP, verified TLS, an SSH jump host, or a SOCKS5 proxy.            |
 | Agent setup           | Register the service with installed Codex and Claude Code clients.            |
@@ -127,6 +127,8 @@ db.getSiblingDB("admin").createUser({
 ```
 
 Keep `admin`, where this user was created, as the authentication database. Grant `read` on each database you want to share, or `readAnyDatabase` for all of them. Data Mate rejects accounts that can do more than read and monitor, accounts that can read credential collections such as `admin.system.users`, and servers that do not enforce authorization. On MongoDB 8.2 and later it also accepts `clusterMonitor`, but on a replica set that role can read the oplog, which records every write, including credential changes; grant it only when that exposure is acceptable.
+
+Data Mate checks privileges and authorization enforcement on every new pooled MongoDB connection. The check requires `usersInfo`, a command unavailable on MongoDB Atlas. [MongoDB command compatibility](https://www.mongodb.com/docs/manual/reference/command/usersinfo/)
 
 ## What agents can do
 

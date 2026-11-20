@@ -45,16 +45,21 @@ type admission struct{ active, waiting chan struct{} }
 
 type pool struct {
 	fingerprint   string
+	perConnection bool
 	slots         chan struct{}
 	idle          []Conn
 	users         int
 	ctx           context.Context
 	cancel        context.CancelFunc
 	timer         *time.Timer
-	live          map[Conn]bool
-	approvedUntil time.Time
+	live          map[Conn]*approval
+	shared        approval
 	generation    uint64
-	validation    *validation
+}
+
+type approval struct {
+	until   time.Time
+	pending *validation
 }
 
 type validation struct {
@@ -71,8 +76,8 @@ func (p *pool) forgetClosed() {
 		default:
 		}
 	}
-	if len(p.live) == 0 && !p.approvedUntil.IsZero() {
-		p.approvedUntil = time.Time{}
+	if len(p.live) == 0 && !p.shared.until.IsZero() {
+		p.shared.until = time.Time{}
 		p.generation++
 	}
 }
@@ -154,7 +159,7 @@ func (r *Registry) retireLocked(id string) *pool {
 		return nil
 	}
 	delete(r.pools, id)
-	p.approvedUntil = time.Time{}
+	p.shared.until = time.Time{}
 	p.generation++
 	p.cancel()
 	if p.timer != nil {
@@ -224,7 +229,13 @@ func (r *Registry) Stats(id string) Stats {
 	if p == nil {
 		return Stats{}
 	}
-	return Stats{Present: true, Users: p.users, Slots: len(p.slots), Idle: len(p.idle), Live: len(p.live), Approved: time.Now().Before(p.approvedUntil), Validating: p.validation != nil}
+	stats := Stats{Present: true, Users: p.users, Slots: len(p.slots), Idle: len(p.idle), Live: len(p.live)}
+	now := time.Now()
+	for _, a := range p.live {
+		stats.Approved = stats.Approved || now.Before(a.until)
+		stats.Validating = stats.Validating || a.pending != nil
+	}
+	return stats
 }
 
 // Len reports the number of retained pools.
@@ -255,6 +266,17 @@ func (r *Registry) fingerprint(a database.Access, rev config.Revision) string {
 // context is canceled when the pool retires. The caller must call release
 // exactly once, after its cleanup, passing whether the connection may be reused.
 func Checkout[C Conn](ctx context.Context, r *Registry, a database.Access, rev config.Revision, open func(context.Context) (C, error), approve func(context.Context, C) error) (C, context.Context, func(healthy bool), error) {
+	return checkout(ctx, r, a, rev, open, approve, false)
+}
+
+// CheckoutConnection uses the same pool and lease as Checkout, but a physical
+// connection earns and refreshes its own approval. Use it when an audit proves
+// properties of the server reached by that particular connection.
+func CheckoutConnection[C Conn](ctx context.Context, r *Registry, a database.Access, rev config.Revision, open func(context.Context) (C, error), approve func(context.Context, C) error) (C, context.Context, func(healthy bool), error) {
+	return checkout(ctx, r, a, rev, open, approve, true)
+}
+
+func checkout[C Conn](ctx context.Context, r *Registry, a database.Access, rev config.Revision, open func(context.Context) (C, error), approve func(context.Context, C) error, perConnection bool) (C, context.Context, func(healthy bool), error) {
 	var zero C
 	fp := r.fingerprint(a, rev)
 	id := a.Profile.ID
@@ -265,7 +287,7 @@ func Checkout[C Conn](ctx context.Context, r *Registry, a database.Access, rev c
 	}
 	var retired *pool
 	p := r.pools[id]
-	if p != nil && p.fingerprint != fp {
+	if p != nil && (p.fingerprint != fp || p.perConnection != perConnection) {
 		retired = r.retireLocked(id)
 		p = nil
 	}
@@ -283,7 +305,7 @@ func Checkout[C Conn](ctx context.Context, r *Registry, a database.Access, rev c
 			return zero, nil, nil, database.Fail(contracts.ResourceLimit, "database pool limit reached", true)
 		}
 		pc, cancel := context.WithCancel(context.Background())
-		p = &pool{fingerprint: fp, slots: make(chan struct{}, maxConnectionsPerProfile), ctx: pc, cancel: cancel}
+		p = &pool{fingerprint: fp, perConnection: perConnection, slots: make(chan struct{}, maxConnectionsPerProfile), ctx: pc, cancel: cancel}
 		r.pools[id] = p
 	}
 	p.users++
@@ -375,25 +397,32 @@ func Checkout[C Conn](ctx context.Context, r *Registry, a database.Access, rev c
 		}
 		c, have = opened, true
 	}
-	if err := approvePool(op, r, p, id, c, approve); err != nil {
+	if err := approveConnection(op, r, p, id, c, approve); err != nil {
 		release(false)
 		return zero, nil, nil, err
 	}
 	return c, op, release, nil
 }
 
-func approvePool[C Conn](ctx context.Context, r *Registry, p *pool, id string, c C, approve func(context.Context, C) error) error {
+func approveConnection[C Conn](ctx context.Context, r *Registry, p *pool, id string, c C, approve func(context.Context, C) error) error {
 	r.mu.Lock()
 	p.forgetClosed()
 	if p.live == nil {
-		p.live = make(map[Conn]bool)
+		p.live = make(map[Conn]*approval)
 	}
-	p.live[c] = true
-	if time.Now().Before(p.approvedUntil) {
+	cache := p.live[c]
+	if cache == nil {
+		cache = &p.shared
+		if p.perConnection {
+			cache = &approval{}
+		}
+		p.live[c] = cache
+	}
+	if time.Now().Before(cache.until) {
 		r.mu.Unlock()
 		return nil
 	}
-	if pending := p.validation; pending != nil {
+	if pending := cache.pending; pending != nil {
 		r.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -403,8 +432,8 @@ func approvePool[C Conn](ctx context.Context, r *Registry, p *pool, id string, c
 		}
 	}
 	pending := &validation{done: make(chan struct{})}
-	p.validation = pending
-	p.approvedUntil = time.Time{}
+	cache.pending = pending
+	cache.until = time.Time{}
 	generation := p.generation
 	r.mu.Unlock()
 	err := approve(ctx, c)
@@ -414,10 +443,10 @@ func approvePool[C Conn](ctx context.Context, r *Registry, p *pool, id string, c
 		err = database.Fail(contracts.Cancelled, "account validation was cancelled", false)
 	}
 	if err == nil {
-		p.approvedUntil = time.Now().Add(approvalTTL)
+		cache.until = time.Now().Add(approvalTTL)
 	}
 	pending.err = err
-	p.validation = nil
+	cache.pending = nil
 	close(pending.done)
 	r.mu.Unlock()
 	return err

@@ -75,7 +75,7 @@ func checkout(ctx context.Context, r *pool.Registry, a database.Access, rev conf
 		defer cancel()
 		return auditAccount(ctx, s, a.Profile.Connection.Username, a.Profile.Connection.Database)
 	}
-	return pool.Checkout(ctx, r, a, rev, open, approve)
+	return pool.CheckoutConnection(ctx, r, a, rev, open, approve)
 }
 
 // Test uses isolated physical sessions and performs a fresh audit.
