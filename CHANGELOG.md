@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `db describe` groups a sample of up to eight Redis keys by repeated prefix and type. Redis JSON descriptions now use version 2 and report sample counts. Use `list_keys` to browse individual keys.
+- `db describe` groups a sample of up to eight Redis keys by repeated prefix and type. Groups without a shared prefix show up to three example key names. Redis JSON descriptions now use version 2 and report sample counts. Use `list_keys` to browse individual keys.
 - Show a loading indicator while `db describe` fetches a connection description in an interactive terminal.
 - Redis connections now accept accounts with write privileges and work on standalone services that restrict ACL inspection. The driver enforces read-only access and exposes only keys the account can read.
 

@@ -68,6 +68,22 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 			fmt.Fprintf(table, "%s\t%s\t%d\n", pattern, displayName(group.Type), group.Count)
 		}
 		table.Flush()
+		for _, group := range sample.Groups {
+			if len(group.Examples) == 0 {
+				continue
+			}
+			fmt.Fprintf(&out, "\nExample %s keys\n", displayName(group.Type))
+			for _, example := range group.Examples {
+				name := strconv.Quote(example.Value)
+				if example.Encoding == "base64" {
+					name = "base64 " + name
+				}
+				if example.Truncated {
+					name += " (truncated)"
+				}
+				fmt.Fprintf(&out, "  %s\n", name)
+			}
+		}
 		return out.String()
 	}
 	if len(description.Schemas) == 0 {

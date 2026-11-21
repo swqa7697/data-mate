@@ -3,6 +3,7 @@ package redis
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"regexp"
 	"slices"
 	"strconv"
@@ -13,7 +14,11 @@ import (
 	"github.com/swqa7697/data-mate/internal/database"
 )
 
-const describeSampleSize = 8
+const (
+	describeSampleSize = 8
+	groupExampleLimit  = 3
+	exampleByteLimit   = 96
+)
 
 var literalPrefix = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,32}$`)
 
@@ -48,7 +53,11 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 	if err != nil {
 		return database.RedisKeyspace{}, err
 	}
-	type observation struct{ pattern, kind string }
+	type groupID struct{ pattern, kind string }
+	type observation struct {
+		group groupID
+		key   string
+	}
 	var observations []observation
 	patternCounts := make(map[string]int)
 	seen := make(map[string]bool)
@@ -69,20 +78,29 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 		if kind != "" {
 			pattern := keyPattern(key)
 			patternCounts[pattern]++
-			observations = append(observations, observation{pattern, kind})
+			observations = append(observations, observation{groupID{pattern, kind}, key})
 		}
 	}
 
-	groups := make(map[observation]int)
+	groups := make(map[groupID]*database.RedisKeyGroup)
 	for _, item := range observations {
-		if patternCounts[item.pattern] < 2 {
-			item.pattern = ""
+		id := item.group
+		if patternCounts[id.pattern] < 2 {
+			id.pattern = ""
 		}
-		groups[item]++
+		group := groups[id]
+		if group == nil {
+			group = &database.RedisKeyGroup{Pattern: id.pattern, Type: id.kind}
+			groups[id] = group
+		}
+		group.Count++
+		if id.pattern == "" && len(group.Examples) < groupExampleLimit {
+			group.Examples = append(group.Examples, keyExample(item.key))
+		}
 	}
 	sample := database.RedisKeyspace{ObservedKeys: len(observations), Groups: make([]database.RedisKeyGroup, 0, len(groups))}
-	for item, count := range groups {
-		sample.Groups = append(sample.Groups, database.RedisKeyGroup{Pattern: item.pattern, Type: item.kind, Count: count})
+	for _, group := range groups {
+		sample.Groups = append(sample.Groups, *group)
 	}
 	slices.SortFunc(sample.Groups, func(a, b database.RedisKeyGroup) int {
 		if a.Pattern != b.Pattern {
@@ -97,6 +115,25 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 		return cmp.Compare(a.Type, b.Type)
 	})
 	return sample, nil
+}
+
+// Preserve the full key's encoding even if its bounded prefix looks like text.
+func keyExample(key string) database.RedisKeyExample {
+	if len(key) <= exampleByteLimit {
+		return database.RedisKeyExample{KeyBytes: keyBytes(key)}
+	}
+	prefix := key[:exampleByteLimit]
+	if !utf8.ValidString(key) {
+		return database.RedisKeyExample{
+			KeyBytes:  database.KeyBytes{Value: base64.StdEncoding.EncodeToString([]byte(prefix)), Encoding: "base64"},
+			Truncated: true,
+		}
+	}
+	end := exampleByteLimit
+	for !utf8.RuneStart(key[end]) {
+		end--
+	}
+	return database.RedisKeyExample{KeyBytes: database.KeyBytes{Value: key[:end], Encoding: "utf8"}, Truncated: true}
 }
 
 // Only expose a literal first segment that users can paste into SCAN MATCH.

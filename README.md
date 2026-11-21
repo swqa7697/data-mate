@@ -82,7 +82,7 @@ data-mate mcp start
 
 Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively. In a terminal, the alias shows a loading indicator while the command fetches the description.
 
-For Redis, `db describe` checks up to eight candidate keys in the selected database. It groups readable keys by type and by repeated prefixes such as `orders:*`. Counts apply only to this sample. An empty sample can occur even in a populated database. Use the MCP tool `list_keys` with a reported pattern to browse matching keys. For scripts, Redis description JSON is now version 2. The `keyspace` object contains `observed_keys` and `groups`. Each group has a `type`, a `count`, and an optional `pattern`.
+For Redis, `db describe` checks up to eight candidate keys in the selected database. It groups readable keys by type and by repeated prefixes such as `orders:*`. When keys have no shared prefix, the description shows up to three example key names per type. Long names show the first 96 bytes or fewer and carry a truncation marker. Counts apply only to this sample. An empty sample can occur even in a populated database. Use the MCP tool `list_keys` with a reported pattern to browse matching keys. For scripts, Redis description JSON is now version 2. The `keyspace` object contains `observed_keys` and `groups`. Each group has a `type` and a `count`. Groups with a `pattern` can be explored with `list_keys`. Other groups include `examples`. Pass the `encoding` and `value` of a complete example to `describe_key`. An example with `truncated: true` is a preview of a longer name.
 
 Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
 

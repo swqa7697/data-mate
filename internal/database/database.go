@@ -96,9 +96,17 @@ type RedisKeyspace struct {
 // RedisKeyGroup counts sampled keys of one type. Pattern is present only
 // when multiple readable keys share a literal prefix usable with list_keys.
 type RedisKeyGroup struct {
-	Pattern string `json:"pattern,omitempty"`
-	Type    string `json:"type"`
-	Count   int    `json:"count"`
+	Pattern  string            `json:"pattern,omitempty"`
+	Type     string            `json:"type"`
+	Count    int               `json:"count"`
+	Examples []RedisKeyExample `json:"examples,omitempty"`
+}
+
+// RedisKeyExample contains an authorized key name, or its leading bytes
+// when Truncated is true. Only complete examples identify an exact key.
+type RedisKeyExample struct {
+	KeyBytes
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // SchemaDescription groups catalog-visible application objects in a schema.

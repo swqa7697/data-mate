@@ -22,6 +22,7 @@ type fixtureDatabase struct {
 	describeError error
 	emptyCatalog  bool
 	catalog       []database.SchemaDescription
+	keyspace      *database.RedisKeyspace
 	// before runs first in each Test call; an error fails the dial stage.
 	before func(context.Context, string) error
 
@@ -59,13 +60,9 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 	if a.Profile.Driver == "redis" {
 		out.Version = 2
 		out.Schemas = nil
-		out.Keyspace = &database.RedisKeyspace{Groups: []database.RedisKeyGroup{}}
-		if !d.emptyCatalog {
-			out.Keyspace.ObservedKeys = 3
-			out.Keyspace.Groups = []database.RedisKeyGroup{
-				{Pattern: "user:*", Type: "hash", Count: 2},
-				{Type: "string", Count: 1},
-			}
+		out.Keyspace = d.keyspace
+		if out.Keyspace == nil {
+			out.Keyspace = &database.RedisKeyspace{Groups: []database.RedisKeyGroup{}}
 		}
 		return out, nil
 	}
