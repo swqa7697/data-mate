@@ -76,6 +76,7 @@ HSET ` + strconv.Quote(tag+":receipt") + ` field data
 SADD {tenant.测试.very-long-namespace.Xaaregion:sync}:decoy member
 SET ` + plain + `:one a
 SET ` + plain + `:two b
+MSET reports.*:a 1 reports.*:b 2 reports.*:c 3 reports.*:d 4
 RPUSH reports.other:decoy c
 `)
 	if err := cmd.Run(); err != nil {
@@ -141,21 +142,24 @@ RPUSH reports.other:decoy c
 	}
 	desc, err := router.DescribeDatabase(t.Context(), a)
 	raw, _ := json.Marshal(desc)
-	if err != nil || contracts.Validate("db-describe.output", raw) != nil || bytes.Contains(raw, []byte("private:")) || bytes.Contains(raw, []byte("view:hash")) {
+	if err != nil || contracts.Validate("db-describe.output", raw) != nil || bytes.Contains(raw, []byte("private:")) {
 		t.Fatalf("CLI keyspace: %s %v", raw, err)
 	}
-	if desc.Keyspace == nil || desc.Keyspace.ObservedKeys < 1 || desc.Keyspace.ObservedKeys > 7 {
+	expectedKeys := readableFixtureKeys()
+	if desc.Keyspace == nil || !desc.Keyspace.ScanComplete || desc.Keyspace.ObservedKeys != len(expectedKeys) {
 		t.Fatalf("sample includes keys outside the readable fixture: %s", raw)
 	}
-	count := 0
+	examples := map[database.KeyBytes]string{}
 	for _, group := range desc.Keyspace.Groups {
-		if group.Pattern != "" && group.Pattern != "view:*" {
+		if group.Pattern != "view:*" || group.Count != len(group.Examples) {
 			t.Fatalf("sample leaked an unreadable pattern: %s", raw)
 		}
-		count += group.Count
+		for _, example := range group.Examples {
+			examples[example.KeyBytes] = group.Type
+		}
 	}
-	if count != desc.Keyspace.ObservedKeys {
-		t.Fatalf("sample groups do not account for the readable keys: %s", raw)
+	if !maps.Equal(examples, expectedKeys) {
+		t.Fatalf("grouped examples differ from the readable fixture keys: %s", raw)
 	}
 
 	// Exercise the emitted MATCH patterns in Redis. Glob syntax inside a literal
@@ -164,17 +168,25 @@ RPUSH reports.other:decoy c
 	q.Connection.Database, q.Connection.Username = "2", "reader"
 	namespaced := access(q)
 	describe, err := router.DescribeDatabase(t.Context(), namespaced)
-	if err != nil || describe.Keyspace == nil || describe.Keyspace.ObservedKeys != 5 {
+	if err != nil || describe.Keyspace == nil || !describe.Keyspace.ScanComplete || describe.Keyspace.ObservedKeys != 9 {
 		t.Fatal("describe namespaced keys", err)
 	}
 	want := map[string][]string{
 		"hash":   {tag + ":receipt"},
-		"string": {plain + ":one", plain + ":two"},
+		"string": {plain + ":a", plain + ":b", plain + ":c", plain + ":d", plain + ":one", plain + ":two"},
 	}
 	for _, group := range describe.Keyspace.Groups {
 		expected, ok := want[group.Type]
 		if !ok || group.Pattern == "" {
 			continue
+		}
+		if group.Count != len(expected) || len(group.Examples) != min(3, len(expected)) {
+			t.Fatalf("incorrect sample counts for %q: %+v", group.Pattern, group)
+		}
+		for _, example := range group.Examples {
+			if example.Truncated || example.Encoding != "utf8" || !slices.Contains(expected, example.Value) {
+				t.Fatalf("unexpected example for %q: %+v", group.Pattern, example)
+			}
 		}
 		page, err := router.ListKeys(t.Context(), namespaced, database.KeyPageRequest{Pattern: group.Pattern})
 		if err != nil {
@@ -205,6 +217,11 @@ RPUSH reports.other:decoy c
 	if !errors.As(err, &safe) || safe.Code != contracts.StaleCursor {
 		t.Fatal("accepted stale cursor", err)
 	}
+}
+
+func readableFixtureKeys() map[database.KeyBytes]string {
+	binaryKey := database.KeyBytes{Encoding: "base64", Value: base64.StdEncoding.EncodeToString([]byte("view:\xff"))}
+	return map[database.KeyBytes]string{binaryKey: "string", textKey("view:empty"): "string", textKey("view:hash"): "hash", textKey("view:list"): "list", textKey("view:set"): "set", textKey("view:zset"): "zset", textKey("view:stream"): "stream"}
 }
 
 func verifyKeyTools(t *testing.T, session *sdk.ClientSession, alias string) {
@@ -241,9 +258,7 @@ func verifyKeyTools(t *testing.T, session *sdk.ClientSession, alias string) {
 			break
 		}
 	}
-	binaryKey := database.KeyBytes{Encoding: "base64", Value: base64.StdEncoding.EncodeToString([]byte("view:\xff"))}
-	expected := map[database.KeyBytes]string{binaryKey: "string", textKey("view:empty"): "string", textKey("view:hash"): "hash", textKey("view:list"): "list", textKey("view:set"): "set", textKey("view:zset"): "zset", textKey("view:stream"): "stream"}
-	if cursor != nil || !maps.Equal(seen, expected) {
+	if cursor != nil || !maps.Equal(seen, readableFixtureKeys()) {
 		t.Fatal("discovery lost an authorized key or leaked another key", seen)
 	}
 	for key, typ := range seen {

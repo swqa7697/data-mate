@@ -90,6 +90,7 @@ type DatabaseDescription struct {
 // RedisKeyspace summarizes the distinct readable keys in one bounded scan.
 type RedisKeyspace struct {
 	ObservedKeys int             `json:"observed_keys"`
+	ScanComplete bool            `json:"scan_complete"`
 	Groups       []RedisKeyGroup `json:"groups"`
 }
 

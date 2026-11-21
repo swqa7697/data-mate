@@ -53,11 +53,18 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 	}
 	fmt.Fprintf(&out, "%s — %s\n", displayName(description.Alias), scope)
 	if sample := description.Keyspace; sample != nil {
+		status := "scan complete"
+		if !sample.ScanComplete {
+			status = "partial scan"
+		}
+		fmt.Fprintf(&out, "\nReadable Redis keys observed: %d (%s)\n", sample.ObservedKeys, status)
+		if !sample.ScanComplete {
+			out.WriteString("Use the MCP tool list_keys to browse further.\n")
+		}
 		if sample.ObservedKeys == 0 {
-			out.WriteString("\nNo readable Redis keys observed in this sample.\n")
 			return out.String()
 		}
-		fmt.Fprintf(&out, "\nReadable Redis keys observed in this sample: %d\n\n", sample.ObservedKeys)
+		out.WriteByte('\n')
 		table := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(table, "Pattern\tType")
 		for _, group := range sample.Groups {
@@ -72,7 +79,13 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 			if len(group.Examples) == 0 {
 				continue
 			}
-			fmt.Fprintf(&out, "\nExample %s keys\n", displayName(group.Type))
+			fmt.Fprintf(&out, "\nExample %s keys", displayName(group.Type))
+			if group.Pattern != "" {
+				fmt.Fprintf(&out, " matching %s", displayName(group.Pattern))
+			} else {
+				out.WriteString(" (ungrouped)")
+			}
+			out.WriteByte('\n')
 			for _, example := range group.Examples {
 				name := strconv.Quote(example.Value)
 				if example.Encoding == "base64" {

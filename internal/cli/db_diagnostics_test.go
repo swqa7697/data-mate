@@ -266,8 +266,10 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 	}
 	saveProfiles(t, root, redisProfiles)
-	grouped := &database.RedisKeyspace{ObservedKeys: 3, Groups: []database.RedisKeyGroup{
-		{Pattern: "user:*", Type: "hash", Count: 2}, {Type: "string", Count: 1},
+	grouped := &database.RedisKeyspace{ObservedKeys: 3, ScanComplete: true, Groups: []database.RedisKeyGroup{
+		{Pattern: "user:*", Type: "hash", Count: 2, Examples: []database.RedisKeyExample{
+			{KeyBytes: database.KeyBytes{Encoding: "utf8", Value: "user:42"}},
+		}}, {Type: "string", Count: 1},
 	}}
 	// Eight hashes without a common prefix must still give the operator names
 	// to inspect, including an empty key, terminal control bytes and binary data.
@@ -283,7 +285,8 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatal("Redis description JSON", out)
 	}
 	out, _ = runCommand("describe", &fixtureDatabase{keyspace: grouped}, 0, "good")
-	if cells := strings.Fields(out); !strings.HasSuffix(strings.Join(cells, " "), "user:* hash (ungrouped) string") {
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "user:* hash (ungrouped) string") ||
+		!strings.Contains(out, "scan complete") || !strings.Contains(out, "matching user:*\n  \"user:42\"") {
 		t.Fatal("unexpected Redis pattern and type rows", out)
 	}
 	out, _ = runCommand("describe", &fixtureDatabase{keyspace: ungrouped}, 0, "good")
@@ -292,7 +295,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatal("ungrouped Redis hashes lost safe or distinguishable key examples", out)
 	}
 	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
-	if !strings.Contains(out, "in this sample") {
+	if !strings.Contains(out, "0 (partial scan)") {
 		t.Fatal("empty Redis sample lacks observation scope", out)
 	}
 	// A MongoDB description lists databases as schemas with collection kinds and

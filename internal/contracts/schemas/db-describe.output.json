@@ -161,14 +161,17 @@
     "keyspace": {
       "type": "object",
       "properties": {
+        "scan_complete": {
+          "type": "boolean"
+        },
         "observed_keys": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 8
+          "maximum": 64
         },
         "groups": {
           "type": "array",
-          "maxItems": 8,
+          "maxItems": 64,
           "items": {
             "type": "object",
             "properties": {
@@ -190,7 +193,7 @@
               "count": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 8
+                "maximum": 64
               },
               "examples": {
                 "type": "array",
@@ -225,18 +228,13 @@
               "type",
               "count"
             ],
-            "additionalProperties": false,
-            "not": {
-              "required": [
-                "pattern",
-                "examples"
-              ]
-            }
+            "additionalProperties": false
           }
         }
       },
       "required": [
         "observed_keys",
+        "scan_complete",
         "groups"
       ],
       "additionalProperties": false

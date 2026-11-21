@@ -43,6 +43,11 @@ func TestRedisConnectionBoundary(t *testing.T) {
 	const singletonTag = "{业务.team.with.a.long.namespace.*:synchronization}"
 	const singletonKey = singletonTag + ":epoch"
 	hashProbe := array(simple("0"), array())
+	// Redis can keep returning nonterminal cursors with no candidate keys.
+	emptyPages := make([]exchange, 8)
+	for i := range emptyPages {
+		emptyPages[i] = exchange{[]any{"SCAN", strconv.Itoa(i), "COUNT", "7"}, array(simple(strconv.Itoa(i+1)), array())}
+	}
 	for _, tt := range []struct {
 		name, stage string
 		code        contracts.Code
@@ -51,10 +56,14 @@ func TestRedisConnectionBoundary(t *testing.T) {
 		{"managed account without ACL inspection", "read_only", "", []exchange{handshake, {[]any{"SELECT", "3"}, simple("OK")}}},
 		{"database selection denied", "read_only", contracts.PermissionDenied, []exchange{handshake, {[]any{"SELECT", "3"}, "-NOPERM " + secret + "\r\n"}}},
 		{"bad credentials redact upstream text", "authentication", contracts.ConnectFailed, []exchange{auth("-WRONGPASS " + secret + "\r\n")}},
-		{"bounded sample despite duplicates, denied and surplus keys", "describe", "", []exchange{
+		{"bounded sample despite duplicates, denied and surplus keys", "describe", "", append([]exchange{
 			handshake, {[]any{"SELECT", "3"}, simple("OK")},
-			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("9"), array(simple("s:1"), simple("s:1"), simple("other:x"), simple("s:2"), simple("other:y"), simple("s:\x01"), simple("s:\xff"), simple("over:limit")))},
+			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("9"), array(simple("s:1")))},
 			{[]any{"TYPE", "s:1"}, simple("string")}, {[]any{"GETRANGE", "s:1", "1", "0"}, "$0\r\n\r\n"},
+			{[]any{"SCAN", "9", "COUNT", "6"}, array(simple("15"), array())},
+			// A duplicate, a denied key and an oversized final page consume the
+			// remaining budget. A zero cursor alone cannot signal completion.
+			{[]any{"SCAN", "15", "COUNT", "6"}, array(simple("0"), array(simple("s:1"), simple("other:x"), simple("s:2"), simple("other:y"), simple("s:\x01"), simple("s:\xff"), simple("over:limit")))},
 			{[]any{"TYPE", "other:x"}, simple("string")}, {[]any{"GETRANGE", "other:x", "1", "0"}, "-NOPERM\r\n"},
 			{[]any{"TYPE", "s:2"}, simple("hash")}, {[]any{"HSCAN", "s:2", "0", "MATCH", "[]", "COUNT", "1"}, array(simple("0"), array())},
 			{[]any{"TYPE", "other:y"}, simple("zset")}, {[]any{"ZRANGE", "other:y", "1", "0", "WITHSCORES"}, array()},
@@ -70,7 +79,7 @@ func TestRedisConnectionBoundary(t *testing.T) {
 			{[]any{"TYPE", taggedCleanup}, simple("hash")}, {[]any{"HSCAN", taggedCleanup, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
 			{[]any{"TYPE", taggedScan}, simple("hash")}, {[]any{"HSCAN", taggedScan, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
 			{[]any{"TYPE", singletonKey}, simple("string")}, {[]any{"GETRANGE", singletonKey, "1", "0"}, "$0\r\n\r\n"},
-		}},
+		}, emptyPages...)},
 		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone"))}},
 		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster"))}},
 		{"sentinel mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("7.0.4", "sentinel"))}},
@@ -135,7 +144,10 @@ func TestRedisConnectionBoundary(t *testing.T) {
 				driver, access := New(r), database.NewAccess(p, secret)
 				out, err := driver.DescribeDatabase(ctx, access)
 				want := &database.RedisKeyspace{ObservedKeys: 5, Groups: []database.RedisKeyGroup{
-					{Pattern: "s:*", Type: "hash", Count: 1}, {Pattern: "s:*", Type: "string", Count: 3},
+					{Pattern: "s:*", Type: "hash", Count: 1, Examples: []database.RedisKeyExample{{KeyBytes: keyBytes("s:2")}}},
+					{Pattern: "s:*", Type: "string", Count: 3, Examples: []database.RedisKeyExample{
+						{KeyBytes: keyBytes("s:1")}, {KeyBytes: keyBytes("s:\x01")}, {KeyBytes: database.KeyBytes{Value: "czr/", Encoding: "base64"}},
+					}},
 					{Type: "zset", Count: 1, Examples: []database.RedisKeyExample{
 						{KeyBytes: database.KeyBytes{Value: "other:y", Encoding: "utf8"}},
 					}},
@@ -144,9 +156,11 @@ func TestRedisConnectionBoundary(t *testing.T) {
 					t.Fatalf("unexpected readable sample: %+v, error %v", out.Keyspace, err)
 				}
 				out, err = driver.DescribeDatabase(ctx, access)
-				want = &database.RedisKeyspace{ObservedKeys: 7, Groups: []database.RedisKeyGroup{
-					{Pattern: "{app:sync}:*", Type: "hash", Count: 2},
-					{Pattern: `{业务.team.with.a.long.namespace.\*:synchronization}:*`, Type: "string", Count: 1},
+				want = &database.RedisKeyspace{ObservedKeys: 7, ScanComplete: true, Groups: []database.RedisKeyGroup{
+					{Pattern: "{app:sync}:*", Type: "hash", Count: 2, Examples: []database.RedisKeyExample{
+						{KeyBytes: keyBytes(taggedCleanup)}, {KeyBytes: keyBytes(taggedScan)},
+					}},
+					{Pattern: `{业务.team.with.a.long.namespace.\*:synchronization}:*`, Type: "string", Count: 1, Examples: []database.RedisKeyExample{{KeyBytes: keyBytes(singletonKey)}}},
 					{Type: "hash", Count: 4, Examples: []database.RedisKeyExample{
 						{KeyBytes: database.KeyBytes{Value: strings.Repeat("a", 95), Encoding: "utf8"}, Truncated: true},
 						{KeyBytes: database.KeyBytes{Value: strings.Repeat("YmJi", 32), Encoding: "base64"}, Truncated: true},
@@ -162,6 +176,11 @@ func TestRedisConnectionBoundary(t *testing.T) {
 				}
 				if err := contracts.Validate("db-describe.output", raw); err != nil {
 					t.Fatal(err)
+				}
+				out, err = driver.DescribeDatabase(ctx, access)
+				want = &database.RedisKeyspace{Groups: []database.RedisKeyGroup{}}
+				if err != nil || !reflect.DeepEqual(out.Keyspace, want) {
+					t.Fatalf("unexpected sample after eight empty nonterminal pages: %+v, error %v", out.Keyspace, err)
 				}
 				r.Close()
 				if err := <-done; err != nil {

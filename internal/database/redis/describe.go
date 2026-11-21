@@ -13,7 +13,9 @@ import (
 )
 
 const (
-	describeSampleSize = 8
+	describeSampleSize = 64
+	describeScanCount  = 16
+	describeScanLimit  = 8
 	groupExampleLimit  = 3
 	exampleByteLimit   = 96
 )
@@ -43,48 +45,64 @@ func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (datab
 	return out, nil
 }
 
+type keyObservation struct {
+	key, kind, prefix string
+	tagged            bool
+}
+
 func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisKeyspace, error) {
-	reply, err := s.command(ctx, "SCAN", "0", "COUNT", strconv.Itoa(limit))
-	if err != nil {
-		return database.RedisKeyspace{}, err
-	}
-	_, keys, err := scanReply(reply)
-	if err != nil {
-		return database.RedisKeyspace{}, err
-	}
-	type groupID struct{ prefix, kind string }
-	type observation struct {
-		group  groupID
-		key    string
-		tagged bool
-	}
-	var observations []observation
-	prefixCounts := make(map[string]int)
+	var observations []keyObservation
 	seen := make(map[string]bool)
-	// COUNT is a hint. Bound work even when the first batch is oversized or all keys are denied.
-	for _, raw := range keys[:min(len(keys), limit)] {
-		key, ok := raw.(string)
-		if !ok {
-			return database.RedisKeyspace{}, badKeyReply()
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		kind, err := listedKeyKind(ctx, s, key)
+	var cursor uint64
+	complete := false
+	for range describeScanLimit {
+		reply, err := s.command(ctx, "SCAN", strconv.FormatUint(cursor, 10), "COUNT", strconv.Itoa(min(describeScanCount, limit)))
 		if err != nil {
 			return database.RedisKeyspace{}, err
 		}
-		if kind != "" {
-			prefix, tagged := keyPrefix(key)
-			prefixCounts[prefix]++
-			observations = append(observations, observation{groupID{prefix, kind}, key, tagged})
+		next, keys, err := scanReply(reply)
+		if err != nil {
+			return database.RedisKeyspace{}, err
 		}
+		// COUNT is a hint. Duplicates and denied keys also consume the work budget.
+		n := min(len(keys), limit)
+		for _, raw := range keys[:n] {
+			key, ok := raw.(string)
+			if !ok {
+				return database.RedisKeyspace{}, badKeyReply()
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			kind, err := listedKeyKind(ctx, s, key)
+			if err != nil {
+				return database.RedisKeyspace{}, err
+			}
+			if kind != "" {
+				prefix, tagged := keyPrefix(key)
+				observations = append(observations, keyObservation{key: key, kind: kind, prefix: prefix, tagged: tagged})
+			}
+		}
+		limit -= n
+		complete = next == 0 && n == len(keys)
+		if next == 0 || limit == 0 {
+			break
+		}
+		cursor = next
 	}
+	return summarizeKeys(observations, complete), nil
+}
 
+func summarizeKeys(keys []keyObservation, complete bool) database.RedisKeyspace {
+	prefixCounts := make(map[string]int)
+	for _, key := range keys {
+		prefixCounts[key.prefix]++
+	}
+	type groupID struct{ prefix, kind string }
 	groups := make(map[groupID]*database.RedisKeyGroup)
-	for _, item := range observations {
-		id := item.group
+	for _, item := range keys {
+		id := groupID{item.prefix, item.kind}
 		if !item.tagged && prefixCounts[id.prefix] < 2 {
 			id.prefix = ""
 		}
@@ -97,11 +115,11 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 			groups[id] = group
 		}
 		group.Count++
-		if id.prefix == "" && len(group.Examples) < groupExampleLimit {
+		if len(group.Examples) < groupExampleLimit {
 			group.Examples = append(group.Examples, keyExample(item.key))
 		}
 	}
-	sample := database.RedisKeyspace{ObservedKeys: len(observations), Groups: make([]database.RedisKeyGroup, 0, len(groups))}
+	sample := database.RedisKeyspace{ObservedKeys: len(keys), ScanComplete: complete, Groups: make([]database.RedisKeyGroup, 0, len(groups))}
 	for _, group := range groups {
 		sample.Groups = append(sample.Groups, *group)
 	}
@@ -117,7 +135,7 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 		}
 		return cmp.Compare(a.Type, b.Type)
 	})
-	return sample, nil
+	return sample
 }
 
 // Preserve the full key's encoding even if its bounded prefix looks like text.
