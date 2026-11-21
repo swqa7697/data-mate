@@ -199,12 +199,17 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
                     assert report["schemas"][0]["indexes"] == [{"name":"alpha_idx"}], report
                     assert report["schemas"][0]["functions"] == [{"name":"lookup"}], report
                     continue
-                plain = re.sub(rb"\x1b\[[0-9;]*m", b"", block)
+                # The live indicator must clear before the final catalog, even
+                # when color is disabled or the terminal is narrow.
+                pending, catalog = block.split("analytics — database=app".encode(), 1)
+                assert re.search(r"analytics  [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]", pending.decode()), pending
+                assert screen(pending) == ([b""], 0), pending
+                plain = re.sub(rb"\x1b\[[0-9;]*m", b"", catalog)
                 if variant in ("color", "narrow"):
                     for tint, name in ((b"35", b"status"), (b"32", b"alpha"), (b"36", b"report"), (b"33", b"items_id_seq"), (b"34", b"alpha_idx"), (b"31", b"lookup"), (b"1", b"public")):
                         assert b"\x1b["+tint+b"m"+name+b"\x1b[0m" in block, block
                 else:
-                    assert b"\x1b" not in block, block
+                    assert b"\x1b" not in catalog, catalog
                 if variant == "narrow":
                     assert b"  alpha\r\n  beta" in plain, plain
                 else:
@@ -213,7 +218,8 @@ for mode in ("keyring-create", "keyring-unlock", "keyring-cancel", "keyring-noni
             report = json.loads(transcript.split(b"catalog done",1)[0])
             assert len(report["schemas"][0]["tables"]) == 1500, report
         elif mode in ("catalog-no-pager", "catalog-redirected"):
-            assert b"item_1499_" in transcript and b"\x1b" not in transcript, transcript
+            catalog = transcript.split("analytics — database=app".encode(), 1)[1]
+            assert b"item_1499_" in catalog and b"\x1b" not in catalog, catalog
         elif mode == "catalog-pager":
             assert b"item_0101_" in transcript and b"item_1499_" not in transcript, transcript
         elif mode.startswith("catalog"):

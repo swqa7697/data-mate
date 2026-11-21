@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"unicode"
 
 	"github.com/rivo/uniseg"
@@ -51,18 +52,22 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		scope, unit, units = "driver="+displayName(description.Driver), "Database", "databases"
 	}
 	fmt.Fprintf(&out, "%s — %s\n", displayName(description.Alias), scope)
-	if page := description.RedisKeys; page != nil {
-		fmt.Fprintf(&out, "\nRedis keys on this page: %d\n", len(page.Keys))
-		for _, item := range page.Keys {
-			name := strconv.Quote(item.Key.Value)
-			if item.Key.Encoding == "base64" {
-				name = "base64 " + name
+	if sample := description.Keyspace; sample != nil {
+		if sample.ObservedKeys == 0 {
+			out.WriteString("\nNo readable Redis keys observed in this sample.\n")
+			return out.String()
+		}
+		fmt.Fprintf(&out, "\nReadable Redis keys observed in this sample: %d\n\n", sample.ObservedKeys)
+		table := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "Pattern\tType\tSample keys")
+		for _, group := range sample.Groups {
+			pattern := displayName(group.Pattern)
+			if pattern == "" {
+				pattern = "(ungrouped)"
 			}
-			fmt.Fprintf(&out, "  %s  %s\n", name, displayName(item.Type))
+			fmt.Fprintf(table, "%s\t%s\t%d\n", pattern, displayName(group.Type), group.Count)
 		}
-		if page.NextCursor != nil {
-			fmt.Fprintf(&out, "\nContinue with list_keys using cursor %q.\n", *page.NextCursor)
-		}
+		table.Flush()
 		return out.String()
 	}
 	if len(description.Schemas) == 0 {

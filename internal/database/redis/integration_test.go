@@ -132,8 +132,21 @@ XADD view:stream 1-0 f a f b
 	}
 	desc, err := router.DescribeDatabase(t.Context(), a)
 	raw, _ := json.Marshal(desc)
-	if err != nil || contracts.Validate("db-describe.output", raw) != nil || bytes.Contains(raw, []byte("private:")) {
+	if err != nil || contracts.Validate("db-describe.output", raw) != nil || bytes.Contains(raw, []byte("private:")) || bytes.Contains(raw, []byte("view:hash")) {
 		t.Fatalf("CLI keyspace: %s %v", raw, err)
+	}
+	if desc.Keyspace == nil || desc.Keyspace.ObservedKeys < 1 || desc.Keyspace.ObservedKeys > 7 {
+		t.Fatalf("sample includes keys outside the readable fixture: %s", raw)
+	}
+	count := 0
+	for _, group := range desc.Keyspace.Groups {
+		if group.Pattern != "" && group.Pattern != "view:*" {
+			t.Fatalf("sample leaked an unreadable pattern: %s", raw)
+		}
+		count += group.Count
+	}
+	if count != desc.Keyspace.ObservedKeys {
+		t.Fatalf("sample groups do not account for the readable keys: %s", raw)
 	}
 
 	verifyKeyTools(t, mcpfixture.Connect(t, router, a), p.Alias)

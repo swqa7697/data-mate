@@ -273,18 +273,27 @@ func (d *Driver) listKeys(ctx context.Context, a database.Access, rev config.Rev
 	return out, err
 }
 
-// scanWindow retains the input cursor and consumed offset when Redis returns
-// more than the requested count. Replaying uses a fixed COUNT independent of
-// page size. Reject a changed replay before applying its consumed offset.
-func (d *Driver) scanWindow(reply any, pos *cursor, size, width int) ([]any, bool, error) {
+// scanReply decodes the cursor and the items common to Redis scan commands.
+func scanReply(reply any) (uint64, []any, error) {
 	pair, ok := reply.([]any)
 	if !ok || len(pair) != 2 {
-		return nil, false, badKeyReply()
+		return 0, nil, badKeyReply()
 	}
 	next, ok := pair[0].(string)
 	items, arrayOK := pair[1].([]any)
 	rawCursor, err := strconv.ParseUint(next, 10, 64)
-	if !ok || !arrayOK || err != nil || len(items)%width != 0 {
+	if !ok || !arrayOK || err != nil {
+		return 0, nil, badKeyReply()
+	}
+	return rawCursor, items, nil
+}
+
+// scanWindow retains the input cursor and consumed offset when Redis returns
+// more than the requested count. Replaying uses a fixed COUNT independent of
+// page size. Reject a changed replay before applying its consumed offset.
+func (d *Driver) scanWindow(reply any, pos *cursor, size, width int) ([]any, bool, error) {
+	rawCursor, items, err := scanReply(reply)
+	if err != nil || len(items)%width != 0 {
 		return nil, false, badKeyReply()
 	}
 	start := pos.ScanOffset
@@ -322,22 +331,4 @@ func (d *Driver) scanWindow(reply any, pos *cursor, size, width int) ([]any, boo
 	}
 	pos.Key, pos.ScanOffset, pos.ScanDigest = rawCursor, 0, ""
 	return result, rawCursor != 0, nil
-}
-
-// DescribeDatabase returns the first page of visible native keys for the
-// configured logical database, without reading values.
-func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
-	a, rev, err := database.Normalize(a)
-	if err != nil {
-		return database.DatabaseDescription{}, err
-	}
-	page, err := d.listKeys(ctx, a, rev, database.KeyPageRequest{})
-	if err != nil {
-		return database.DatabaseDescription{}, err
-	}
-	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, RedisKeys: &page}
-	if err := out.CheckSize(a.Profile.Limits.MaxResultBytes); err != nil {
-		return database.DatabaseDescription{}, err
-	}
-	return out, nil
 }

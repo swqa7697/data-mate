@@ -79,12 +79,26 @@ type Stage struct {
 // return application schemas, including empty ones. MongoDB returns authorized
 // databases as schemas and omits Database. Redis returns a keyspace sample.
 type DatabaseDescription struct {
-	Version   int                 `json:"version"`
-	Alias     string              `json:"alias"`
-	Driver    string              `json:"driver"`
-	Database  string              `json:"database,omitempty"`
-	Schemas   []SchemaDescription `json:"schemas,omitzero"`
-	RedisKeys *KeyPage            `json:"keyspace,omitempty"`
+	Version  int                 `json:"version"`
+	Alias    string              `json:"alias"`
+	Driver   string              `json:"driver"`
+	Database string              `json:"database,omitempty"`
+	Schemas  []SchemaDescription `json:"schemas,omitzero"`
+	Keyspace *RedisKeyspace      `json:"keyspace,omitempty"`
+}
+
+// RedisKeyspace summarizes the distinct readable keys in one bounded scan.
+type RedisKeyspace struct {
+	ObservedKeys int             `json:"observed_keys"`
+	Groups       []RedisKeyGroup `json:"groups"`
+}
+
+// RedisKeyGroup counts sampled keys of one type. Pattern is present only
+// when multiple readable keys share a literal prefix usable with list_keys.
+type RedisKeyGroup struct {
+	Pattern string `json:"pattern,omitempty"`
+	Type    string `json:"type"`
+	Count   int    `json:"count"`
 }
 
 // SchemaDescription groups catalog-visible application objects in a schema.

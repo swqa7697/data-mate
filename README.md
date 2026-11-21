@@ -71,7 +71,7 @@ data-mate mcp start
 | -------------------------------- | ------------------------------------------------------------------------- |
 | `data-mate db add`               | Save a database connection.                          |
 | `data-mate db list`              | View aliases and nonsecret settings.                                      |
-| `data-mate db describe [alias]`  | Describe a relational or MongoDB catalog, or sample readable Redis key names and types. |
+| `data-mate db describe [alias]`  | Describe a relational or MongoDB catalog, or summarize Redis key patterns and types. |
 | `data-mate db test [alias]`      | Test one connection, or all connections if omitted.                       |
 | `data-mate db edit [alias]`      | Update settings or credentials.                                           |
 | `data-mate db remove [alias]`    | Remove a connection and its saved credentials.                            |
@@ -80,7 +80,9 @@ data-mate mcp start
 | `data-mate mcp status`           | Check service and agent registration status.                              |
 | `data-mate mcp stop`             | Stop agent access.                                                        |
 
-Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively.
+Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively. In a terminal, the alias shows a loading indicator while the command fetches the description.
+
+For Redis, `db describe` checks up to eight candidate keys in the selected database. It groups readable keys by type and by repeated prefixes such as `orders:*`. Counts apply only to this sample. An empty sample can occur even in a populated database. Use the MCP tool `list_keys` with a reported pattern to browse matching keys. For scripts, Redis description JSON is now version 2. The `keyspace` object contains `observed_keys` and `groups`. Each group has a `type`, a `count`, and an optional `pattern`.
 
 Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
 

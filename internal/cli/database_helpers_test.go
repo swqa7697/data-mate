@@ -57,12 +57,16 @@ func (d *fixtureDatabase) DescribeDatabase(_ context.Context, a database.Access)
 	}
 	out := database.DatabaseDescription{Version: 1, Alias: a.Profile.Alias, Driver: a.Profile.Driver, Database: a.Profile.Connection.Database, Schemas: []database.SchemaDescription{}}
 	if a.Profile.Driver == "redis" {
-		cursor := "more-keys"
+		out.Version = 2
 		out.Schemas = nil
-		out.RedisKeys = &database.KeyPage{Connection: out.Alias, Driver: out.Driver, Keys: []database.KeyInfo{
-			{Key: database.KeyBytes{Value: "line\n\x1b[31m", Encoding: "utf8"}, Type: "string"},
-			{Key: database.KeyBytes{Value: "/wA=", Encoding: "base64"}, Type: "hash"},
-		}, NextCursor: &cursor}
+		out.Keyspace = &database.RedisKeyspace{Groups: []database.RedisKeyGroup{}}
+		if !d.emptyCatalog {
+			out.Keyspace.ObservedKeys = 3
+			out.Keyspace.Groups = []database.RedisKeyGroup{
+				{Pattern: "user:*", Type: "hash", Count: 2},
+				{Type: "string", Count: 1},
+			}
+		}
 		return out, nil
 	}
 	if a.Profile.Driver == "mongodb" {

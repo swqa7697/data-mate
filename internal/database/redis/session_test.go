@@ -21,7 +21,7 @@ import (
 )
 
 // A synthetic peer can send unsupported handshakes, incomplete frames, and
-// oversized lengths that the supported Docker images cannot produce.
+// oversized lengths, and scripted SCAN batches that a live fixture cannot guarantee.
 func TestRedisConnectionBoundary(t *testing.T) {
 	const secret = "synthetic-private"
 	simple := func(s string) string { return "+" + s + "\r\n" }
@@ -43,6 +43,16 @@ func TestRedisConnectionBoundary(t *testing.T) {
 		{"managed account without ACL inspection", "read_only", "", []exchange{handshake, {[]any{"SELECT", "3"}, simple("OK")}}},
 		{"database selection denied", "read_only", contracts.PermissionDenied, []exchange{handshake, {[]any{"SELECT", "3"}, "-NOPERM " + secret + "\r\n"}}},
 		{"bad credentials redact upstream text", "authentication", contracts.ConnectFailed, []exchange{auth("-WRONGPASS " + secret + "\r\n")}},
+		{"bounded sample despite duplicates, denied and surplus keys", "describe", "", []exchange{
+			handshake, {[]any{"SELECT", "3"}, simple("OK")},
+			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("9"), array(simple("s:1"), simple("s:1"), simple("other:x"), simple("s:2"), simple("other:y"), simple("s:\x01"), simple("s:\xff"), simple("over:limit")))},
+			{[]any{"TYPE", "s:1"}, simple("string")}, {[]any{"GETRANGE", "s:1", "1", "0"}, "$0\r\n\r\n"},
+			{[]any{"TYPE", "other:x"}, simple("string")}, {[]any{"GETRANGE", "other:x", "1", "0"}, "-NOPERM\r\n"},
+			{[]any{"TYPE", "s:2"}, simple("hash")}, {[]any{"HSCAN", "s:2", "0", "MATCH", "[]", "COUNT", "1"}, array(simple("0"), array())},
+			{[]any{"TYPE", "other:y"}, simple("zset")}, {[]any{"ZRANGE", "other:y", "1", "0", "WITHSCORES"}, array()},
+			{[]any{"TYPE", "s:\x01"}, simple("string")}, {[]any{"GETRANGE", "s:\x01", "1", "0"}, "$0\r\n\r\n"},
+			{[]any{"TYPE", "s:\xff"}, simple("string")}, {[]any{"GETRANGE", "s:\xff", "1", "0"}, "$0\r\n\r\n"},
+		}},
 		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone"))}},
 		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster"))}},
 		{"sentinel mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("7.0.4", "sentinel"))}},
@@ -100,6 +110,24 @@ func TestRedisConnectionBoundary(t *testing.T) {
 			defer r.Close()
 			port := ln.Addr().(*net.TCPAddr).Port
 			p := config.Profile{Driver: "redis", Alias: "fixture", ID: "12345678-1234-1234-1234-123456789abc", Connection: config.Connection{Host: "127.0.0.1", Port: port, Username: "reader", Database: "3"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
+			if tt.stage == "describe" {
+				limits := config.DefaultLimits()
+				limits.MaxRows = 7
+				p.Limits = &limits
+				out, err := New(r).DescribeDatabase(ctx, database.NewAccess(p, secret))
+				want := &database.RedisKeyspace{ObservedKeys: 5, Groups: []database.RedisKeyGroup{
+					{Pattern: "s:*", Type: "hash", Count: 1}, {Pattern: "s:*", Type: "string", Count: 1},
+					{Type: "string", Count: 2}, {Type: "zset", Count: 1},
+				}}
+				if err != nil || !reflect.DeepEqual(out.Keyspace, want) {
+					t.Fatalf("unexpected readable sample: %+v, error %v", out.Keyspace, err)
+				}
+				r.Close()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
 			out, err := New(r).Test(ctx, database.NewAccess(p, secret))
 			if out.Stage != tt.stage {
 				t.Fatalf("stage %q, error %v", out.Stage, err)

@@ -12,13 +12,14 @@ import (
 )
 
 func describeDatabase(cmd *cobra.Command, root config.Root, revision config.Revision, p config.Profile, factory managementFactory) error {
-	client, err := factory(cmd.Context(), root)
-	if err != nil {
-		return serviceError(err)
-	}
-	reply, err := client.Request(cmd.Context(), service.ManagementRequest{Operation: "describe", Interactive: hasTerminal(cmd), Expected: revision, ProfileID: p.ID, Alias: p.Alias})
-	client.Close()
-	if err != nil {
+	var reply service.ManagementReply
+	err := withDatabaseProgress(cmd, newDiagnosticBoard([]string{p.Alias}), func(ctx context.Context) error {
+		client, err := factory(ctx, root)
+		if err != nil {
+			return serviceError(err)
+		}
+		defer client.Close()
+		reply, err = client.Request(ctx, service.ManagementRequest{Operation: "describe", Interactive: hasTerminal(cmd), Expected: revision, ProfileID: p.ID, Alias: p.Alias})
 		if errors.Is(err, config.ErrRevision) {
 			return storageError(err, false)
 		}
@@ -26,6 +27,9 @@ func describeDatabase(cmd *cobra.Command, root config.Root, revision config.Revi
 			return failure(string(contracts.QueryTimeout) + ": database description timed out")
 		}
 		return serviceError(err)
+	})
+	if err != nil {
+		return err
 	}
 	if reply.Diagnostic != nil && reply.Diagnostic.Error != nil {
 		e := reply.Diagnostic.Error

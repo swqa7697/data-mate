@@ -75,7 +75,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `db import <csv-file>`: Add, skip or update multiple DB connections from a CSV file; secrets are optional in the file and missing ones are entered in the terminal
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections
-  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a relational connection, collections, views and indexes under each MongoDB database, or sample visible Redis keys and types
+  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a relational connection, collections, views and indexes under each MongoDB database, or summarize a bounded sample of readable Redis keys by repeated naming prefix and type
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
   - `db export <csv-file>`: Export all DB connections to a CSV file without secrets; a secret a connection does not use is marked explicitly as `<none>`
 - MCP - One shot

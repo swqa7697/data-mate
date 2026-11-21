@@ -61,16 +61,17 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 	board := newDiagnosticBoard(aliases)
 	results := []diagnosticResult{}
 	if len(selected) > 0 {
-		var display *diagnosticDisplay
-		if !flag(cmd, "json") {
-			display = startDiagnosticDisplay(cmd.OutOrStdout(), board)
-		}
-		err = requestDiagnostics(cmd, root, factory, board, targets, display)
-		if display != nil {
-			if e := display.stop(); e != nil && err == nil {
-				err = failure("cannot write diagnostics")
+		err = withDatabaseProgress(cmd, board, func(ctx context.Context) error {
+			client, err := factory(ctx, root)
+			if err != nil {
+				return serviceError(err)
 			}
-		}
+			defer client.Close()
+			if _, err := client.Request(ctx, service.ManagementRequest{Operation: "test", Interactive: hasTerminal(cmd), Targets: targets, Report: board.report}); err != nil {
+				return storageError(err, false)
+			}
+			return nil
+		})
 		if err != nil {
 			return err
 		}
@@ -110,17 +111,15 @@ func runDBTest(cmd *cobra.Command, args []string, override string, factory manag
 	return nil
 }
 
-// requestDiagnostics submits every target in one management request. The
-// service checks them concurrently and the board receives each result as it
-// completes; terminal prompts pause the live display.
-func requestDiagnostics(cmd *cobra.Command, root config.Root, factory managementFactory, board *diagnosticBoard, targets []service.ProfileTarget, display *diagnosticDisplay) error {
-	client, err := factory(cmd.Context(), root)
-	if err != nil {
-		return serviceError(err)
-	}
-	defer client.Close()
+// withDatabaseProgress shows pending aliases during a service request. It clears
+// the terminal for keyring prompts and before the caller writes the result.
+func withDatabaseProgress(cmd *cobra.Command, board *diagnosticBoard, request func(context.Context) error) error {
 	ctx := cmd.Context()
-	if display != nil && display.live {
+	if flag(cmd, "json") {
+		return request(ctx)
+	}
+	display := startDiagnosticDisplay(cmd.OutOrStdout(), board)
+	if display.live {
 		prompt := keyringPrompt(cmd)
 		ctx = vault.WithKeyringPrompt(ctx, func(ctx context.Context, challenge vault.KeyringChallenge) ([]byte, error) {
 			display.pause()
@@ -128,8 +127,9 @@ func requestDiagnostics(cmd *cobra.Command, root config.Root, factory management
 			return prompt(ctx, challenge)
 		})
 	}
-	if _, err = client.Request(ctx, service.ManagementRequest{Operation: "test", Interactive: hasTerminal(cmd), Targets: targets, Report: board.report}); err != nil {
-		return storageError(err, false)
+	err := request(ctx)
+	if outputErr := display.stop(); outputErr != nil && err == nil {
+		return failure("cannot write terminal output")
 	}
-	return nil
+	return err
 }

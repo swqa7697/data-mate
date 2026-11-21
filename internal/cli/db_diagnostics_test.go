@@ -257,8 +257,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 	saveProfiles(t, root, invalidProfile)
 	runCommand("describe", &fixtureDatabase{}, 2, "good", "--json")
 	saveProfiles(t, root, original)
-	// A Redis description returns a bounded page of key names and types,
-	// including binary names. The terminal must escape untrusted names.
+	// A Redis description groups the observed readable keys by pattern and type.
 	redisProfiles := snapshot(t, root)
 	for i := range redisProfiles.Connections {
 		p := &redisProfiles.Connections[i]
@@ -272,8 +271,12 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatal("Redis description JSON", out)
 	}
 	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
-	if !strings.Contains(out, `"line\n\x1b[31m"`) || !strings.Contains(out, `base64 "/wA="`) || !strings.Contains(out, "more-keys") {
-		t.Fatal("Redis key name or continuation lost in terminal output", out)
+	if cells := strings.Fields(out); !strings.Contains(strings.Join(cells, " "), "user:* hash 2 (ungrouped) string 1") {
+		t.Fatal("Redis sample lost its pattern, type or count", out)
+	}
+	out, _ = runCommand("describe", &fixtureDatabase{emptyCatalog: true}, 0, "good")
+	if !strings.Contains(out, "in this sample") {
+		t.Fatal("empty Redis sample lacks observation scope", out)
 	}
 	// A MongoDB description lists databases as schemas with collection kinds and
 	// per-collection index names; the authentication database is not shown.

@@ -146,17 +146,14 @@ func liveDiagnostics(t *testing.T, path string) {
 		t.Fatal("live description contract or redaction")
 	}
 	if fixture.Driver == "redis" {
-		if description.RedisKeys == nil || description.Database != "1" || strings.Contains(out, "private:secret") || strings.Contains(out, "view:wrongdatabase") {
-			t.Fatal("description returned keys outside the selected database or ACL")
+		sample := description.Keyspace
+		if description.Database != "1" || sample == nil || sample.ObservedKeys == 0 || sample.ObservedKeys > 7 {
+			t.Fatal("unexpected sample from the seven readable fixture keys", out)
 		}
-		found := false
-		for _, item := range description.RedisKeys.Keys {
-			if item.Key.Value == "view:hash" && item.Type == "hash" {
-				found = true
+		for _, group := range sample.Groups {
+			if group.Pattern != "" && group.Pattern != "view:*" {
+				t.Fatal("description exposed a pattern outside the readable fixture", out)
 			}
-		}
-		if !found {
-			t.Fatal("description omitted readable Redis hash")
 		}
 	} else {
 		found := false
