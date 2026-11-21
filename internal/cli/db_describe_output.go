@@ -59,13 +59,13 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		}
 		fmt.Fprintf(&out, "\nReadable Redis keys observed in this sample: %d\n\n", sample.ObservedKeys)
 		table := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(table, "Pattern\tType\tSample keys")
+		fmt.Fprintln(table, "Pattern\tType")
 		for _, group := range sample.Groups {
 			pattern := displayName(group.Pattern)
 			if pattern == "" {
 				pattern = "(ungrouped)"
 			}
-			fmt.Fprintf(table, "%s\t%s\t%d\n", pattern, displayName(group.Type), group.Count)
+			fmt.Fprintf(table, "%s\t%s\n", pattern, displayName(group.Type))
 		}
 		table.Flush()
 		for _, group := range sample.Groups {

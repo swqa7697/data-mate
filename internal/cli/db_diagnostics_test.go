@@ -283,8 +283,8 @@ func TestConnectionDiagnostics(t *testing.T) {
 		t.Fatal("Redis description JSON", out)
 	}
 	out, _ = runCommand("describe", &fixtureDatabase{keyspace: grouped}, 0, "good")
-	if cells := strings.Fields(out); !strings.Contains(strings.Join(cells, " "), "user:* hash 2 (ungrouped) string 1") {
-		t.Fatal("Redis sample lost its pattern, type or count", out)
+	if cells := strings.Fields(out); !strings.HasSuffix(strings.Join(cells, " "), "user:* hash (ungrouped) string") {
+		t.Fatal("unexpected Redis pattern and type rows", out)
 	}
 	out, _ = runCommand("describe", &fixtureDatabase{keyspace: ungrouped}, 0, "good")
 	if !strings.Contains(out, `"orders\n\x1b[31m"`) || strings.Contains(out, "\x1b") ||

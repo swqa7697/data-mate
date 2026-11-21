@@ -93,8 +93,8 @@ type RedisKeyspace struct {
 	Groups       []RedisKeyGroup `json:"groups"`
 }
 
-// RedisKeyGroup counts sampled keys of one type. Pattern is present only
-// when multiple readable keys share a literal prefix usable with list_keys.
+// RedisKeyGroup counts sampled keys of one type. Pattern is a list_keys glob
+// for an explicit leading tag or a shared colon-delimited namespace.
 type RedisKeyGroup struct {
 	Pattern  string            `json:"pattern,omitempty"`
 	Type     string            `json:"type"`

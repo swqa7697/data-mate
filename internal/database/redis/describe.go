@@ -4,11 +4,9 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/swqa7697/data-mate/internal/database"
@@ -20,7 +18,8 @@ const (
 	exampleByteLimit   = 96
 )
 
-var literalPrefix = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,32}$`)
+// Escape Redis glob metacharacters so a namespace can be passed to SCAN MATCH.
+var escapeGlob = strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`)
 
 // DescribeDatabase summarizes one small sample of readable keys in the selected database.
 func (d *Driver) DescribeDatabase(ctx context.Context, a database.Access) (database.DatabaseDescription, error) {
@@ -53,13 +52,14 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 	if err != nil {
 		return database.RedisKeyspace{}, err
 	}
-	type groupID struct{ pattern, kind string }
+	type groupID struct{ prefix, kind string }
 	type observation struct {
-		group groupID
-		key   string
+		group  groupID
+		key    string
+		tagged bool
 	}
 	var observations []observation
-	patternCounts := make(map[string]int)
+	prefixCounts := make(map[string]int)
 	seen := make(map[string]bool)
 	// COUNT is a hint. Bound work even when the first batch is oversized or all keys are denied.
 	for _, raw := range keys[:min(len(keys), limit)] {
@@ -76,25 +76,28 @@ func sampleKeyspace(ctx context.Context, s *session, limit int) (database.RedisK
 			return database.RedisKeyspace{}, err
 		}
 		if kind != "" {
-			pattern := keyPattern(key)
-			patternCounts[pattern]++
-			observations = append(observations, observation{groupID{pattern, kind}, key})
+			prefix, tagged := keyPrefix(key)
+			prefixCounts[prefix]++
+			observations = append(observations, observation{groupID{prefix, kind}, key, tagged})
 		}
 	}
 
 	groups := make(map[groupID]*database.RedisKeyGroup)
 	for _, item := range observations {
 		id := item.group
-		if patternCounts[id.pattern] < 2 {
-			id.pattern = ""
+		if !item.tagged && prefixCounts[id.prefix] < 2 {
+			id.prefix = ""
 		}
 		group := groups[id]
 		if group == nil {
-			group = &database.RedisKeyGroup{Pattern: id.pattern, Type: id.kind}
+			group = &database.RedisKeyGroup{Type: id.kind}
+			if id.prefix != "" {
+				group.Pattern = escapeGlob.Replace(id.prefix) + ":*"
+			}
 			groups[id] = group
 		}
 		group.Count++
-		if id.pattern == "" && len(group.Examples) < groupExampleLimit {
+		if id.prefix == "" && len(group.Examples) < groupExampleLimit {
 			group.Examples = append(group.Examples, keyExample(item.key))
 		}
 	}
@@ -136,16 +139,22 @@ func keyExample(key string) database.RedisKeyExample {
 	return database.RedisKeyExample{KeyBytes: database.KeyBytes{Value: key[:end], Encoding: "utf8"}, Truncated: true}
 }
 
-// Only expose a literal first segment that users can paste into SCAN MATCH.
-func keyPattern(key string) string {
-	prefix, _, ok := strings.Cut(key, ":")
-	if !ok || !literalPrefix.MatchString(prefix) || !utf8.ValidString(key) {
-		return ""
-	}
-	for _, r := range key {
-		if !unicode.IsPrint(r) {
-			return ""
+// keyPrefix preserves a leading {tag}: as a namespace even when the tag
+// contains colons. Only the prefix needs to fit the JSON string used by list_keys.
+func keyPrefix(key string) (string, bool) {
+	if strings.HasPrefix(key, "{") {
+		end := strings.IndexByte(key, '}')
+		if end > 1 && strings.HasPrefix(key[end+1:], ":") {
+			prefix := key[:end+1]
+			if utf8.ValidString(prefix) {
+				return prefix, true
+			}
+			return "", false
 		}
 	}
-	return prefix + ":*"
+	prefix, _, ok := strings.Cut(key, ":")
+	if !ok || !utf8.ValidString(prefix) {
+		return "", false
+	}
+	return prefix, false
 }

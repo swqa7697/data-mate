@@ -55,6 +55,8 @@ func TestRedisIntegration(t *testing.T) {
 		t.Fatal("Redis fixture ownership or endpoint mismatch")
 	}
 	// Only the owned container receives administrative fixture setup via stdin.
+	const tag = `{tenant.测试.very-long-namespace.*?[ab]\region:sync}`
+	const plain = `reports.*`
 	cmd := exec.CommandContext(t.Context(), "docker", "exec", "-i", f.Container, "sh", "-ec",
 		`export REDISCLI_AUTH="$(cat /fixture/admin-password)"; exec redis-cli -e --quoted-input`)
 	cmd.Stdin = strings.NewReader(`SELECT 0
@@ -68,6 +70,13 @@ RPUSH view:list a b c
 SADD view:set "" b c
 ZADD view:zset 1 a 2 b 3 c
 XADD view:stream 1-0 f a f b
+SELECT 2
+ACL SETUSER reader %R~{tenant.* %R~reports.*
+HSET ` + strconv.Quote(tag+":receipt") + ` field data
+SADD {tenant.测试.very-long-namespace.Xaaregion:sync}:decoy member
+SET ` + plain + `:one a
+SET ` + plain + `:two b
+RPUSH reports.other:decoy c
 `)
 	if err := cmd.Run(); err != nil {
 		t.Fatal("cannot seed owned Redis fixture", err)
@@ -147,6 +156,42 @@ XADD view:stream 1-0 f a f b
 	}
 	if count != desc.Keyspace.ObservedKeys {
 		t.Fatalf("sample groups do not account for the readable keys: %s", raw)
+	}
+
+	// Exercise the emitted MATCH patterns in Redis. Glob syntax inside a literal
+	// namespace must not broaden the group's membership to a neighboring key.
+	q := p
+	q.Connection.Database, q.Connection.Username = "2", "reader"
+	namespaced := access(q)
+	describe, err := router.DescribeDatabase(t.Context(), namespaced)
+	if err != nil || describe.Keyspace == nil || describe.Keyspace.ObservedKeys != 5 {
+		t.Fatal("describe namespaced keys", err)
+	}
+	want := map[string][]string{
+		"hash":   {tag + ":receipt"},
+		"string": {plain + ":one", plain + ":two"},
+	}
+	for _, group := range describe.Keyspace.Groups {
+		expected, ok := want[group.Type]
+		if !ok || group.Pattern == "" {
+			continue
+		}
+		page, err := router.ListKeys(t.Context(), namespaced, database.KeyPageRequest{Pattern: group.Pattern})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var matched []string
+		for _, item := range page.Keys {
+			matched = append(matched, item.Key.Value)
+		}
+		slices.Sort(matched)
+		if page.NextCursor != nil || !slices.Equal(matched, expected) {
+			t.Fatalf("pattern %q matched %q, want %q", group.Pattern, matched, expected)
+		}
+		delete(want, group.Type)
+	}
+	if len(want) > 0 {
+		t.Fatalf("missing literal namespace patterns for %v", want)
 	}
 
 	verifyKeyTools(t, mcpfixture.Connect(t, router, a), p.Alias)

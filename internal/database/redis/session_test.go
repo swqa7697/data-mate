@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,10 @@ func TestRedisConnectionBoundary(t *testing.T) {
 	handshake := auth(hello("7.0.0", "standalone"))
 	longText := strings.Repeat("a", 95) + "茶"
 	longBinary := strings.Repeat("b", 96) + "\xff"
+	const taggedCleanup = "{app:sync}:scheduling:record:cleanup:6789"
+	const taggedScan = "{app:sync}:scheduling:record:scan:runs:29"
+	const singletonTag = "{业务.team.with.a.long.namespace.*:synchronization}"
+	const singletonKey = singletonTag + ":epoch"
 	hashProbe := array(simple("0"), array())
 	for _, tt := range []struct {
 		name, stage string
@@ -55,13 +60,16 @@ func TestRedisConnectionBoundary(t *testing.T) {
 			{[]any{"TYPE", "other:y"}, simple("zset")}, {[]any{"ZRANGE", "other:y", "1", "0", "WITHSCORES"}, array()},
 			{[]any{"TYPE", "s:\x01"}, simple("string")}, {[]any{"GETRANGE", "s:\x01", "1", "0"}, "$0\r\n\r\n"},
 			{[]any{"TYPE", "s:\xff"}, simple("string")}, {[]any{"GETRANGE", "s:\xff", "1", "0"}, "$0\r\n\r\n"},
-			// A fresh describe can find only ungrouped hashes. Names must remain
-			// useful without another Redis command or an unbounded result.
-			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("0"), array(simple(longText), simple(longBinary), simple("active"), simple("pending")))},
+			// Explicit tags identify a namespace even for a single key. Other
+			// hashes in the same batch still need bounded, readable examples.
+			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("0"), array(simple(longText), simple(longBinary), simple("active"), simple("pending"), simple(taggedCleanup), simple(taggedScan), simple(singletonKey)))},
 			{[]any{"TYPE", longText}, simple("hash")}, {[]any{"HSCAN", longText, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
 			{[]any{"TYPE", longBinary}, simple("hash")}, {[]any{"HSCAN", longBinary, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
 			{[]any{"TYPE", "active"}, simple("hash")}, {[]any{"HSCAN", "active", "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
 			{[]any{"TYPE", "pending"}, simple("hash")}, {[]any{"HSCAN", "pending", "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", taggedCleanup}, simple("hash")}, {[]any{"HSCAN", taggedCleanup, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", taggedScan}, simple("hash")}, {[]any{"HSCAN", taggedScan, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", singletonKey}, simple("string")}, {[]any{"GETRANGE", singletonKey, "1", "0"}, "$0\r\n\r\n"},
 		}},
 		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone"))}},
 		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster"))}},
@@ -127,11 +135,7 @@ func TestRedisConnectionBoundary(t *testing.T) {
 				driver, access := New(r), database.NewAccess(p, secret)
 				out, err := driver.DescribeDatabase(ctx, access)
 				want := &database.RedisKeyspace{ObservedKeys: 5, Groups: []database.RedisKeyGroup{
-					{Pattern: "s:*", Type: "hash", Count: 1}, {Pattern: "s:*", Type: "string", Count: 1},
-					{Type: "string", Count: 2, Examples: []database.RedisKeyExample{
-						{KeyBytes: database.KeyBytes{Value: "s:\x01", Encoding: "utf8"}},
-						{KeyBytes: database.KeyBytes{Value: "czr/", Encoding: "base64"}},
-					}},
+					{Pattern: "s:*", Type: "hash", Count: 1}, {Pattern: "s:*", Type: "string", Count: 3},
 					{Type: "zset", Count: 1, Examples: []database.RedisKeyExample{
 						{KeyBytes: database.KeyBytes{Value: "other:y", Encoding: "utf8"}},
 					}},
@@ -140,7 +144,9 @@ func TestRedisConnectionBoundary(t *testing.T) {
 					t.Fatalf("unexpected readable sample: %+v, error %v", out.Keyspace, err)
 				}
 				out, err = driver.DescribeDatabase(ctx, access)
-				want = &database.RedisKeyspace{ObservedKeys: 4, Groups: []database.RedisKeyGroup{
+				want = &database.RedisKeyspace{ObservedKeys: 7, Groups: []database.RedisKeyGroup{
+					{Pattern: "{app:sync}:*", Type: "hash", Count: 2},
+					{Pattern: `{业务.team.with.a.long.namespace.\*:synchronization}:*`, Type: "string", Count: 1},
 					{Type: "hash", Count: 4, Examples: []database.RedisKeyExample{
 						{KeyBytes: database.KeyBytes{Value: strings.Repeat("a", 95), Encoding: "utf8"}, Truncated: true},
 						{KeyBytes: database.KeyBytes{Value: strings.Repeat("YmJi", 32), Encoding: "base64"}, Truncated: true},
@@ -148,7 +154,14 @@ func TestRedisConnectionBoundary(t *testing.T) {
 					}},
 				}}
 				if err != nil || !reflect.DeepEqual(out.Keyspace, want) {
-					t.Fatalf("unexpected ungrouped hash sample: %+v, error %v", out.Keyspace, err)
+					t.Fatalf("unexpected tagged and ungrouped hash sample: %+v, error %v", out.Keyspace, err)
+				}
+				raw, err := json.Marshal(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := contracts.Validate("db-describe.output", raw); err != nil {
+					t.Fatal(err)
 				}
 				r.Close()
 				if err := <-done; err != nil {
