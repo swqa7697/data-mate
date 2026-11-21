@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-20
+
 ### Changed
 
 - `db describe` samples up to 64 Redis key candidates across multiple scan pages and marks partial scans. It groups readable keys by type, shared prefix or explicit tag such as `{orders.prod:sync}:*` and shows up to three example names per group. UTF-8 namespaces can contain punctuation and Redis wildcard characters. Redis JSON descriptions now use version 2 and report sample counts and scan completion. Use `list_keys` to browse individual keys.
