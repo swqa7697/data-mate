@@ -2,6 +2,7 @@ package redis
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,38 +29,23 @@ func TestRedisConnectionBoundary(t *testing.T) {
 	hello := func(version, mode string) string {
 		return array(simple("version"), simple(version), simple("mode"), simple(mode), simple("server"), simple("redis"), simple("proto"), ":2\r\n")
 	}
-	selector := func(rules string) []string {
-		return []string{simple("commands"), simple(rules), simple("keys"), simple("%R~visible:*"), simple("channels"), simple("")}
-	}
-	acl := func(rules string, selectors ...string) string {
-		items := selector(rules)
-		return array(append(items, simple("flags"), array(simple("on"), simple("nopass")), simple("passwords"), array(), simple("selectors"), array(selectors...))...)
-	}
 	type exchange struct {
 		request []any
 		reply   string // empty means cancel while the peer holds the response
 	}
 	auth := func(reply string) exchange { return exchange{[]any{"HELLO", "2", "AUTH", "reader", secret}, reply} }
-	identity := exchange{[]any{"ACL", "WHOAMI"}, simple("reader")}
-	selectDB := exchange{[]any{"SELECT", "3"}, simple("OK")}
-	grants := func(reply string) exchange { return exchange{[]any{"ACL", "GETUSER", "reader"}, reply} }
-	fresh := func(rest ...exchange) []exchange {
-		return append([]exchange{auth(hello("7.0.0", "standalone")), identity, selectDB}, rest...)
-	}
+	handshake := auth(hello("7.0.0", "standalone"))
 	for _, tt := range []struct {
 		name, stage string
 		code        contracts.Code
 		script      []exchange
 	}{
-		{"read-only passwordless account with a compact category", "read_only", "", fresh(grants(acl("-@all +@string -set")), exchange{[]any{"ACL", "CAT", "string"}, array(simple("get"), simple("set"))})},
-		{"write in a separate selector", "read_only", contracts.ReadOnlyViolation, fresh(grants(acl("-@all +get", array(selector("-@all +set")...))))},
-		{"unbounded future grants", "read_only", contracts.ReadOnlyViolation, fresh(grants(acl("+@all -@write")))},
-		{"expanded category includes an admin subcommand", "read_only", contracts.ReadOnlyViolation, fresh(grants(acl("-@all +@admin -acl|whoami")), exchange{[]any{"ACL", "CAT", "admin"}, array(simple("acl|setuser"), simple("acl|whoami"))})},
+		{"managed account without ACL inspection", "read_only", "", []exchange{handshake, {[]any{"SELECT", "3"}, simple("OK")}}},
+		{"database selection denied", "read_only", contracts.PermissionDenied, []exchange{handshake, {[]any{"SELECT", "3"}, "-NOPERM " + secret + "\r\n"}}},
 		{"bad credentials redact upstream text", "authentication", contracts.ConnectFailed, []exchange{auth("-WRONGPASS " + secret + "\r\n")}},
-		{"identity mismatch", "authentication", contracts.ConnectFailed, []exchange{auth(hello("7.0.0", "standalone")), {[]any{"ACL", "WHOAMI"}, simple("other")}}},
-		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone")), identity}},
-		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster")), identity}},
-		{"sentinel mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("7.0.4", "sentinel")), identity}},
+		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone"))}},
+		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster"))}},
+		{"sentinel mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("7.0.4", "sentinel"))}},
 		{"oversized bulk length", "authentication", contracts.ResourceLimit, []exchange{auth("$9000000\r\n")}},
 		{"oversized aggregate length", "authentication", contracts.ResourceLimit, []exchange{auth("*9000000\r\n")}},
 		{"cancellation during authentication", "authentication", contracts.Cancelled, []exchange{auth("")}},
@@ -131,10 +117,32 @@ func TestRedisConnectionBoundary(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("wire guard rejects commands before buffering and frames binary keys", func(t *testing.T) {
+		var wire bytes.Buffer
+		w := bufio.NewWriter(&wire)
+		for _, args := range [][]string{
+			nil, {"SET", "k", "v"}, {"DEL", "k"}, {"EVAL", "return 1", "0"},
+			{"ACL", "GETUSER", "reader"}, {"FUTURE.COMMAND"}, {"HELLO", "2", "SETNAME", "name"},
+		} {
+			var safe *database.Error
+			if err := writeCommand(w, args); !errors.As(err, &safe) || safe.Code != contracts.ReadOnlyViolation || w.Buffered() != 0 || wire.Len() != 0 {
+				t.Fatalf("denied command %v buffered %d bytes, wrote %d: %v", args, w.Buffered(), wire.Len(), err)
+			}
+		}
+		const key = "k\r\n*2\r\n$3\r\nDEL\r\n$1\r\nx\r\n\x00"
+		if err := writeCommand(w, []string{"GETRANGE", key, "0", "1"}); err != nil {
+			t.Fatal(err)
+		}
+		r := responseReader{r: bufio.NewReader(&wire), remaining: maxReplyBytes}
+		got, err := r.value(0)
+		if err != nil || !reflect.DeepEqual(got, []any{"GETRANGE", key, "0", "1"}) || r.r.Buffered() != 0 || wire.Len() != 0 {
+			t.Fatalf("binary key escaped the read command: %v, %v", got, err)
+		}
+	})
 }
 
-// Approval expires as soon as the final physical connection disconnects,
-// even when no operation has checked the connection out since its last use.
+// Detect disconnects even when no operation has checked the session out since its last use.
 func TestIdleRedisSessionObservesDisconnect(t *testing.T) {
 	conn, peer := net.Pipe()
 	s := newSession(conn, conn)

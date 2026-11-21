@@ -102,78 +102,109 @@ func inaccessibleKey() error {
 	return database.Fail(contracts.PermissionDenied, "Redis key is unavailable or inaccessible", false)
 }
 
-// readProbe is an ordinary data read, so Redis checks read access to the key.
-// TYPE and PTTL inspect metadata and do not by themselves establish that access.
-func readProbe(kind, key string) []string {
+// A denied value read and an inaccessible missing key have the same public
+// error, even when the account can run TYPE on both names.
+func (s *session) keyCommand(ctx context.Context, args ...string) (any, error) {
+	value, err := s.command(ctx, args...)
+	if permissionDenied(err) {
+		return nil, inaccessibleKey()
+	}
+	return value, err
+}
+
+// Probe with the same command as a value read. Empty ranges and the empty
+// glob character class keep values out of metadata and discovery replies,
+// including when Redis scans an entire compact hash or set despite COUNT.
+func probeKey(ctx context.Context, s *session, kind, key string) error {
+	var args []string
 	switch kind {
 	case "string":
-		return []string{"GETRANGE", key, "0", "0"}
+		args = []string{"GETRANGE", key, "1", "0"}
 	case "list":
-		return []string{"LRANGE", key, "0", "0"}
+		args = []string{"LRANGE", key, "1", "0"}
 	case "set":
-		return []string{"SSCAN", key, "0", "COUNT", "1"}
+		args = []string{"SSCAN", key, "0", "MATCH", "[]", "COUNT", "1"}
 	case "hash":
-		return []string{"HSCAN", key, "0", "COUNT", "1"}
+		args = []string{"HSCAN", key, "0", "MATCH", "[]", "COUNT", "1"}
 	case "zset":
-		return []string{"ZRANGE", key, "0", "0", "WITHSCORES"}
+		args = []string{"ZRANGE", key, "1", "0", "WITHSCORES"}
 	case "stream":
-		return []string{"XRANGE", key, "-", "+", "COUNT", "1"}
+		args = []string{"XRANGE", key, "+", "-", "COUNT", "1"}
+	default:
+		return inaccessibleKey()
+	}
+	value, err := s.keyCommand(ctx, args...)
+	if err != nil {
+		return err
+	}
+	if kind == "string" {
+		if value != "" {
+			return badKeyReply()
+		}
+		return nil
+	}
+	if kind == "set" || kind == "hash" {
+		pair, ok := value.([]any)
+		if !ok || len(pair) != 2 {
+			return badKeyReply()
+		}
+		cursor, ok := pair[0].(string)
+		if _, err := strconv.ParseUint(cursor, 10, 64); !ok || err != nil {
+			return badKeyReply()
+		}
+		value = pair[1]
+	}
+	if items, ok := value.([]any); !ok || len(items) != 0 {
+		return badKeyReply()
 	}
 	return nil
 }
 
-func canReadKey(ctx context.Context, s *session, user, kind, key string) (bool, error) {
-	args := readProbe(kind, key)
-	if args == nil {
-		return false, nil
-	}
-	value, err := s.command(ctx, append([]string{"ACL", "DRYRUN", user}, args...)...)
-	if err != nil {
-		return false, err
-	}
-	message, ok := value.(string)
-	if !ok {
-		return false, badKeyReply()
-	}
-	// On denial the server sends a description that can contain key bytes.
-	return message == "OK", nil
+func permissionDenied(err error) bool {
+	var fail *database.Error
+	return errors.As(err, &fail) && fail.Code == contracts.PermissionDenied
 }
 
-func keyKind(ctx context.Context, s *session, user, key string, listing bool) (string, error) {
-	v, err := s.command(ctx, "TYPE", key)
+func keyKind(ctx context.Context, s *session, key string) (string, error) {
+	v, err := s.keyCommand(ctx, "TYPE", key)
 	if err != nil {
-		var fail *database.Error
-		if listing && errors.As(err, &fail) && fail.Code == contracts.PermissionDenied {
-			return "", nil
-		}
 		return "", err
 	}
 	kind, ok := v.(string)
 	if !ok {
 		return "", badKeyReply()
 	}
-	if kind == "none" {
-		if listing {
+	return kind, nil
+}
+
+func checkKeyRead(ctx context.Context, s *session, kind, key string) error {
+	if kind != "none" {
+		return probeKey(ctx, s, kind, key)
+	}
+	// A missing key has no type. Reveal its absence only if at least one
+	// of our value commands is permitted on this name.
+	for _, candidate := range []string{"string", "list", "set", "hash", "zset", "stream"} {
+		err := probeKey(ctx, s, candidate, key)
+		if !permissionDenied(err) {
+			return err
+		}
+	}
+	return inaccessibleKey()
+}
+
+func listedKeyKind(ctx context.Context, s *session, key string) (string, error) {
+	kind, err := keyKind(ctx, s, key)
+	if err == nil {
+		if kind == "none" {
 			return "", nil
 		}
-		// Avoid revealing the absence of names outside the caller's readable
-		// key patterns. A missing key has no type to select a single probe.
-		for _, candidate := range []string{"string", "list", "set", "hash", "zset", "stream"} {
-			allowed, err := canReadKey(ctx, s, user, candidate, key)
-			if err != nil || allowed {
-				return "none", err
-			}
-		}
-	} else {
-		allowed, err := canReadKey(ctx, s, user, kind, key)
-		if err != nil || allowed {
-			return kind, err
-		}
+		err = probeKey(ctx, s, kind, key)
 	}
-	if listing {
+	// A concurrent writer can change the type between TYPE and the probe.
+	if permissionDenied(err) || errors.Is(err, errWrongType) {
 		return "", nil
 	}
-	return "", inaccessibleKey()
+	return kind, err
 }
 
 // ListKeys returns one bounded scan page. Redis may return an empty page with
@@ -222,7 +253,7 @@ func (d *Driver) listKeys(ctx context.Context, a database.Access, rev config.Rev
 			if !ok {
 				return badKeyReply()
 			}
-			kind, err := keyKind(ctx, s, a.Profile.Connection.Username, key, true)
+			kind, err := listedKeyKind(ctx, s, key)
 			if err != nil {
 				return err
 			}

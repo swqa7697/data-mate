@@ -18,7 +18,7 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
-- Read Only: The MCP service provides only read-only tools and permissions to agents, and also enforces read-only DB accounts
+- Read Only: The MCP service provides read-only tools. Relational databases and MongoDB require read-only accounts. The Redis driver enforces a fixed command allowlist and accepts accounts with write privileges, including on managed services that restrict ACL inspection.
 - Database Access: The database's own privileges determine data access, including newly created objects and system schemas
 - Database Context: Agents can inspect catalog-visible routines and their source, enum and other type details (including arrays and table-row types), sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
 - Simple Management: Users can simply add/remove/modify a DB connection

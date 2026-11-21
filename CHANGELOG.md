@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Redis connections now accept accounts with write privileges and work on standalone services that restrict ACL inspection. The driver enforces read-only access and exposes only keys the account can read.
+
 ## [1.0.0] - 2026-11-19
 
 ### Added

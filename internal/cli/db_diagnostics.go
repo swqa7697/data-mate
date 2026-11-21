@@ -18,7 +18,7 @@ import (
 type diagnosticResult = service.DiagnosticResult
 
 func newDBTest(override *string, factory managementFactory, build Build) *cobra.Command {
-	cmd := &cobra.Command{Use: "test [alias]", Short: "Check staged connection and read-only transaction readiness", Args: cobra.MaximumNArgs(1)}
+	cmd := &cobra.Command{Use: "test [alias]", Short: "Check connection readiness for read-only access", Args: cobra.MaximumNArgs(1)}
 	cmd.Flags().Bool("json", false, "Versioned JSON results with reached diagnostic stages")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error { return runDBTest(cmd, args, *override, factory, build) }
 	return cmd

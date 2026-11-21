@@ -23,6 +23,8 @@ const (
 
 var errProtocol = errors.New("invalid Redis response")
 var errReplyLimit = errors.New("response exceeds Redis receive limit")
+var errCommandDenied = database.Fail(contracts.ReadOnlyViolation, "Redis driver blocked an unsupported command", false)
+var errWrongType = database.Fail(contracts.QueryFailed, "Redis key type changed", false)
 
 // responseReader checks all server-controlled lengths before allocating. RESP2
 // bulk and simple strings remain byte-exact Go strings until public encoding.
@@ -58,7 +60,7 @@ func (r *responseReader) value(depth int) (any, error) {
 	case '-':
 		// Upstream error text may contain keys, ACLs or credentials.
 		code, _, _ := bytes.Cut(field, []byte(" "))
-		return replyError(publicCode(string(code))), nil
+		return safeReplyError(string(code)), nil
 	case ':', '$', '*':
 	default:
 		return nil, errProtocol
@@ -104,37 +106,42 @@ func (r *responseReader) value(depth int) (any, error) {
 	return out, nil
 }
 
-type replyError contracts.Code
-
-func publicCode(code string) contracts.Code {
+func safeReplyError(code string) error {
 	switch code {
 	case "NOPERM":
-		return contracts.PermissionDenied
-	case "NOAUTH", "WRONGPASS":
-		return contracts.ConnectFailed
-	case "MOVED", "ASK":
-		return contracts.QueryUnsupported
-	default:
-		return contracts.QueryFailed
-	}
-}
-
-func (e replyError) safe() error {
-	switch contracts.Code(e) {
-	case contracts.PermissionDenied:
 		return database.Fail(contracts.PermissionDenied, "Redis account lacks permission for this operation", false)
-	case contracts.ConnectFailed:
+	case "NOAUTH", "WRONGPASS":
 		return database.Fail(contracts.ConnectFailed, "Redis authentication failed", false)
-	case contracts.QueryUnsupported:
+	case "MOVED", "ASK":
 		return database.Fail(contracts.QueryUnsupported, "Redis Cluster redirects are unsupported", false)
+	case "WRONGTYPE":
+		return errWrongType
 	default:
 		return database.Fail(contracts.QueryFailed, "Redis command failed", false)
 	}
 }
 
-// writeCommand uses bulk-string framing even for command names. No argument
-// can become a second command or change the boundary of another argument.
+// Allow only session setup and the key tools' read commands. Check before
+// buffering any bytes, then frame every argument separately, including binary keys.
 func writeCommand(w *bufio.Writer, args []string) error {
+	if len(args) == 0 {
+		return errCommandDenied
+	}
+	switch args[0] {
+	case "HELLO":
+		if len(args) != 5 || args[1] != "2" || args[2] != "AUTH" {
+			return errCommandDenied
+		}
+	case "SELECT":
+		if len(args) != 2 {
+			return errCommandDenied
+		}
+	case "SCAN", "TYPE", "PTTL", "STRLEN", "LLEN", "SCARD", "HLEN", "ZCARD", "XLEN",
+		"GETRANGE", "LRANGE", "SSCAN", "HSCAN", "ZRANGE", "XRANGE":
+		// These commands only read application data.
+	default:
+		return errCommandDenied
+	}
 	w.WriteString("*" + strconv.Itoa(len(args)) + "\r\n")
 	for _, arg := range args {
 		w.WriteString("$" + strconv.Itoa(len(arg)) + "\r\n")

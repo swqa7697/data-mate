@@ -106,13 +106,14 @@ import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 def digest(file):
     return hashlib.sha256((root / file).read_bytes().strip()).hexdigest()
+# Both application accounts lack ACL commands, as on a managed endpoint.
 reader = (f"on #{digest('reader-password')} %R~view:* -@all "
-          "+hello +select +acl|whoami +acl|getuser +acl|cat +acl|dryrun "
+          "+hello +select "
           "+scan +type +pttl +strlen +hlen +llen +scard +zcard +xlen "
           "+getrange +hscan +lrange +sscan +zrange +xrange (+type ~*)")
 (root / 'redis.acl').write_text(
     f"user default on #{digest('admin-password')} ~* &* +@all\n"
-    f"user reader {reader}\nuser unsafe {reader} (+set ~private:*)\n")
+    f"user reader {reader}\nuser writer {reader} (+set ~private:*)\n")
 PYTHON
 fi
 # start_fixture runs the owned server for one image with verified TLS enabled.

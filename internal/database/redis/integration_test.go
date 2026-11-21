@@ -25,7 +25,8 @@ import (
 	"github.com/swqa7697/data-mate/internal/transport"
 )
 
-// The SQL fixtures cannot exercise Redis ACL selectors, key discovery or value encodings.
+// The writer can modify private keys and inspect their types, but cannot read
+// their values or inspect ACLs. Every public key tool must respect those grants.
 // Run this scenario only against the container created by make test-integration.
 func TestRedisIntegration(t *testing.T) {
 	path := os.Getenv("DATA_MATE_REDIS_FIXTURE")
@@ -62,9 +63,9 @@ SELECT 1
 SET private:secret hidden
 SET "view:\xff" "\x00\xff"
 SET view:empty "" PX 300000
-HSET view:hash a 1 b 2 c 3
+HSET view:hash "" 1 b 2 c 3
 RPUSH view:list a b c
-SADD view:set a b c
+SADD view:set "" b c
 ZADD view:zset 1 a 2 b 3 c
 XADD view:stream 1-0 f a f b
 `)
@@ -77,7 +78,7 @@ XADD view:stream 1-0 f a f b
 	}
 	limits := config.DefaultLimits()
 	p := config.Profile{ID: "12345678-1234-1234-1234-123456789abc", Alias: "fixture", Driver: "redis",
-		Connection: config.Connection{Host: "localhost", Port: f.Port, Database: "1", Username: "reader"},
+		Connection: config.Connection{Host: "localhost", Port: f.Port, Database: "1", Username: "writer"},
 		Transport:  config.Transport{TLS: config.TLS{Mode: "disabled"}}, Limits: &limits}
 	access := func(p config.Profile) database.Access {
 		return database.NewAccess(p, strings.TrimSpace(string(password)))
@@ -92,17 +93,11 @@ XADD view:stream 1-0 f a f b
 	a := access(p)
 	ready, err := d.Test(t.Context(), a)
 	if err != nil || ready.Stage != "read_only" {
-		t.Fatalf("reader admission on %s: %v %v", f.Image, ready, err)
+		t.Fatalf("writer admission on %s: %v %v", f.Image, ready, err)
 	}
 	majorMinor := strconv.Itoa(ready.ServerVersion/10000) + "." + strconv.Itoa(ready.ServerVersion/100%100)
 	if f.Image != "redis:"+majorMinor {
 		t.Fatalf("fixture %s reports Redis %s", f.Image, majorMinor)
-	}
-	unsafe := p
-	unsafe.Connection.Username = "unsafe"
-	var safe *database.Error
-	if _, err := d.Test(t.Context(), access(unsafe)); !errors.As(err, &safe) || safe.Code != contracts.ReadOnlyViolation {
-		t.Fatalf("write grant in secondary selector: %v", err)
 	}
 	tlsEndpoint := docker("port", f.Container, "6380/tcp")
 	if !strings.HasPrefix(tlsEndpoint, "127.0.0.1:") {
@@ -148,6 +143,7 @@ XADD view:stream 1-0 f a f b
 	}
 	r.Invalidate(p.ID)
 	_, err = router.ListKeys(t.Context(), a, database.KeyPageRequest{PageSize: 1, Cursor: *page.NextCursor})
+	var safe *database.Error
 	if !errors.As(err, &safe) || safe.Code != contracts.StaleCursor {
 		t.Fatal("accepted stale cursor", err)
 	}
@@ -226,16 +222,25 @@ func verifyKeyTools(t *testing.T, session *sdk.ClientSession, alias string) {
 	if missing.Type != "none" || missing.Length != nil || missing.TTLMS != -2 {
 		t.Fatal("missing key reported as present")
 	}
+	// TYPE is allowed for these names. A denied value read must hide even existence.
 	for _, tool := range []string{"describe_key", "read_key"} {
-		args := map[string]any{"connection": alias, "key": textKey("private:secret")}
-		result, err := session.CallTool(t.Context(), &sdk.CallToolParams{Name: tool, Arguments: args})
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw, err := json.Marshal(result.StructuredContent)
-		var body struct{ Error contracts.Failure }
-		if err != nil || !result.IsError || json.Unmarshal(raw, &body) != nil || body.Error.Code != contracts.PermissionDenied || bytes.Contains(raw, []byte("private:secret")) {
-			t.Fatalf("%s disclosed a key without a permitted value read: %.300s", tool, raw)
+		var denied contracts.Failure
+		for i, key := range []string{"private:secret", "private:missing"} {
+			args := map[string]any{"connection": alias, "key": textKey(key)}
+			result, err := session.CallTool(t.Context(), &sdk.CallToolParams{Name: tool, Arguments: args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(result.StructuredContent)
+			var body struct{ Error contracts.Failure }
+			if err != nil || !result.IsError || json.Unmarshal(raw, &body) != nil || body.Error.Code != contracts.PermissionDenied || bytes.Contains(raw, []byte(key)) {
+				t.Fatalf("%s disclosed %q without a permitted value read: %.300s", tool, key, raw)
+			}
+			if i == 0 {
+				denied = body.Error
+			} else if body.Error != denied {
+				t.Fatalf("%s distinguished inaccessible keys: %+v and %+v", tool, denied, body.Error)
+			}
 		}
 	}
 }
@@ -309,7 +314,12 @@ func verifyKeyValue(t *testing.T, key database.KeyBytes, typ string, length int6
 			}
 		}
 		want := []string{"a", "b", "c"}
-		if typ == "hash" || typ == "zset" {
+		switch typ {
+		case "hash":
+			want = []string{"=1", "b=2", "c=3"}
+		case "set":
+			want = []string{"", "b", "c"}
+		case "zset":
 			want = []string{"a=1", "b=2", "c=3"}
 		}
 		if typ == "set" || typ == "hash" {
