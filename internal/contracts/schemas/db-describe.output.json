@@ -3,7 +3,10 @@
   "type": "object",
   "properties": {
     "version": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "alias": {
       "type": "string",
@@ -158,36 +161,24 @@
     "keyspace": {
       "type": "object",
       "properties": {
-        "connection": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+        "scan_complete": {
+          "type": "boolean"
         },
-        "driver": {
-          "const": "redis"
+        "observed_keys": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
         },
-        "keys": {
+        "groups": {
           "type": "array",
+          "maxItems": 64,
           "items": {
             "type": "object",
             "properties": {
-              "key": {
-                "type": "object",
-                "properties": {
-                  "encoding": {
-                    "enum": [
-                      "utf8",
-                      "base64"
-                    ]
-                  },
-                  "value": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "encoding",
-                  "value"
-                ],
-                "additionalProperties": false
+              "pattern": {
+                "type": "string",
+                "minLength": 3,
+                "pattern": ":\\*$"
               },
               "type": {
                 "enum": [
@@ -198,28 +189,53 @@
                   "zset",
                   "stream"
                 ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              },
+              "examples": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "encoding": {
+                      "enum": [
+                        "utf8",
+                        "base64"
+                      ]
+                    },
+                    "value": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "truncated": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "encoding",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
-              "key",
-              "type"
+              "type",
+              "count"
             ],
             "additionalProperties": false
           }
-        },
-        "next_cursor": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "maxLength": 2048
         }
       },
       "required": [
-        "connection",
-        "driver",
-        "keys",
-        "next_cursor"
+        "observed_keys",
+        "scan_complete",
+        "groups"
       ],
       "additionalProperties": false
     }
@@ -268,6 +284,9 @@
           "database": {
             "pattern": "^(0|[1-9][0-9]{0,9})$",
             "description": "Redis logical database index in canonical decimal, from 0 to 2147483647."
+          },
+          "version": {
+            "const": 2
           }
         },
         "required": [
@@ -287,6 +306,11 @@
           "required": [
             "keyspace"
           ]
+        },
+        "properties": {
+          "version": {
+            "const": 1
+          }
         }
       }
     },

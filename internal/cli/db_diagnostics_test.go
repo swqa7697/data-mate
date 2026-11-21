@@ -257,8 +257,7 @@ func TestConnectionDiagnostics(t *testing.T) {
 	saveProfiles(t, root, invalidProfile)
 	runCommand("describe", &fixtureDatabase{}, 2, "good", "--json")
 	saveProfiles(t, root, original)
-	// A Redis description returns a bounded page of key names and types,
-	// including binary names. The terminal must escape untrusted names.
+	// A Redis description groups the observed readable keys by pattern and type.
 	redisProfiles := snapshot(t, root)
 	for i := range redisProfiles.Connections {
 		p := &redisProfiles.Connections[i]
@@ -267,13 +266,37 @@ func TestConnectionDiagnostics(t *testing.T) {
 		}
 	}
 	saveProfiles(t, root, redisProfiles)
-	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good", "--json")
+	grouped := &database.RedisKeyspace{ObservedKeys: 3, ScanComplete: true, Groups: []database.RedisKeyGroup{
+		{Pattern: "user:*", Type: "hash", Count: 2, Examples: []database.RedisKeyExample{
+			{KeyBytes: database.KeyBytes{Encoding: "utf8", Value: "user:42"}},
+		}}, {Type: "string", Count: 1},
+	}}
+	// Eight hashes without a common prefix must still give the operator names
+	// to inspect, including an empty key, terminal control bytes and binary data.
+	ungrouped := &database.RedisKeyspace{ObservedKeys: 8, Groups: []database.RedisKeyGroup{
+		{Type: "hash", Count: 8, Examples: []database.RedisKeyExample{
+			{KeyBytes: database.KeyBytes{Encoding: "utf8", Value: "orders\n\x1b[31m"}},
+			{KeyBytes: database.KeyBytes{Encoding: "utf8", Value: ""}},
+			{KeyBytes: database.KeyBytes{Encoding: "base64", Value: strings.Repeat("/wAA", 32)}, Truncated: true},
+		}},
+	}}
+	out, _ = runCommand("describe", &fixtureDatabase{keyspace: ungrouped}, 0, "good", "--json")
 	if contracts.Validate("db-describe.output", []byte(out)) != nil || strings.Contains(out, `"schemas"`) {
 		t.Fatal("Redis description JSON", out)
 	}
+	out, _ = runCommand("describe", &fixtureDatabase{keyspace: grouped}, 0, "good")
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "user:* hash (ungrouped) string") ||
+		!strings.Contains(out, "scan complete") || !strings.Contains(out, "matching user:*\n  \"user:42\"") {
+		t.Fatal("unexpected Redis pattern and type rows", out)
+	}
+	out, _ = runCommand("describe", &fixtureDatabase{keyspace: ungrouped}, 0, "good")
+	if !strings.Contains(out, `"orders\n\x1b[31m"`) || strings.Contains(out, "\x1b") ||
+		!strings.Contains(out, "\n  \"\"\n") || !strings.Contains(out, `base64 "`+strings.Repeat("/wAA", 32)+`" (truncated)`) {
+		t.Fatal("ungrouped Redis hashes lost safe or distinguishable key examples", out)
+	}
 	out, _ = runCommand("describe", &fixtureDatabase{}, 0, "good")
-	if !strings.Contains(out, `"line\n\x1b[31m"`) || !strings.Contains(out, `base64 "/wA="`) || !strings.Contains(out, "more-keys") {
-		t.Fatal("Redis key name or continuation lost in terminal output", out)
+	if !strings.Contains(out, "0 (partial scan)") {
+		t.Fatal("empty Redis sample lacks observation scope", out)
 	}
 	// A MongoDB description lists databases as schemas with collection kinds and
 	// per-collection index names; the authentication database is not shown.

@@ -79,12 +79,35 @@ type Stage struct {
 // return application schemas, including empty ones. MongoDB returns authorized
 // databases as schemas and omits Database. Redis returns a keyspace sample.
 type DatabaseDescription struct {
-	Version   int                 `json:"version"`
-	Alias     string              `json:"alias"`
-	Driver    string              `json:"driver"`
-	Database  string              `json:"database,omitempty"`
-	Schemas   []SchemaDescription `json:"schemas,omitzero"`
-	RedisKeys *KeyPage            `json:"keyspace,omitempty"`
+	Version  int                 `json:"version"`
+	Alias    string              `json:"alias"`
+	Driver   string              `json:"driver"`
+	Database string              `json:"database,omitempty"`
+	Schemas  []SchemaDescription `json:"schemas,omitzero"`
+	Keyspace *RedisKeyspace      `json:"keyspace,omitempty"`
+}
+
+// RedisKeyspace summarizes the distinct readable keys in one bounded scan.
+type RedisKeyspace struct {
+	ObservedKeys int             `json:"observed_keys"`
+	ScanComplete bool            `json:"scan_complete"`
+	Groups       []RedisKeyGroup `json:"groups"`
+}
+
+// RedisKeyGroup counts sampled keys of one type. Pattern is a list_keys glob
+// for an explicit leading tag or a shared colon-delimited namespace.
+type RedisKeyGroup struct {
+	Pattern  string            `json:"pattern,omitempty"`
+	Type     string            `json:"type"`
+	Count    int               `json:"count"`
+	Examples []RedisKeyExample `json:"examples,omitempty"`
+}
+
+// RedisKeyExample contains an authorized key name, or its leading bytes
+// when Truncated is true. Only complete examples identify an exact key.
+type RedisKeyExample struct {
+	KeyBytes
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // SchemaDescription groups catalog-visible application objects in a schema.

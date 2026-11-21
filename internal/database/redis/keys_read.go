@@ -21,8 +21,11 @@ func (d *Driver) DescribeKey(ctx context.Context, a database.Access, req databas
 	}
 	out := database.KeyDescription{Connection: a.Profile.Alias, Driver: a.Profile.Driver, Key: keyBytes(key), TTLMS: -2}
 	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, s *session) error {
-		kind, err := keyKind(ctx, s, a.Profile.Connection.Username, key, false)
+		kind, err := keyKind(ctx, s, key)
 		if err != nil {
+			return err
+		}
+		if err := checkKeyRead(ctx, s, kind, key); err != nil {
 			return err
 		}
 		out.Type = kind
@@ -30,7 +33,7 @@ func (d *Driver) DescribeKey(ctx context.Context, a database.Access, req databas
 			return nil
 		}
 		lengths := map[string]string{"string": "STRLEN", "list": "LLEN", "set": "SCARD", "hash": "HLEN", "zset": "ZCARD", "stream": "XLEN"}
-		v, err := s.command(ctx, lengths[kind], key)
+		v, err := s.keyCommand(ctx, lengths[kind], key)
 		if err != nil {
 			return err
 		}
@@ -38,7 +41,7 @@ func (d *Driver) DescribeKey(ctx context.Context, a database.Access, req databas
 		if !ok || length < 0 {
 			return badKeyReply()
 		}
-		v, err = s.command(ctx, "PTTL", key)
+		v, err = s.keyCommand(ctx, "PTTL", key)
 		if err != nil {
 			return err
 		}
@@ -98,15 +101,20 @@ func (d *Driver) ReadKey(ctx context.Context, a database.Access, req database.Ke
 	}
 	out := database.KeyReadPage{Connection: a.Profile.Alias, Driver: a.Profile.Driver, Key: keyBytes(key), Items: []any{}}
 	err = d.runNormalized(ctx, a, rev, func(ctx context.Context, s *session) error {
-		kind, err := keyKind(ctx, s, a.Profile.Connection.Username, key, false)
+		kind, err := keyKind(ctx, s, key)
 		if err != nil {
 			return err
 		}
 		out.Type = kind
-		if kind == "none" {
-			return nil
-		}
-		if req.Cursor != "" && pos.Kind != kind {
+		// The page read itself checks access. Probe only when returning a
+		// missing key or a changed type without executing that read.
+		if kind == "none" || (req.Cursor != "" && pos.Kind != kind) {
+			if err := checkKeyRead(ctx, s, kind, key); err != nil {
+				return err
+			}
+			if kind == "none" {
+				return nil
+			}
 			return database.Fail(contracts.StaleCursor, "Redis key type changed during pagination", false)
 		}
 		pos.Kind = kind
@@ -155,7 +163,7 @@ func (d *Driver) readPage(ctx context.Context, s *session, key string, size int,
 	default:
 		return nil, false, inaccessibleKey()
 	}
-	reply, err := s.command(ctx, args...)
+	reply, err := s.keyCommand(ctx, args...)
 	if err != nil {
 		return nil, false, err
 	}

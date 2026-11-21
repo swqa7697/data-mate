@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"unicode"
 
 	"github.com/rivo/uniseg"
@@ -51,17 +52,50 @@ func renderDescription(description *database.DatabaseDescription, width int, col
 		scope, unit, units = "driver="+displayName(description.Driver), "Database", "databases"
 	}
 	fmt.Fprintf(&out, "%s — %s\n", displayName(description.Alias), scope)
-	if page := description.RedisKeys; page != nil {
-		fmt.Fprintf(&out, "\nRedis keys on this page: %d\n", len(page.Keys))
-		for _, item := range page.Keys {
-			name := strconv.Quote(item.Key.Value)
-			if item.Key.Encoding == "base64" {
-				name = "base64 " + name
-			}
-			fmt.Fprintf(&out, "  %s  %s\n", name, displayName(item.Type))
+	if sample := description.Keyspace; sample != nil {
+		status := "scan complete"
+		if !sample.ScanComplete {
+			status = "partial scan"
 		}
-		if page.NextCursor != nil {
-			fmt.Fprintf(&out, "\nContinue with list_keys using cursor %q.\n", *page.NextCursor)
+		fmt.Fprintf(&out, "\nReadable Redis keys observed: %d (%s)\n", sample.ObservedKeys, status)
+		if !sample.ScanComplete {
+			out.WriteString("Use the MCP tool list_keys to browse further.\n")
+		}
+		if sample.ObservedKeys == 0 {
+			return out.String()
+		}
+		out.WriteByte('\n')
+		table := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "Pattern\tType")
+		for _, group := range sample.Groups {
+			pattern := displayName(group.Pattern)
+			if pattern == "" {
+				pattern = "(ungrouped)"
+			}
+			fmt.Fprintf(table, "%s\t%s\n", pattern, displayName(group.Type))
+		}
+		table.Flush()
+		for _, group := range sample.Groups {
+			if len(group.Examples) == 0 {
+				continue
+			}
+			fmt.Fprintf(&out, "\nExample %s keys", displayName(group.Type))
+			if group.Pattern != "" {
+				fmt.Fprintf(&out, " matching %s", displayName(group.Pattern))
+			} else {
+				out.WriteString(" (ungrouped)")
+			}
+			out.WriteByte('\n')
+			for _, example := range group.Examples {
+				name := strconv.Quote(example.Value)
+				if example.Encoding == "base64" {
+					name = "base64 " + name
+				}
+				if example.Truncated {
+					name += " (truncated)"
+				}
+				fmt.Fprintf(&out, "  %s\n", name)
+			}
 		}
 		return out.String()
 	}

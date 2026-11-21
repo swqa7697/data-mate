@@ -47,7 +47,7 @@ Data Mate lets coding agents inspect relational databases with SQL, explore Redi
 
 ## Get started
 
-Data Mate runs on **macOS 15+ on Apple Silicon** and **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+). Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Use a dedicated, operator-managed read-only database account with access only to the data you intend to share; see [Read-only accounts](#read-only-accounts).
+Data Mate runs on **macOS 15+ on Apple Silicon** and **Linux x86_64 with glibc 2.39+** (Ubuntu 24.04+). Install [Codex](https://openai.com/codex/) or [Claude Code](https://claude.com/product/claude-code) to use its MCP tools. Choose an account with access only to the data you intend to share. See [Read-only accounts](#read-only-accounts) for each driver’s requirements.
 
 Install the latest stable release:
 
@@ -63,7 +63,7 @@ data-mate db test analytics
 data-mate mcp start
 ```
 
-`db add` opens a form for the driver (`postgres`, `mysql`, `mariadb`, `redis`, or `mongodb`), connection details, and a hidden password. The port defaults to the driver's standard port: 5432 for PostgreSQL, 3306 for MySQL and MariaDB, 6379 for Redis, or 27017 for MongoDB. Replace `analytics` with the alias you choose. `db test` checks connectivity and read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
+`db add` opens a form for the driver (`postgres`, `mysql`, `mariadb`, `redis`, or `mongodb`), connection details, and a hidden password. The port defaults to the driver's standard port: 5432 for PostgreSQL, 3306 for MySQL and MariaDB, 6379 for Redis, or 27017 for MongoDB. Replace `analytics` with the alias you choose. `db test` checks connectivity and authentication. For Redis it verifies the server version, standalone mode and selected database. For SQL and MongoDB it also checks read-only account privileges. Open a new Codex or Claude Code session after `mcp start` so it can load the registration. You can then ask your agent to explore the database through Data Mate.
 
 ## Manage connections
 
@@ -71,7 +71,7 @@ data-mate mcp start
 | -------------------------------- | ------------------------------------------------------------------------- |
 | `data-mate db add`               | Save a database connection.                          |
 | `data-mate db list`              | View aliases and nonsecret settings.                                      |
-| `data-mate db describe [alias]`  | Describe a relational or MongoDB catalog, or sample readable Redis key names and types. |
+| `data-mate db describe [alias]`  | Describe a relational or MongoDB catalog, or summarize Redis key patterns and types. |
 | `data-mate db test [alias]`      | Test one connection, or all connections if omitted.                       |
 | `data-mate db edit [alias]`      | Update settings or credentials.                                           |
 | `data-mate db remove [alias]`    | Remove a connection and its saved credentials.                            |
@@ -80,7 +80,13 @@ data-mate mcp start
 | `data-mate mcp status`           | Check service and agent registration status.                              |
 | `data-mate mcp stop`             | Stop agent access.                                                        |
 
-Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively.
+Inspect one saved database with `data-mate db describe analytics`, or omit the alias to choose a profile interactively. In a terminal, the alias shows a loading indicator while the command fetches the description.
+
+For Redis, `db describe` follows the scan cursor in the selected logical database for up to eight batches. It checks at most 64 candidate keys, or fewer if the profile row limit is lower. A key counts once after the account passes a read check for its type. The terminal marks a partial scan when either limit leaves part of the keyspace unchecked. A partial scan can miss types or yield an empty sample. To browse the database, use the MCP tool `list_keys` with an optional `pattern`. Follow `next_cursor` until it is null, even after an empty page.
+
+The terminal shows the sample total above the pattern and type columns, then up to three example names per group. A leading tag such as `{orders.prod:sync}:` forms a namespace even for one observed key. Ordinary first segments such as `orders:` form a namespace when they repeat. Other keys are grouped by type. Namespaces support UTF-8 with no fixed length limit. Reported patterns escape Redis wildcard characters so you can pass them directly to `list_keys`. Long example names show the first 96 bytes or fewer and carry a truncation marker.
+
+Redis description JSON uses version 2. The `keyspace` object contains `observed_keys`, `scan_complete` and `groups`. A complete scan has examined the entire final batch and reached cursor zero. Redis can change during a scan, so the counts describe the readable keys observed during that call. Each group has a `type`, a sample `count` and `examples`. Namespace groups also carry a `pattern`. Pass the `encoding` and `value` of a complete example to `describe_key`. An example with `truncated: true` previews a longer name.
 
 Run `data-mate db add --help` for connection options. Passwords go through the form or standard input, never command-line values.
 
@@ -94,7 +100,7 @@ For MongoDB, enter the username and the database where the user was created, usu
 
 ## Read-only accounts
 
-Data Mate checks the account's privileges when you save a connection, on every `db test`, and before a new connection pool is used. After 30 minutes, the next pooled operation must pass a fresh check. Data Mate rejects accounts that can write data, change definitions, manage accounts or roles, or write files. The server's own privileges decide what agents can see and query, so grant only what you intend to share.
+PostgreSQL, MySQL, MariaDB and MongoDB require a dedicated read-only account. For these drivers, Data Mate checks the account's privileges when you save a connection, on every `db test`, and before a new connection pool is used. After 30 minutes, the next pooled operation must pass a fresh check. Data Mate rejects accounts that can write data, change definitions, manage accounts or roles, or write files. The server's own privileges decide what agents can see and query, so grant only what you intend to share.
 
 For PostgreSQL, the audit permits effective membership in `pg_read_all_data`, `pg_monitor`, `pg_read_all_settings`, `pg_read_all_stats`, `pg_stat_scan_tables`, and `pg_use_reserved_connections`. Other predefined roles, including `pg_signal_backend`, fail the audit. A typical reader needs only ordinary grants.
 
@@ -116,13 +122,13 @@ For MySQL and MariaDB, read-only privileges include `SELECT`, `SHOW VIEW`, `SHOW
 
 ### Redis reader
 
-Configure a dedicated ACL user on the Redis server. This example ACL file entry enables all three key tools for keys matching `orders:*`. Replace `<sha256-of-password>` with the 64 hexadecimal digits of the reader’s password hash. Enter the original password in the Data Mate form.
+You can use an existing Redis account, including one with write privileges or one on a managed service that blocks ACL inspection. Data Mate’s Redis driver sends only commands for connection setup, key discovery, metadata and value reads. Redis enforces the account’s permissions on each command. Data Mate checks that the account can read a key’s value before showing its name or metadata.
+
+If you manage Redis ACLs, this optional ACL file entry enables all three key tools for keys matching `orders:*`. Replace `<sha256-of-password>` with the 64 hexadecimal digits of the reader’s password hash. Enter the original password in the Data Mate form.
 
 ```text
-user data_mate_reader on #<sha256-of-password> %R~orders:* -@all +hello +select +acl|whoami +acl|getuser +acl|cat +acl|dryrun +scan +type +pttl +strlen +hlen +llen +scard +zcard +xlen +getrange +hscan +lrange +sscan +zrange +xrange
+user data_mate_reader on #<sha256-of-password> %R~orders:* -@all +hello +select +scan +type +pttl +strlen +hlen +llen +scard +zcard +xlen +getrange +hscan +lrange +sscan +zrange +xrange
 ```
-
-Data Mate inspects the account and all of its ACL selectors. The `ACL GETUSER` grant can reveal password hashes for other accounts to anyone holding the reader credential. Data Mate uses this grant internally. The MCP tools expose only authorized keys and values. A Redis provider must permit ACL inspection for admission to succeed. [Redis ACL GETUSER](https://redis.io/docs/latest/commands/acl-getuser/)
 
 ### MongoDB reader
 

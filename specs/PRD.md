@@ -18,7 +18,7 @@ Data Mate is a lightweight CLI tool written in Go, aiming to elegantly setup a l
 - Abstraction: Well-designed abstraction code structure, for better code quality and easier maintenance
   - Adapter Layer: agent supports are abstracted
   - Driver Layer: DB supports are abstracted
-- Read Only: The MCP service provides only read-only tools and permissions to agents, and also enforces read-only DB accounts
+- Read Only: The MCP service provides read-only tools. Relational databases and MongoDB require read-only accounts. The Redis driver enforces a fixed command allowlist and accepts accounts with write privileges, including on managed services that restrict ACL inspection.
 - Database Access: The database's own privileges determine data access, including newly created objects and system schemas
 - Database Context: Agents can inspect catalog-visible routines and their source, enum and other type details (including arrays and table-row types), sequence configuration, and table/view definitions including defaults, indexes, constraints, triggers, and row-security policies. Inspect definitions without invoking routines or evaluating stored expressions
 - Simple Management: Users can simply add/remove/modify a DB connection
@@ -75,7 +75,7 @@ Pretty and colored CLI experience. Scrathed commands design below.
   - `db import <csv-file>`: Add, skip or update multiple DB connections from a CSV file; secrets are optional in the file and missing ones are entered in the terminal
 - DB - One shot
   - `db list` / `db ls`: List all available DB connections
-  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a relational connection, collections, views and indexes under each MongoDB database, or sample visible Redis keys and types
+  - `db describe [c-alias(optional)]`: Print enums, tables, views, sequences, indexes and functions under each schema of a relational connection, collections, views and indexes under each MongoDB database, or summarize a bounded sample of readable Redis keys by type, explicit leading tag or repeated naming prefix, with example names for each group and an indication when the scan is partial
   - `db test [c-alias(optional)]`: Test connections; test all connections by default, or provide a c-alias to check one connection
   - `db export <csv-file>`: Export all DB connections to a CSV file without secrets; a secret a connection does not use is marked explicitly as `<none>`
 - MCP - One shot

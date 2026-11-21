@@ -2,7 +2,9 @@ package redis
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +22,7 @@ import (
 )
 
 // A synthetic peer can send unsupported handshakes, incomplete frames, and
-// oversized lengths that the supported Docker images cannot produce.
+// oversized lengths, and scripted SCAN batches that a live fixture cannot guarantee.
 func TestRedisConnectionBoundary(t *testing.T) {
 	const secret = "synthetic-private"
 	simple := func(s string) string { return "+" + s + "\r\n" }
@@ -28,38 +30,59 @@ func TestRedisConnectionBoundary(t *testing.T) {
 	hello := func(version, mode string) string {
 		return array(simple("version"), simple(version), simple("mode"), simple(mode), simple("server"), simple("redis"), simple("proto"), ":2\r\n")
 	}
-	selector := func(rules string) []string {
-		return []string{simple("commands"), simple(rules), simple("keys"), simple("%R~visible:*"), simple("channels"), simple("")}
-	}
-	acl := func(rules string, selectors ...string) string {
-		items := selector(rules)
-		return array(append(items, simple("flags"), array(simple("on"), simple("nopass")), simple("passwords"), array(), simple("selectors"), array(selectors...))...)
-	}
 	type exchange struct {
 		request []any
 		reply   string // empty means cancel while the peer holds the response
 	}
 	auth := func(reply string) exchange { return exchange{[]any{"HELLO", "2", "AUTH", "reader", secret}, reply} }
-	identity := exchange{[]any{"ACL", "WHOAMI"}, simple("reader")}
-	selectDB := exchange{[]any{"SELECT", "3"}, simple("OK")}
-	grants := func(reply string) exchange { return exchange{[]any{"ACL", "GETUSER", "reader"}, reply} }
-	fresh := func(rest ...exchange) []exchange {
-		return append([]exchange{auth(hello("7.0.0", "standalone")), identity, selectDB}, rest...)
+	handshake := auth(hello("7.0.0", "standalone"))
+	longText := strings.Repeat("a", 95) + "茶"
+	longBinary := strings.Repeat("b", 96) + "\xff"
+	const taggedCleanup = "{app:sync}:scheduling:record:cleanup:6789"
+	const taggedScan = "{app:sync}:scheduling:record:scan:runs:29"
+	const singletonTag = "{业务.team.with.a.long.namespace.*:synchronization}"
+	const singletonKey = singletonTag + ":epoch"
+	hashProbe := array(simple("0"), array())
+	// Redis can keep returning nonterminal cursors with no candidate keys.
+	emptyPages := make([]exchange, 8)
+	for i := range emptyPages {
+		emptyPages[i] = exchange{[]any{"SCAN", strconv.Itoa(i), "COUNT", "7"}, array(simple(strconv.Itoa(i+1)), array())}
 	}
 	for _, tt := range []struct {
 		name, stage string
 		code        contracts.Code
 		script      []exchange
 	}{
-		{"read-only passwordless account with a compact category", "read_only", "", fresh(grants(acl("-@all +@string -set")), exchange{[]any{"ACL", "CAT", "string"}, array(simple("get"), simple("set"))})},
-		{"write in a separate selector", "read_only", contracts.ReadOnlyViolation, fresh(grants(acl("-@all +get", array(selector("-@all +set")...))))},
-		{"unbounded future grants", "read_only", contracts.ReadOnlyViolation, fresh(grants(acl("+@all -@write")))},
-		{"expanded category includes an admin subcommand", "read_only", contracts.ReadOnlyViolation, fresh(grants(acl("-@all +@admin -acl|whoami")), exchange{[]any{"ACL", "CAT", "admin"}, array(simple("acl|setuser"), simple("acl|whoami"))})},
+		{"managed account without ACL inspection", "read_only", "", []exchange{handshake, {[]any{"SELECT", "3"}, simple("OK")}}},
+		{"database selection denied", "read_only", contracts.PermissionDenied, []exchange{handshake, {[]any{"SELECT", "3"}, "-NOPERM " + secret + "\r\n"}}},
 		{"bad credentials redact upstream text", "authentication", contracts.ConnectFailed, []exchange{auth("-WRONGPASS " + secret + "\r\n")}},
-		{"identity mismatch", "authentication", contracts.ConnectFailed, []exchange{auth(hello("7.0.0", "standalone")), {[]any{"ACL", "WHOAMI"}, simple("other")}}},
-		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone")), identity}},
-		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster")), identity}},
-		{"sentinel mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("7.0.4", "sentinel")), identity}},
+		{"bounded sample despite duplicates, denied and surplus keys", "describe", "", append([]exchange{
+			handshake, {[]any{"SELECT", "3"}, simple("OK")},
+			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("9"), array(simple("s:1")))},
+			{[]any{"TYPE", "s:1"}, simple("string")}, {[]any{"GETRANGE", "s:1", "1", "0"}, "$0\r\n\r\n"},
+			{[]any{"SCAN", "9", "COUNT", "6"}, array(simple("15"), array())},
+			// A duplicate, a denied key and an oversized final page consume the
+			// remaining budget. A zero cursor alone cannot signal completion.
+			{[]any{"SCAN", "15", "COUNT", "6"}, array(simple("0"), array(simple("s:1"), simple("other:x"), simple("s:2"), simple("other:y"), simple("s:\x01"), simple("s:\xff"), simple("over:limit")))},
+			{[]any{"TYPE", "other:x"}, simple("string")}, {[]any{"GETRANGE", "other:x", "1", "0"}, "-NOPERM\r\n"},
+			{[]any{"TYPE", "s:2"}, simple("hash")}, {[]any{"HSCAN", "s:2", "0", "MATCH", "[]", "COUNT", "1"}, array(simple("0"), array())},
+			{[]any{"TYPE", "other:y"}, simple("zset")}, {[]any{"ZRANGE", "other:y", "1", "0", "WITHSCORES"}, array()},
+			{[]any{"TYPE", "s:\x01"}, simple("string")}, {[]any{"GETRANGE", "s:\x01", "1", "0"}, "$0\r\n\r\n"},
+			{[]any{"TYPE", "s:\xff"}, simple("string")}, {[]any{"GETRANGE", "s:\xff", "1", "0"}, "$0\r\n\r\n"},
+			// Explicit tags identify a namespace even for a single key. Other
+			// hashes in the same batch still need bounded, readable examples.
+			{[]any{"SCAN", "0", "COUNT", "7"}, array(simple("0"), array(simple(longText), simple(longBinary), simple("active"), simple("pending"), simple(taggedCleanup), simple(taggedScan), simple(singletonKey)))},
+			{[]any{"TYPE", longText}, simple("hash")}, {[]any{"HSCAN", longText, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", longBinary}, simple("hash")}, {[]any{"HSCAN", longBinary, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", "active"}, simple("hash")}, {[]any{"HSCAN", "active", "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", "pending"}, simple("hash")}, {[]any{"HSCAN", "pending", "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", taggedCleanup}, simple("hash")}, {[]any{"HSCAN", taggedCleanup, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", taggedScan}, simple("hash")}, {[]any{"HSCAN", taggedScan, "0", "MATCH", "[]", "COUNT", "1"}, hashProbe},
+			{[]any{"TYPE", singletonKey}, simple("string")}, {[]any{"GETRANGE", singletonKey, "1", "0"}, "$0\r\n\r\n"},
+		}, emptyPages...)},
+		{"old server", "version", contracts.QueryUnsupported, []exchange{auth(hello("6.2.1", "standalone"))}},
+		{"cluster mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("8.10.1", "cluster"))}},
+		{"sentinel mode", "version", contracts.QueryUnsupported, []exchange{auth(hello("7.0.4", "sentinel"))}},
 		{"oversized bulk length", "authentication", contracts.ResourceLimit, []exchange{auth("$9000000\r\n")}},
 		{"oversized aggregate length", "authentication", contracts.ResourceLimit, []exchange{auth("*9000000\r\n")}},
 		{"cancellation during authentication", "authentication", contracts.Cancelled, []exchange{auth("")}},
@@ -114,6 +137,57 @@ func TestRedisConnectionBoundary(t *testing.T) {
 			defer r.Close()
 			port := ln.Addr().(*net.TCPAddr).Port
 			p := config.Profile{Driver: "redis", Alias: "fixture", ID: "12345678-1234-1234-1234-123456789abc", Connection: config.Connection{Host: "127.0.0.1", Port: port, Username: "reader", Database: "3"}, Transport: config.Transport{TLS: config.TLS{Mode: "disabled"}}}
+			if tt.stage == "describe" {
+				limits := config.DefaultLimits()
+				limits.MaxRows = 7
+				p.Limits = &limits
+				driver, access := New(r), database.NewAccess(p, secret)
+				out, err := driver.DescribeDatabase(ctx, access)
+				want := &database.RedisKeyspace{ObservedKeys: 5, Groups: []database.RedisKeyGroup{
+					{Pattern: "s:*", Type: "hash", Count: 1, Examples: []database.RedisKeyExample{{KeyBytes: keyBytes("s:2")}}},
+					{Pattern: "s:*", Type: "string", Count: 3, Examples: []database.RedisKeyExample{
+						{KeyBytes: keyBytes("s:1")}, {KeyBytes: keyBytes("s:\x01")}, {KeyBytes: database.KeyBytes{Value: "czr/", Encoding: "base64"}},
+					}},
+					{Type: "zset", Count: 1, Examples: []database.RedisKeyExample{
+						{KeyBytes: database.KeyBytes{Value: "other:y", Encoding: "utf8"}},
+					}},
+				}}
+				if err != nil || !reflect.DeepEqual(out.Keyspace, want) {
+					t.Fatalf("unexpected readable sample: %+v, error %v", out.Keyspace, err)
+				}
+				out, err = driver.DescribeDatabase(ctx, access)
+				want = &database.RedisKeyspace{ObservedKeys: 7, ScanComplete: true, Groups: []database.RedisKeyGroup{
+					{Pattern: "{app:sync}:*", Type: "hash", Count: 2, Examples: []database.RedisKeyExample{
+						{KeyBytes: keyBytes(taggedCleanup)}, {KeyBytes: keyBytes(taggedScan)},
+					}},
+					{Pattern: `{业务.team.with.a.long.namespace.\*:synchronization}:*`, Type: "string", Count: 1, Examples: []database.RedisKeyExample{{KeyBytes: keyBytes(singletonKey)}}},
+					{Type: "hash", Count: 4, Examples: []database.RedisKeyExample{
+						{KeyBytes: database.KeyBytes{Value: strings.Repeat("a", 95), Encoding: "utf8"}, Truncated: true},
+						{KeyBytes: database.KeyBytes{Value: strings.Repeat("YmJi", 32), Encoding: "base64"}, Truncated: true},
+						{KeyBytes: database.KeyBytes{Value: "active", Encoding: "utf8"}},
+					}},
+				}}
+				if err != nil || !reflect.DeepEqual(out.Keyspace, want) {
+					t.Fatalf("unexpected tagged and ungrouped hash sample: %+v, error %v", out.Keyspace, err)
+				}
+				raw, err := json.Marshal(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := contracts.Validate("db-describe.output", raw); err != nil {
+					t.Fatal(err)
+				}
+				out, err = driver.DescribeDatabase(ctx, access)
+				want = &database.RedisKeyspace{Groups: []database.RedisKeyGroup{}}
+				if err != nil || !reflect.DeepEqual(out.Keyspace, want) {
+					t.Fatalf("unexpected sample after eight empty nonterminal pages: %+v, error %v", out.Keyspace, err)
+				}
+				r.Close()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
 			out, err := New(r).Test(ctx, database.NewAccess(p, secret))
 			if out.Stage != tt.stage {
 				t.Fatalf("stage %q, error %v", out.Stage, err)
@@ -131,10 +205,32 @@ func TestRedisConnectionBoundary(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("wire guard rejects commands before buffering and frames binary keys", func(t *testing.T) {
+		var wire bytes.Buffer
+		w := bufio.NewWriter(&wire)
+		for _, args := range [][]string{
+			nil, {"SET", "k", "v"}, {"DEL", "k"}, {"EVAL", "return 1", "0"},
+			{"ACL", "GETUSER", "reader"}, {"FUTURE.COMMAND"}, {"HELLO", "2", "SETNAME", "name"},
+		} {
+			var safe *database.Error
+			if err := writeCommand(w, args); !errors.As(err, &safe) || safe.Code != contracts.ReadOnlyViolation || w.Buffered() != 0 || wire.Len() != 0 {
+				t.Fatalf("denied command %v buffered %d bytes, wrote %d: %v", args, w.Buffered(), wire.Len(), err)
+			}
+		}
+		const key = "k\r\n*2\r\n$3\r\nDEL\r\n$1\r\nx\r\n\x00"
+		if err := writeCommand(w, []string{"GETRANGE", key, "0", "1"}); err != nil {
+			t.Fatal(err)
+		}
+		r := responseReader{r: bufio.NewReader(&wire), remaining: maxReplyBytes}
+		got, err := r.value(0)
+		if err != nil || !reflect.DeepEqual(got, []any{"GETRANGE", key, "0", "1"}) || r.r.Buffered() != 0 || wire.Len() != 0 {
+			t.Fatalf("binary key escaped the read command: %v, %v", got, err)
+		}
+	})
 }
 
-// Approval expires as soon as the final physical connection disconnects,
-// even when no operation has checked the connection out since its last use.
+// Detect disconnects even when no operation has checked the session out since its last use.
 func TestIdleRedisSessionObservesDisconnect(t *testing.T) {
 	conn, peer := net.Pipe()
 	s := newSession(conn, conn)

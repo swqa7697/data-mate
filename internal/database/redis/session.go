@@ -31,8 +31,7 @@ type session struct {
 func newSession(raw, conn net.Conn) *session {
 	input, output := io.Pipe()
 	s := &session{raw: raw, input: input, reader: bufio.NewReader(input), writer: bufio.NewWriter(conn), done: make(chan struct{})}
-	// Observe EOF even while the session is idle. Otherwise a disconnected
-	// final session could retain the pool's cached account approval.
+	// Observe EOF even while the session is idle so the pool can discard it.
 	go func() {
 		_, err := io.Copy(output, conn)
 		_ = output.CloseWithError(err)
@@ -75,6 +74,9 @@ func (s *session) command(ctx context.Context, args ...string) (any, error) {
 		}
 	}()
 	err := writeCommand(s.writer, args)
+	if err == errCommandDenied {
+		return nil, err
+	}
 	var result any
 	if err == nil {
 		r := responseReader{r: s.reader, remaining: maxReplyBytes}
@@ -90,8 +92,8 @@ func (s *session) command(ctx context.Context, args ...string) (any, error) {
 		}
 		return nil, database.Fail(contracts.ConnectFailed, "Redis connection or protocol failed", true)
 	}
-	if failed, ok := result.(replyError); ok {
-		return nil, failed.safe()
+	if failed, ok := result.(error); ok {
+		return nil, failed
 	}
 	return result, nil
 }
@@ -159,13 +161,6 @@ func connect(ctx context.Context, a database.Access, trace *database.Trace) (*se
 	if err != nil {
 		return nil, err
 	}
-	user, err := s.command(setup, "ACL", "WHOAMI")
-	if err != nil {
-		return nil, err
-	}
-	if user != p.Username {
-		return nil, database.Fail(contracts.ConnectFailed, "Redis authenticated identity does not match the profile", false)
-	}
 	trace.Pass("authentication")
 	trace.Start("version")
 	info, ok := fields(hello)
@@ -179,13 +174,6 @@ func connect(ctx context.Context, a database.Access, trace *database.Trace) (*se
 	}
 	trace.Pass("version")
 	trace.Start("read_only")
-	selected, err := s.command(setup, "SELECT", p.Database)
-	if err != nil {
-		return nil, err
-	}
-	if selected != "OK" {
-		return nil, database.Fail(contracts.ConnectFailed, "Redis database selection failed", false)
-	}
 	success = true
 	return s, nil
 }

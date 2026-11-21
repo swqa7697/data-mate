@@ -54,15 +54,23 @@ func (d *Driver) Validate(a database.Access) error {
 
 func checkout(ctx context.Context, r *pool.Registry, a database.Access, rev config.Revision, trace *database.Trace) (*session, context.Context, func(bool), error) {
 	open := func(ctx context.Context) (*session, error) { return connect(ctx, a, trace) }
-	approve := func(ctx context.Context, s *session) error {
+	selectDatabase := func(ctx context.Context, s *session) error {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return auditAccount(ctx, s, a.Profile.Connection.Username)
+		reply, err := s.command(ctx, "SELECT", a.Profile.Connection.Database)
+		if err != nil {
+			return err
+		}
+		if reply != "OK" {
+			return database.Fail(contracts.ConnectFailed, "Redis database selection failed", false)
+		}
+		return nil
 	}
-	return pool.Checkout(ctx, r, a, rev, open, approve)
+	// Logical database selection is local to each physical connection.
+	return pool.CheckoutConnection(ctx, r, a, rev, open, selectDatabase)
 }
 
-// Test uses isolated physical sessions and performs a fresh audit.
+// Test authenticates and selects the configured database on a fresh session.
 func (d *Driver) Test(ctx context.Context, a database.Access) (database.Readiness, error) {
 	return pool.Diagnose(ctx, d.pools, a, func(ctx context.Context, r *pool.Registry, a database.Access, rev config.Revision, trace *database.Trace) (func(bool), error) {
 		if err := checkProfile(a.Profile); err != nil {

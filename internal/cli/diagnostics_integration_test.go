@@ -76,7 +76,7 @@ func liveDiagnostics(t *testing.T, path string) {
 			secret = "synthetic-wrong-password"
 		}
 		if alias == "extra-grants" && fixture.Driver == "redis" {
-			user = "unsafe" // Grants a write capability through an ACL selector.
+			user = "writer" // Can write private keys and cannot inspect ACLs.
 		} else if alias == "extra-grants" {
 			user = admin
 			raw, err = os.ReadFile(filepath.Join(fixture.Root, "admin-password"))
@@ -107,9 +107,14 @@ func liveDiagnostics(t *testing.T, path string) {
 	t.Setenv("DATA_MATE_CLI_REAL_DRIVER", "1")
 	before := files(t, root)
 	command(t, root, keys, "synthetic-wrong-password\n", 1, "edit", "good", "--password-stdin", "--yes")
-	command(t, root, keys, "", 1, "edit", "extra-grants", "--yes")
+	if fixture.Driver != "redis" {
+		command(t, root, keys, "", 1, "edit", "extra-grants", "--yes")
+	}
 	if !reflect.DeepEqual(before, files(t, root)) {
 		t.Fatal("failed live validation published edit")
+	}
+	if fixture.Driver == "redis" {
+		command(t, root, keys, "", 0, "edit", "extra-grants", "--yes")
 	}
 	command(t, root, keys, "", 0, "edit", "good", "--yes")
 	out, _ := command(t, root, keys, "", 1, "test", "--json")
@@ -124,7 +129,8 @@ func liveDiagnostics(t *testing.T, path string) {
 	}
 	for i, want := range []string{"authentication", "dial", "read_only", "read_only"} {
 		r := report.Results[i]
-		if r.Stage != want || r.OK != (i == 3) {
+		wantOK := r.Alias == "good" || (r.Alias == "extra-grants" && fixture.Driver == "redis")
+		if r.Stage != want || r.OK != wantOK {
 			t.Fatalf("stage %d: %+v", i, r)
 		}
 	}
@@ -140,17 +146,14 @@ func liveDiagnostics(t *testing.T, path string) {
 		t.Fatal("live description contract or redaction")
 	}
 	if fixture.Driver == "redis" {
-		if description.RedisKeys == nil || description.Database != "1" || strings.Contains(out, "private:secret") || strings.Contains(out, "view:wrongdatabase") {
-			t.Fatal("description returned keys outside the selected database or ACL")
+		sample := description.Keyspace
+		if description.Database != "1" || sample == nil || sample.ObservedKeys == 0 || sample.ObservedKeys > 7 {
+			t.Fatal("unexpected sample from the seven readable fixture keys", out)
 		}
-		found := false
-		for _, item := range description.RedisKeys.Keys {
-			if item.Key.Value == "view:hash" && item.Type == "hash" {
-				found = true
+		for _, group := range sample.Groups {
+			if group.Pattern != "" && group.Pattern != "view:*" {
+				t.Fatal("description exposed a pattern outside the readable fixture", out)
 			}
-		}
-		if !found {
-			t.Fatal("description omitted readable Redis hash")
 		}
 	} else {
 		found := false
